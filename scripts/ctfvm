@@ -451,6 +451,12 @@ sync_codex_auth() {
     gcloud compute ssh "${INSTANCE}" --zone "${ZONE}" --project "${PROJECT}" --command "sudo -u ctf bash -lc 'mkdir -p /home/ctf/run && tar -C /home/ctf/run -xf - && chmod -R go-rwx /home/ctf/run/.codex'"
 }
 
+install_managed_codex_config() {
+  local remote_upload_dir="$1"
+  echo "Installing managed Codex agent-role config in /home/ctf/run/.codex."
+  gcloud_ssh "sudo mkdir -p /home/ctf/run/.codex /home/ctf/run/.codex/roles && if [ -f ${remote_upload_dir}/codex-config/config.toml ]; then sudo cp ${remote_upload_dir}/codex-config/config.toml /home/ctf/run/.codex/config.toml; fi && if [ -d ${remote_upload_dir}/codex-config/roles ]; then sudo rm -rf /home/ctf/run/.codex/roles && sudo mkdir -p /home/ctf/run/.codex/roles && sudo cp -R ${remote_upload_dir}/codex-config/roles/. /home/ctf/run/.codex/roles/; fi && sudo chown -R ctf:ctf /home/ctf/run/.codex && sudo chmod 700 /home/ctf/run/.codex && if [ -f /home/ctf/run/.codex/config.toml ]; then sudo chmod 600 /home/ctf/run/.codex/config.toml; fi && if [ -d /home/ctf/run/.codex/roles ]; then sudo find /home/ctf/run/.codex/roles -type f -name '*.toml' -exec chmod 600 {} +; fi"
+}
+
 build_remote_toolbox() {
   local variant="${1:-lean}"
   echo "Building toolbox image on VM (${variant} variant; first run may take several minutes)."
@@ -626,7 +632,7 @@ cmd_start() {
     exit 1
   fi
 
-  if [[ ! -f "${REPO_ROOT}/vm/startup.sh" || ! -f "${REPO_ROOT}/runner/supervisor.sh" || ! -f "${REPO_ROOT}/runner/spawn-idea-workers.sh" || ! -f "${REPO_ROOT}/runner/install-python-runtime.sh" || ! -d "${REPO_ROOT}/skills" ]]; then
+  if [[ ! -f "${REPO_ROOT}/vm/startup.sh" || ! -f "${REPO_ROOT}/runner/supervisor.sh" || ! -f "${REPO_ROOT}/runner/spawn-idea-workers.sh" || ! -f "${REPO_ROOT}/runner/install-python-runtime.sh" || ! -d "${REPO_ROOT}/skills" || ! -f "${REPO_ROOT}/images/ctf-toolbox/codex-config/config.toml" ]]; then
     echo "Required implementation files are missing in repo." >&2
     exit 1
   fi
@@ -683,7 +689,8 @@ Objectives:
 - Solve the challenge safely and document reproducible steps.
 - Save important outputs to /workspace/artifacts.
 - Keep a concise running summary in /workspace/findings.md.
-- Use $ctf-idea-workers when parallel hypothesis testing is needed.
+- Use $ctf-exploit-subagent for parallel exploit-path testing.
+- Use $ctf-docs-subagent for docs lookup and command-behavior verification.
 - Use $webhook-site-callbacks when callback probes or blind-vector confirmation is needed.
 - If blocked, produce concrete next-step hypotheses.
 PROMPT
@@ -722,6 +729,7 @@ PROMPT
     gcloud compute scp --recurse "${REPO_ROOT}/prompts" "${instance}:${remote_upload_dir}/" --zone "${zone}" --project "${project}"
   fi
   gcloud compute scp --recurse "${REPO_ROOT}/skills" "${instance}:${remote_upload_dir}/" --zone "${zone}" --project "${project}"
+  gcloud compute scp --recurse "${REPO_ROOT}/images/ctf-toolbox/codex-config" "${instance}:${remote_upload_dir}/" --zone "${zone}" --project "${project}"
   gcloud compute scp "${local_image_archive}" "${instance}:${remote_upload_dir}/ctf-toolbox.tar.gz" --zone "${zone}" --project "${project}"
 
   gcloud_ssh "sudo mkdir -p /home/ctf/run /home/ctf/run/.codex/skills && sudo rm -rf /home/ctf/run/challenge /home/ctf/run/prompts /home/ctf/run/.codex/skills/* && sudo cp -R ${remote_upload_dir}/challenge /home/ctf/run/challenge && if [ -d ${remote_upload_dir}/prompts ]; then sudo cp -R ${remote_upload_dir}/prompts /home/ctf/run/prompts; fi && if [ -d ${remote_upload_dir}/skills ]; then sudo cp -R ${remote_upload_dir}/skills/. /home/ctf/run/.codex/skills/; fi && sudo cp ${remote_upload_dir}/challenge_prompt.txt /home/ctf/run/challenge_prompt.txt && sudo cp ${remote_upload_dir}/supervisor.sh ${remote_upload_dir}/spawn-idea-workers.sh ${remote_upload_dir}/install-python-runtime.sh /home/ctf/run/ && sudo chown -R ctf:ctf /home/ctf/run && sudo chmod 644 /home/ctf/run/challenge_prompt.txt && sudo -u ctf chmod +x /home/ctf/run/supervisor.sh /home/ctf/run/spawn-idea-workers.sh /home/ctf/run/install-python-runtime.sh"
@@ -731,6 +739,8 @@ PROMPT
   else
     auth_sync="disabled"
   fi
+
+  install_managed_codex_config "${remote_upload_dir}"
 
   if ! gcloud_ssh "test -f ${remote_upload_dir}/ctf-toolbox.tar.gz"; then
     echo "Local archive missing on VM after upload; aborting (local-image-only mode)." >&2
@@ -1041,7 +1051,7 @@ cmd_ideas() {
 cmd_sync_skill() {
   parse_selector_args "$@"
   set -- ${PARSED_SELECTOR_ARGS[@]+"${PARSED_SELECTOR_ARGS[@]}"}
-  local skill_name="ctf-idea-workers"
+  local skill_name="ctf-exploit-subagent"
 
   while [[ $# -gt 0 ]]; do
     case "$1" in

@@ -17,8 +17,8 @@ From repo root:
 ./scripts/ctfvm monitor
 ./scripts/ctfvm ui
 ./scripts/ctfvm inject --msg "Try the heap unlink path"
-./scripts/ctfvm ideas --ideas "heap unlink candidate; tcache poisoning fallback"
-./scripts/ctfvm sync-skill --skill ctf-idea-workers
+./scripts/ctfvm sync-skill --skill ctf-exploit-subagent
+./scripts/ctfvm sync-skill --skill ctf-docs-subagent
 ./scripts/ctfvm sync-skill --skill webhook-site-callbacks
 ./scripts/ctfvm sync-down --out ./live-copy
 ./scripts/ctfvm sync-up --src ./live-copy
@@ -94,8 +94,11 @@ To force on-VM rebuild with heavyweight tools:
 2. Uploads challenge folder, prompt file, runner scripts, and toolbox Docker context.
    - Also installs all repo skills from `./skills/` into `/workspace/.codex/skills/`.
 3. Syncs local Codex OAuth session material (`~/.codex`) unless `--no-auth-sync` is set.
-4. Builds and launches `ctf-toolbox` container.
-5. Starts `tmux` session `ctf` with:
+4. Installs managed Codex config into `/workspace/.codex/config.toml` with agent roles:
+   - `exploit_tester`
+   - `docs_researcher`
+5. Builds and launches `ctf-toolbox` container.
+6. Starts `tmux` session `ctf` with:
 - `supervisor` window only (interactive Codex)
 - no extra windows by default
 
@@ -104,7 +107,7 @@ Prompt text is now file-backed so you can edit behavior without patching scripts
 
 - Supervisor instructions:
   - `prompts/supervisor/instructions.txt`
-- Idea worker template:
+- Legacy idea worker template (only for `ctfvm ideas`):
   - `prompts/workers/idea_worker.txt`
 
 `ctfvm start` uploads `prompts/` into the VM run directory at `/home/ctf/run/prompts`.
@@ -129,33 +132,38 @@ This supports exactly the “Codex got stuck, I continue manually, then resume C
   - current tmux windows
   - last 120 lines from `supervisor` pane
 - Codex now runs with `--no-alt-screen` in supervisor/workers so output is easier to follow in tmux and monitor mode.
-- Subagents should be spawned from inside the running Codex session only when needed.
+- Supervisor starts with multi-agent enabled and should spawn subagents only when needed.
 
-## Idea workers (supervisor -> worker codex exec)
-Use this when you want multiple exploitation hypotheses tested in parallel with one command:
+## Subagents (supervisor-native)
+Use this when multiple exploit paths or documentation questions should be handled in parallel by Codex-native subagents.
 
-```bash
-./scripts/ctfvm ideas --ideas "format string in logger; heap unlink in delete path; race in session rotate"
-```
-
-Or pass a local ideas file (one idea per line; `#` comments allowed):
-
-```bash
-./scripts/ctfvm ideas --ideas-file ./ideas.txt --model gpt-5.3-codex
-```
-
-Outputs:
-- tmux windows: `ctf:idea-001`, `ctf:idea-002`, ...
-- per-worker logs: `/home/ctf/run/logs/worker-idea-*.log`
-- worker artifacts: `/home/ctf/run/artifacts/ideas/idea-*/`
-- steering command: `./scripts/ctfvm send --target ctf:idea-001 --text "..."`
-
-Compatibility note: `--parallel` is accepted but currently ignored in tmux mode (one window per idea).
-
-In supervisor chat, you can explicitly invoke the skill:
+In supervisor chat, invoke:
 
 ```text
-Use $ctf-idea-workers to test these hypotheses in parallel: ...
+Use $ctf-exploit-subagent.
+Spawn exploit_tester subagents for these hypotheses: ...
+
+Use $ctf-docs-subagent.
+Spawn docs_researcher for this command behavior question: ...
+```
+
+The two skills define separate subagent roles:
+- `exploit_tester`: test one exploit hypothesis, produce verdict and evidence.
+- `docs_researcher`: answer docs/behavior questions with source + minimal verification command.
+
+Recommended pattern:
+- Use one `exploit_tester` per independent hypothesis or challenge component.
+- Use `docs_researcher` whenever command semantics or platform behavior are uncertain.
+- Merge only evidence-backed exploit results into the final chain.
+
+When subagents are spawned, `subagent-tmux-bridge.sh` auto-creates tmux sessions:
+- session name: `subagent-<agent-id>`
+- default window target: `subagent-<agent-id>:0`
+
+You can steer a mirrored subagent session from CLI:
+
+```bash
+./scripts/ctfvm send --target subagent-<agent-id>:0 --text "continue with payload B and report quickly"
 ```
 
 For blind callbacks and outbound-connectivity probes:
@@ -167,7 +175,8 @@ Use $webhook-site-callbacks to set up webhook.site callback probes for this targ
 If the VM run started before this feature existed, sync the skill into the running VM:
 
 ```bash
-./scripts/ctfvm sync-skill --skill ctf-idea-workers
+./scripts/ctfvm sync-skill --skill ctf-exploit-subagent
+./scripts/ctfvm sync-skill --skill ctf-docs-subagent
 ./scripts/ctfvm sync-skill --skill webhook-site-callbacks
 ```
 
@@ -187,9 +196,9 @@ Then open:
 - `http://127.0.0.1:8765`
 
 The UI shows:
-- tmux window list
-- live supervisor pane output
-- idea-worker log tails (`worker-idea-*` when present)
+- tmux window list across all tmux sessions on the VM user (`ctf`, plus subagent sessions)
+- live pane output for each listed session/window target
+- idea-worker log tails (`worker-idea-*`) only when legacy `ctfvm ideas` is used
 - inject queue tail
 - artifact file listing
 - inject input box for steering the run
@@ -206,3 +215,13 @@ The UI shows:
 - Local cache upload can still be large, but usually much faster than rebuilding all packages remotely.
 - Codex CLI package install on Linux is best-effort (`@openai/codex` first, then `codex-cli`).
 - VM self-delete needs default service account permissions to delete its own instance. If denied, VM shuts down but may still require manual deletion.
+
+## TODOs
+
+1. Allow user to manually spawn a new codex session from the UI with prompt. This can be done by calling a bash script to spawn a new codex cli session.
+2. Support for other AI providers, e.g. claude code, gemini cli or opencode
+3. Support for other cloud providers
+4. Support for running locally
+5. Support for deploying to VPS running Incus
+6. Faster VM deployment times (by putting image on cloud container registry)
+7. View subagent work in separate tmux terminal 

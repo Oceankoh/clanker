@@ -2,6 +2,7 @@ Objectives:
 - Solve the challenge safely and document reproducible steps.
 - Save important outputs to /workspace/artifacts.
 - Keep a concise running summary in /workspace/findings.md.
-- Use $ctf-idea-workers when parallel hypothesis testing is needed.
+- Use $ctf-exploit-subagent when parallel exploit-path testing is needed.
+- Use $ctf-docs-subagent when docs lookup or command-behavior verification is needed.
 - Use $webhook-site-callbacks when callback probes or blind-vector confirmation is needed.
 - If blocked, produce concrete next-step hypotheses.

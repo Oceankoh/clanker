@@ -1,4 +1,0 @@
-interface:
-  display_name: "CTF Idea Workers"
-  short_description: "Parallel Codex hypothesis workers for CTFVM."
-  default_prompt: "Use $ctf-idea-workers to test multiple CTF exploitation hypotheses in parallel and summarize the strongest path."

@@ -56,6 +56,8 @@ RUN chmod +x /usr/local/bin/install-python-runtime.sh
 COPY addons /opt/ctf-toolbox/addons
 RUN chmod +x /opt/ctf-toolbox/addons/*.sh
 
+COPY codex-config /opt/ctf-toolbox/codex-config
+
 RUN useradd -m -s /bin/bash ctf \
   && usermod -aG sudo ctf \
   && echo 'ctf ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/ctf \

@@ -62,12 +62,14 @@ BANNER
 
 echo "No worker windows are spawned by default." | tee -a "${RUN_DIR}/logs/supervisor.log"
 echo "Spawn subagents only if/when needed from inside this VM session." | tee -a "${RUN_DIR}/logs/supervisor.log"
-echo "Supervisor skill available: \$ctf-idea-workers" | tee -a "${RUN_DIR}/logs/supervisor.log"
+echo "Supervisor skill available: \$ctf-exploit-subagent" | tee -a "${RUN_DIR}/logs/supervisor.log"
+echo "Supervisor skill available: \$ctf-docs-subagent" | tee -a "${RUN_DIR}/logs/supervisor.log"
+echo "Subagent roles: exploit_tester, docs_researcher" | tee -a "${RUN_DIR}/logs/supervisor.log"
 echo "Supervisor skill available: \$webhook-site-callbacks" | tee -a "${RUN_DIR}/logs/supervisor.log"
-echo "Idea-worker helper (tmux windows): /home/ctf/run/spawn-idea-workers.sh --run-dir /home/ctf/run --ideas 'idea1;idea2'" | tee -a "${RUN_DIR}/logs/supervisor.log"
+echo "Codex multi-agent mode is enabled; spawn subagents from supervisor when needed." | tee -a "${RUN_DIR}/logs/supervisor.log"
 
 CODEX_AUTO_ALLOW="${CODEX_AUTO_ALLOW:-1}"
-CODEX_ARGS=(codex --no-alt-screen)
+CODEX_ARGS=(codex --no-alt-screen --enable multi_agent)
 if [[ "${CODEX_AUTO_ALLOW}" == "1" ]]; then
   # Avoid conflicting flags: do not combine --ask-for-approval with bypass mode.
   CODEX_ARGS+=(--ask-for-approval never --sandbox danger-full-access)

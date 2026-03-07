@@ -1,0 +1,13 @@
+model = "gpt-5.4"
+model_reasoning_effort = "high"
+
+[features]
+multi_agent = true
+
+[agents.exploit_tester]
+description = "Execution-focused exploit hypothesis tester. Use when validating a single exploit path, gadget chain, primitive, or challenge segment in parallel."
+config_file = "roles/exploit_tester.toml"
+
+[agents.docs_researcher]
+description = "Read-heavy docs and behavior validation role. Use for command semantics, protocol details, API usage, and minimal reproducible behavior checks before risky actions."
+config_file = "roles/docs_researcher.toml"

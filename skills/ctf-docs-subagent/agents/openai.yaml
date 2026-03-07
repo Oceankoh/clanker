@@ -1,0 +1,4 @@
+interface:
+  display_name: "CTF Docs Subagent"
+  short_description: "Spawn a docs and behavior-validation subagent."
+  default_prompt: "Use $ctf-docs-subagent to spawn docs_researcher subagents that validate docs and command behavior before execution."

@@ -1,0 +1,7 @@
+sessions/
+shell_snapshots/
+skills/
+tmp/
+state_*.sqlite
+state_*.sqlite-shm
+state_*.sqlite-wal

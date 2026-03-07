@@ -412,17 +412,26 @@ def get_snapshot(run_id=None):
     snapshot["status"] = out.strip() if rc == 0 else "UNKNOWN"
 
     remote = f"""sudo -u ctf bash -lc '
-if ! tmux has-session -t ctf 2>/dev/null; then
+if ! tmux list-sessions >/dev/null 2>&1; then
   echo "__NO_TMUX__"
   exit 0
 fi
 echo "__WINDOWS_BEGIN__"
-tmux list-windows -t ctf -F "#{{window_index}}|#{{window_name}}|#{{window_active}}" || true
+tmux list-sessions -F "#{{session_name}}" 2>/dev/null | while IFS= read -r sess; do
+  [ -z "$sess" ] && continue
+  tmux list-windows -t "$sess" -F "#{{window_index}}|#{{window_name}}|#{{window_active}}" 2>/dev/null | while IFS="|" read -r idx wname wactive; do
+    printf "%s|%s|%s|%s\\n" "$sess" "$idx" "$wname" "$wactive"
+  done
+done
 echo "__WINDOWS_END__"
-for idx in $(tmux list-windows -t ctf -F "#{{window_index}}" 2>/dev/null); do
-  echo "__PANE_BEGIN__${{idx}}"
-  tmux capture-pane -p -t "ctf:${{idx}}" -S -120 2>/dev/null | tail -c {MAX_PANE_TAIL_BYTES} || echo "window ${{idx}} not found"
-  echo "__PANE_END__${{idx}}"
+tmux list-sessions -F "#{{session_name}}" 2>/dev/null | while IFS= read -r sess; do
+  [ -z "$sess" ] && continue
+  tmux list-windows -t "$sess" -F "#{{window_index}}" 2>/dev/null | while IFS= read -r idx; do
+    [ -z "$idx" ] && continue
+    printf "__PANE_BEGIN__%s|%s\\n" "$sess" "$idx"
+    tmux capture-pane -p -t "${{sess}}:${{idx}}" -S -120 2>/dev/null | tail -c {MAX_PANE_TAIL_BYTES} || echo "window ${{sess}}:${{idx}} not found"
+    printf "__PANE_END__%s|%s\\n" "$sess" "$idx"
+  done
 done
 echo "__INJECT__"
 tail -c {MAX_INJECT_TAIL_BYTES} /home/ctf/run/inject.queue 2>/dev/null || true
@@ -437,7 +446,7 @@ find /home/ctf/run/artifacts -maxdepth 3 -type f 2>/dev/null | sed "s#^/home/ctf
         return snapshot
 
     if "__NO_TMUX__" in out:
-        snapshot["error"] = "No tmux session named ctf found in VM."
+        snapshot["error"] = "No tmux sessions found in VM."
         return snapshot
 
     def slice_between(text, start_marker, end_marker):
@@ -460,30 +469,32 @@ find /home/ctf/run/artifacts -maxdepth 3 -type f 2>/dev/null | sed "s#^/home/ctf
         line = line.strip()
         if not line:
             continue
-        if "|" in line:
-            parts = line.split("|", 2)
-        elif "\\t" in line:
-            parts = line.split("\\t", 2)
-        else:
-            parts = line.split("\t", 2)
-        if len(parts) < 3:
+        parts = line.split("|", 3)
+        if len(parts) < 4:
             continue
-        idx = parts[0].strip()
-        name = parts[1].strip()
-        active = parts[2].strip() == "1"
-        output = slice_between(out, f"__PANE_BEGIN__{idx}", f"__PANE_END__{idx}")
+        session = parts[0].strip()
+        idx = parts[1].strip()
+        name = parts[2].strip()
+        active = parts[3].strip() == "1"
+        output = slice_between(
+            out,
+            f"__PANE_BEGIN__{session}|{idx}",
+            f"__PANE_END__{session}|{idx}",
+        )
         windows_list.append(
             {
+                "session": session,
                 "index": idx,
                 "name": name,
                 "active": active,
+                "target": f"{session}:{idx}",
                 "output": output,
             }
         )
 
     snapshot["windows_list"] = windows_list
     snapshot["windows"] = "\n".join(
-        f"{w['index']}: {w['name']}{' *' if w['active'] else ''}" for w in windows_list
+        f"{w['target']}: {w['name']}{' *' if w['active'] else ''}" for w in windows_list
     )
     snapshot["inject_tail"] = slice_between(out, "__INJECT__", "__FINDINGS__")
     snapshot["findings_tail"] = slice_between(out, "__FINDINGS__", "__ART__")
@@ -598,7 +609,7 @@ def get_artifact_preview(relpath, run_id=None, max_bytes=MAX_ARTIFACT_PREVIEW_BY
     }
 
 
-_TARGET_RE = re.compile(r"^ctf:[A-Za-z0-9_.-]+$")
+_TARGET_RE = re.compile(r"^[A-Za-z0-9_.-]+:[A-Za-z0-9_.-]+$")
 _KEY_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
@@ -618,6 +629,12 @@ def _safe_target(target):
     return target
 
 
+def _target_session(target):
+    if ":" not in target:
+        return "ctf"
+    return target.split(":", 1)[0]
+
+
 def send_to_tmux(run_id, target, text, enter=True):
     state, err = _state_for_run_or_error(run_id)
     if err:
@@ -625,6 +642,7 @@ def send_to_tmux(run_id, target, text, enter=True):
     safe_target = _safe_target(target)
     if not safe_target:
         return {"ok": False, "error": "Invalid tmux target"}
+    safe_session = _target_session(safe_target)
     if not text:
         return {"ok": False, "error": "text is required"}
 
@@ -635,7 +653,7 @@ def send_to_tmux(run_id, target, text, enter=True):
     )
     remote = (
         "sudo -u ctf bash -lc '"
-        "tmux has-session -t ctf >/dev/null 2>&1 || exit 1; "
+        f"tmux has-session -t {shlex.quote(safe_session)} >/dev/null 2>&1 || exit 1; "
         f'payload="$(printf %s {shlex.quote(payload)} | base64 -d)"; '
         f"tmux send-keys -t {shlex.quote(safe_target)} -l -- \"${{payload}}\"; "
         f"{enter_cmd}"
@@ -654,13 +672,14 @@ def send_keys_tmux(run_id, target, keys):
     safe_target = _safe_target(target)
     if not safe_target:
         return {"ok": False, "error": "Invalid tmux target"}
+    safe_session = _target_session(safe_target)
     safe_keys = [k for k in keys if _KEY_RE.match(k or "")]
     if not safe_keys:
         return {"ok": False, "error": "No valid keys provided"}
     keys_cmd = " ".join(shlex.quote(k) for k in safe_keys)
     remote = (
         "sudo -u ctf bash -lc '"
-        "tmux has-session -t ctf >/dev/null 2>&1 || exit 1; "
+        f"tmux has-session -t {shlex.quote(safe_session)} >/dev/null 2>&1 || exit 1; "
         f"tmux send-keys -t {shlex.quote(safe_target)} {keys_cmd}'"
     )
     rc, out, stderr = ssh_cmd(state, remote, timeout=15)
@@ -688,8 +707,8 @@ def inject_guidance(run_id, msg):
     return {"ok": True}
 
 
-def trust_prompt(run_id):
-    return send_keys_tmux(run_id, "ctf:supervisor", ["1", "Enter"])
+def trust_prompt(run_id, target="ctf:supervisor"):
+    return send_keys_tmux(run_id, target, ["1", "Enter"])
 
 
 INDEX_HTML = """<!doctype html>
@@ -865,7 +884,7 @@ INDEX_HTML = """<!doctype html>
       sel.appendChild(opt);
     });
     const available = Array.from(sel.options).map(o => o.value);
-    const target = [prev, snapshotRunId || ''].find(v => available.includes(v));
+    const target = [prev, snapshotRunId || '', currentRunId || ''].find(v => available.includes(v));
     sel.value = target || '';
     selectedRunId = sel.value || '';
   }
@@ -878,7 +897,12 @@ INDEX_HTML = """<!doctype html>
     highlightSelectedPane();
   }
 
-  function selectedPaneIndexFromTarget() {
+  function paneCardIdFromTarget(target) {
+    const safe = String(target || '').replace(/[^A-Za-z0-9_.-]/g, '_');
+    return `pane-card-${safe}`;
+  }
+
+  function selectedPaneTargetFromTarget() {
     const sel = document.getElementById('targetSelect');
     const custom = document.getElementById('targetCustom');
     if (!sel) return null;
@@ -886,17 +910,17 @@ INDEX_HTML = """<!doctype html>
     if (target === '__custom__') {
       target = (custom && custom.value || '').trim();
     }
-    const m = /^ctf:(\d+)$/.exec(target);
-    return m ? m[1] : null;
+    const m = /^[A-Za-z0-9_.-]+:[A-Za-z0-9_.-]+$/.exec(target);
+    return m ? target : null;
   }
 
   function highlightSelectedPane() {
     const panes = document.getElementById('panes');
     if (!panes) return;
     panes.querySelectorAll('[data-pane-card="1"]').forEach(card => card.classList.remove('selected-pane'));
-    const idx = selectedPaneIndexFromTarget();
-    if (idx === null) return;
-    const card = document.getElementById(`pane-card-${idx}`);
+    const target = selectedPaneTargetFromTarget();
+    if (target === null) return;
+    const card = document.getElementById(paneCardIdFromTarget(target));
     if (card) card.classList.add('selected-pane');
   }
 
@@ -910,8 +934,8 @@ INDEX_HTML = """<!doctype html>
     if (list.length) {
       list.forEach(w => {
         const opt = document.createElement('option');
-        opt.value = `ctf:${w.index}`;
-        opt.textContent = `${w.active ? '* ' : ''}${w.name} (ctf:${w.index})`;
+        opt.value = w.target || `${w.session}:${w.index}`;
+        opt.textContent = `${w.active ? '* ' : ''}${w.name} (${opt.value})`;
         sel.appendChild(opt);
       });
     } else {
@@ -980,7 +1004,7 @@ INDEX_HTML = """<!doctype html>
       const panes = document.getElementById('panes');
       const list = d.windows_list || [];
       const emptyId = 'panes-empty-card';
-      const expectedIds = new Set(list.map(w => `pane-card-${w.index}`));
+      const expectedIds = new Set(list.map(w => paneCardIdFromTarget(w.target || `${w.session}:${w.index}`)));
 
       panes.querySelectorAll('[data-pane-card="1"]').forEach(card => {
         if (!expectedIds.has(card.id)) {
@@ -1003,8 +1027,9 @@ INDEX_HTML = """<!doctype html>
       if (existingEmpty) existingEmpty.remove();
 
       list.forEach(w => {
-        const paneKey = `pane:${w.index}`;
-        const cardId = `pane-card-${w.index}`;
+        const target = w.target || `${w.session}:${w.index}`;
+        const paneKey = `pane:${target}`;
+        const cardId = paneCardIdFromTarget(target);
         let card = document.getElementById(cardId);
         let head;
         let pre;
@@ -1031,7 +1056,7 @@ INDEX_HTML = """<!doctype html>
           bindFollowTracking(pre, paneKey);
         }
 
-        head.textContent = `${w.active ? '* ' : ''}${w.index}: ${w.name}`;
+        head.textContent = `${w.active ? '* ' : ''}${target}: ${w.name}`;
         const nextOutput = w.output || '';
         if (pre.textContent !== nextOutput) {
           const follow = followState[paneKey] !== false ? isNearBottom(pre) : followState[paneKey];
@@ -1085,10 +1110,15 @@ INDEX_HTML = """<!doctype html>
       setStatus('sendStatus', 'select run first');
       return;
     }
+    const targetSel = document.getElementById('targetSelect');
+    const targetCustom = document.getElementById('targetCustom');
+    const target = (targetSel && targetSel.value === '__custom__'
+      ? (targetCustom.value.trim() || 'ctf:supervisor')
+      : ((targetSel && targetSel.value) || 'ctf:supervisor'));
     const r = await fetch('/api/trust', {
       method: 'POST',
       headers: {'content-type': 'application/json'},
-      body: JSON.stringify(payloadWithRun({}))
+      body: JSON.stringify(payloadWithRun({target}))
     });
     const d = await r.json();
     setStatus('sendStatus', d.ok ? 'trust accepted' : ('error: ' + (d.error || 'failed')));
@@ -1355,9 +1385,11 @@ class Handler(BaseHTTPRequestHandler):
                 raw = self.rfile.read(length)
                 payload = json.loads(raw.decode("utf-8") or "{}")
                 run_id = str(payload.get("run_id", "")).strip()
+                target = str(payload.get("target", "ctf:supervisor")).strip() or "ctf:supervisor"
             except Exception:
                 run_id = ""
-            result = trust_prompt(run_id)
+                target = "ctf:supervisor"
+            result = trust_prompt(run_id, target=target)
             self._send_json(result, status=HTTPStatus.OK if result.get("ok") else HTTPStatus.BAD_REQUEST)
             return
 

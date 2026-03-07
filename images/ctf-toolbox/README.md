@@ -9,6 +9,12 @@ Included categories:
 - Python tooling (installed at container start): `pwntools`, `z3-solver`
 - AI client: `codex` CLI (OAuth session synced under `/workspace/.codex`)
 
+The image also includes baked Codex role config templates under:
+- `/opt/ctf-toolbox/codex-config/config.toml`
+- `/opt/ctf-toolbox/codex-config/roles/*.toml`
+
+CTFVM installs these templates into `/workspace/.codex/` so supervisor sessions have consistent role definitions (`exploit_tester`, `docs_researcher`).
+
 `full` variant adds `sagemath` and best-effort `radare2`, and installs `angr` at container start.
 
 ## Optional add-ins
