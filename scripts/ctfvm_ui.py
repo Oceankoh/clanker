@@ -352,6 +352,8 @@ def get_snapshot(run_id=None):
     runs, current_run_id = list_runs()
     requested = str(run_id or "").strip()
     if not requested:
+        requested = str(current_run_id or "").strip()
+    if not requested:
         return {
             "error": "No run selected. Choose a run from the dropdown.",
             "runs": runs,
@@ -369,7 +371,7 @@ def get_snapshot(run_id=None):
             "status": "",
         }
 
-    state = resolve_state(run_id)
+    state = resolve_state(requested)
     if not state:
         return {
             "error": f"Run not found: {requested}",
@@ -614,11 +616,15 @@ _KEY_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
 def _state_for_run_or_error(run_id):
-    if not str(run_id or "").strip():
+    requested = str(run_id or "").strip()
+    if not requested:
+        _, current_run_id = list_runs()
+        requested = str(current_run_id or "").strip()
+    if not requested:
         return None, {"ok": False, "error": "No run selected"}
-    state = resolve_state(run_id)
+    state = resolve_state(requested)
     if not state:
-        return None, {"ok": False, "error": f"Run not found: {run_id}"}
+        return None, {"ok": False, "error": f"Run not found: {requested}"}
     return state, None
 
 
@@ -725,7 +731,14 @@ INDEX_HTML = """<!doctype html>
     .panes-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 10px; }
     .card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; min-height: 120px; }
     .card.selected-pane { border-color: #7bd88f; box-shadow: 0 0 0 1px rgba(123,216,143,0.45), 0 0 18px rgba(123,216,143,0.18); }
+    .card.pane-collapsed { display: none; }
     .head { padding: 8px 10px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+    .pane-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .pane-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .pane-toggle { font-size: 11px; padding: 3px 8px; }
+    .closed-panes { display: flex; gap: 6px; flex-wrap: wrap; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+    .closed-panes:empty { display: none; }
+    .chip-btn { font-size: 11px; padding: 3px 8px; }
     pre { margin: 0; padding: 10px; white-space: pre-wrap; word-break: break-word; font-size: 12px; max-height: 40vh; overflow: auto; }
     * { box-sizing: border-box; }
     .top { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
@@ -766,6 +779,8 @@ INDEX_HTML = """<!doctype html>
             <select id="runSelect" onchange="onRunChange()" style="width:220px;"></select>
           </label>
           <button onclick="refreshNow()">Refresh</button>
+          <button onclick="collapseAllPanes()">Hide all pane outputs</button>
+          <button onclick="expandAllPanes()">Show all pane outputs</button>
           <button onclick="acceptTrust()">Accept trust prompt</button>
           <button onclick="sendCtrlC()">Interrupt (Ctrl-C)</button>
           <button onclick="submitEnter()">Submit (Enter)</button>
@@ -801,6 +816,7 @@ INDEX_HTML = """<!doctype html>
 
     <div class="card">
       <div class="head">tmux pane outputs (dynamic)</div>
+      <div id="closedPanes" class="closed-panes"></div>
       <div id="panes" class="panes-grid" style="padding:10px;"></div>
     </div>
 
@@ -828,6 +844,8 @@ INDEX_HTML = """<!doctype html>
   let refreshInFlight = false;
   let refreshCounter = 0;
   const followState = {};
+  const paneCollapsedState = {};
+  let latestWindowsList = [];
 
   function isNearBottom(el, threshold = 24) {
     if (!el) return true;
@@ -847,6 +865,86 @@ INDEX_HTML = """<!doctype html>
   function setStatus(id, msg) {
     const el = document.getElementById(id);
     if (el) el.textContent = msg || '';
+  }
+
+  function paneCollapsed(target) {
+    return paneCollapsedState[target] === true;
+  }
+
+  function applyPaneCollapsedUI(card, target, toggleBtn) {
+    const collapsed = paneCollapsed(target);
+    if (card) card.classList.toggle('pane-collapsed', collapsed);
+    if (toggleBtn) {
+      toggleBtn.textContent = collapsed ? 'open' : 'close';
+      toggleBtn.title = collapsed ? 'Reopen pane output' : 'Hide pane output';
+    }
+  }
+
+  function setPaneCollapsed(target, collapsed) {
+    if (!target) return;
+    paneCollapsedState[target] = !!collapsed;
+    const card = document.getElementById(paneCardIdFromTarget(target));
+    if (card) {
+      const toggleBtn = card.querySelector('.pane-toggle');
+      applyPaneCollapsedUI(card, target, toggleBtn);
+    }
+    renderClosedPanes(latestWindowsList);
+  }
+
+  function collapseAllPanes() {
+    const panes = document.getElementById('panes');
+    if (!panes) return;
+    panes.querySelectorAll('[data-pane-card="1"]').forEach(card => {
+      const target = card.dataset.paneTarget || '';
+      if (target) setPaneCollapsed(target, true);
+    });
+    renderClosedPanes(latestWindowsList);
+  }
+
+  function expandAllPanes() {
+    const panes = document.getElementById('panes');
+    if (!panes) return;
+    panes.querySelectorAll('[data-pane-card="1"]').forEach(card => {
+      const target = card.dataset.paneTarget || '';
+      if (target) setPaneCollapsed(target, false);
+    });
+    renderClosedPanes(latestWindowsList);
+  }
+
+  function renderClosedPanes(windowsList) {
+    const holder = document.getElementById('closedPanes');
+    if (!holder) return;
+    holder.innerHTML = '';
+    const list = Array.isArray(windowsList) ? windowsList : [];
+    const closed = list.filter(w => paneCollapsed(w.target || `${w.session}:${w.index}`));
+    if (!closed.length) return;
+
+    const label = document.createElement('span');
+    label.style.color = '#a8b3c9';
+    label.style.fontSize = '11px';
+    label.style.padding = '4px 2px';
+    label.textContent = 'closed:';
+    holder.appendChild(label);
+
+    closed.forEach(w => {
+      const target = w.target || `${w.session}:${w.index}`;
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'chip-btn';
+      btn.textContent = `open ${target}`;
+      btn.onclick = () => setPaneCollapsed(target, false);
+      holder.appendChild(btn);
+    });
+  }
+
+  function onPaneToggleClick(ev) {
+    const btn = ev.target && ev.target.closest ? ev.target.closest('.pane-toggle') : null;
+    if (!btn) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    const target = (btn.dataset.paneTarget || '').trim();
+    if (!target) return;
+    setPaneCollapsed(target, !paneCollapsed(target));
   }
 
   function selectedRunQueryParam() {
@@ -1002,12 +1100,20 @@ INDEX_HTML = """<!doctype html>
       renderArtifactsList(d.artifacts || '');
 
       const panes = document.getElementById('panes');
+      if (panes && !panes.dataset.toggleBound) {
+        panes.addEventListener('click', onPaneToggleClick);
+        panes.dataset.toggleBound = '1';
+      }
       const list = d.windows_list || [];
+      latestWindowsList = Array.isArray(list) ? list : [];
+      renderClosedPanes(latestWindowsList);
       const emptyId = 'panes-empty-card';
       const expectedIds = new Set(list.map(w => paneCardIdFromTarget(w.target || `${w.session}:${w.index}`)));
 
       panes.querySelectorAll('[data-pane-card="1"]').forEach(card => {
         if (!expectedIds.has(card.id)) {
+          const oldTarget = card.dataset.paneTarget || '';
+          if (oldTarget) delete paneCollapsedState[oldTarget];
           card.remove();
         }
       });
@@ -1039,9 +1145,20 @@ INDEX_HTML = """<!doctype html>
           card.className = 'card';
           card.id = cardId;
           card.dataset.paneCard = '1';
+          card.dataset.paneTarget = target;
 
           head = document.createElement('div');
-          head.className = 'head';
+          head.className = 'head pane-head';
+
+          const title = document.createElement('span');
+          title.className = 'pane-title';
+          head.appendChild(title);
+
+          const toggleBtn = document.createElement('button');
+          toggleBtn.type = 'button';
+          toggleBtn.className = 'pane-toggle';
+          head.appendChild(toggleBtn);
+
           card.appendChild(head);
 
           pre = document.createElement('pre');
@@ -1052,11 +1169,30 @@ INDEX_HTML = """<!doctype html>
         } else {
           head = card.querySelector('.head');
           pre = card.querySelector('pre');
+          card.dataset.paneTarget = target;
+          head.classList.add('pane-head');
           if (!pre.dataset.paneKey) pre.dataset.paneKey = paneKey;
           bindFollowTracking(pre, paneKey);
         }
 
-        head.textContent = `${w.active ? '* ' : ''}${target}: ${w.name}`;
+        let title = head.querySelector('.pane-title');
+        if (!title) {
+          title = document.createElement('span');
+          title.className = 'pane-title';
+          head.textContent = '';
+          head.appendChild(title);
+        }
+        let toggleBtn = head.querySelector('.pane-toggle');
+        if (!toggleBtn) {
+          toggleBtn = document.createElement('button');
+          toggleBtn.type = 'button';
+          toggleBtn.className = 'pane-toggle';
+          head.appendChild(toggleBtn);
+        }
+        toggleBtn.dataset.paneTarget = target;
+        title.textContent = `${w.active ? '* ' : ''}${target}: ${w.name}`;
+        applyPaneCollapsedUI(card, target, toggleBtn);
+
         const nextOutput = w.output || '';
         if (pre.textContent !== nextOutput) {
           const follow = followState[paneKey] !== false ? isNearBottom(pre) : followState[paneKey];

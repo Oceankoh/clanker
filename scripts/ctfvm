@@ -632,7 +632,7 @@ cmd_start() {
     exit 1
   fi
 
-  if [[ ! -f "${REPO_ROOT}/vm/startup.sh" || ! -f "${REPO_ROOT}/runner/supervisor.sh" || ! -f "${REPO_ROOT}/runner/spawn-idea-workers.sh" || ! -f "${REPO_ROOT}/runner/install-python-runtime.sh" || ! -d "${REPO_ROOT}/skills" || ! -f "${REPO_ROOT}/images/ctf-toolbox/codex-config/config.toml" ]]; then
+  if [[ ! -f "${REPO_ROOT}/vm/startup.sh" || ! -f "${REPO_ROOT}/runner/supervisor.sh" || ! -f "${REPO_ROOT}/runner/spawn-idea-workers.sh" || ! -f "${REPO_ROOT}/runner/subagent-tmux-bridge.sh" || ! -f "${REPO_ROOT}/runner/install-python-runtime.sh" || ! -d "${REPO_ROOT}/skills" || ! -f "${REPO_ROOT}/images/ctf-toolbox/codex-config/config.toml" ]]; then
     echo "Required implementation files are missing in repo." >&2
     exit 1
   fi
@@ -724,7 +724,7 @@ PROMPT
   echo "Uploading challenge and runner files..."
   gcloud compute scp --recurse "${challenge_dir}" "${instance}:${remote_upload_dir}/challenge" --zone "${zone}" --project "${project}"
   gcloud compute scp "${prompt_tmp}" "${instance}:${remote_upload_dir}/challenge_prompt.txt" --zone "${zone}" --project "${project}"
-  gcloud compute scp "${REPO_ROOT}/runner/supervisor.sh" "${REPO_ROOT}/runner/spawn-idea-workers.sh" "${REPO_ROOT}/runner/install-python-runtime.sh" "${instance}:${remote_upload_dir}/" --zone "${zone}" --project "${project}"
+  gcloud compute scp "${REPO_ROOT}/runner/supervisor.sh" "${REPO_ROOT}/runner/spawn-idea-workers.sh" "${REPO_ROOT}/runner/subagent-tmux-bridge.sh" "${REPO_ROOT}/runner/install-python-runtime.sh" "${instance}:${remote_upload_dir}/" --zone "${zone}" --project "${project}"
   if [[ -d "${REPO_ROOT}/prompts" ]]; then
     gcloud compute scp --recurse "${REPO_ROOT}/prompts" "${instance}:${remote_upload_dir}/" --zone "${zone}" --project "${project}"
   fi
@@ -732,7 +732,7 @@ PROMPT
   gcloud compute scp --recurse "${REPO_ROOT}/images/ctf-toolbox/codex-config" "${instance}:${remote_upload_dir}/" --zone "${zone}" --project "${project}"
   gcloud compute scp "${local_image_archive}" "${instance}:${remote_upload_dir}/ctf-toolbox.tar.gz" --zone "${zone}" --project "${project}"
 
-  gcloud_ssh "sudo mkdir -p /home/ctf/run /home/ctf/run/.codex/skills && sudo rm -rf /home/ctf/run/challenge /home/ctf/run/prompts /home/ctf/run/.codex/skills/* && sudo cp -R ${remote_upload_dir}/challenge /home/ctf/run/challenge && if [ -d ${remote_upload_dir}/prompts ]; then sudo cp -R ${remote_upload_dir}/prompts /home/ctf/run/prompts; fi && if [ -d ${remote_upload_dir}/skills ]; then sudo cp -R ${remote_upload_dir}/skills/. /home/ctf/run/.codex/skills/; fi && sudo cp ${remote_upload_dir}/challenge_prompt.txt /home/ctf/run/challenge_prompt.txt && sudo cp ${remote_upload_dir}/supervisor.sh ${remote_upload_dir}/spawn-idea-workers.sh ${remote_upload_dir}/install-python-runtime.sh /home/ctf/run/ && sudo chown -R ctf:ctf /home/ctf/run && sudo chmod 644 /home/ctf/run/challenge_prompt.txt && sudo -u ctf chmod +x /home/ctf/run/supervisor.sh /home/ctf/run/spawn-idea-workers.sh /home/ctf/run/install-python-runtime.sh"
+  gcloud_ssh "sudo mkdir -p /home/ctf/run /home/ctf/run/.codex/skills && sudo rm -rf /home/ctf/run/challenge /home/ctf/run/prompts /home/ctf/run/.codex/skills/* && sudo cp -R ${remote_upload_dir}/challenge /home/ctf/run/challenge && if [ -d ${remote_upload_dir}/prompts ]; then sudo cp -R ${remote_upload_dir}/prompts /home/ctf/run/prompts; fi && if [ -d ${remote_upload_dir}/skills ]; then sudo cp -R ${remote_upload_dir}/skills/. /home/ctf/run/.codex/skills/; fi && sudo cp ${remote_upload_dir}/challenge_prompt.txt /home/ctf/run/challenge_prompt.txt && sudo cp ${remote_upload_dir}/supervisor.sh ${remote_upload_dir}/spawn-idea-workers.sh ${remote_upload_dir}/subagent-tmux-bridge.sh ${remote_upload_dir}/install-python-runtime.sh /home/ctf/run/ && sudo chown -R ctf:ctf /home/ctf/run && sudo chmod 644 /home/ctf/run/challenge_prompt.txt && sudo -u ctf chmod +x /home/ctf/run/supervisor.sh /home/ctf/run/spawn-idea-workers.sh /home/ctf/run/subagent-tmux-bridge.sh /home/ctf/run/install-python-runtime.sh"
 
   if [[ "${no_auth_sync}" == "0" ]]; then
     sync_codex_auth
@@ -918,6 +918,7 @@ cmd_send() {
   local text=""
   local target="ctf:supervisor"
   local enter="1"
+  local session_name=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -939,19 +940,20 @@ cmd_send() {
     echo "Missing required flag: --text \"...\"" >&2
     exit 1
   fi
-  if [[ ! "${target}" =~ ^[A-Za-z0-9:_-]+$ ]]; then
+  if [[ ! "${target}" =~ ^[A-Za-z0-9_.-]+:[A-Za-z0-9_.-]+$ ]]; then
     echo "Invalid target: ${target}" >&2
-    echo "Allowed target format: ctf:supervisor, ctf:0, ctf:idea-001" >&2
+    echo "Allowed target format: <tmux-session>:<window-or-pane> (for example: ctf:supervisor, ctf:0, subagent-<id>:0)" >&2
     exit 1
   fi
+  session_name="${target%%:*}"
 
   local payload_b64
   payload_b64="$(printf '%s' "${text}" | base64 | tr -d '\n')"
   if [[ "${enter}" == "1" ]]; then
     # Send payload and submit key in one remote tmux call to avoid race between separate SSH calls.
-    gcloud_ssh "sudo -u ctf bash -lc 'tmux has-session -t ctf >/dev/null 2>&1 || { echo \"No tmux session ctf\" >&2; exit 1; }; payload=\"\$(printf \"%s\" \"${payload_b64}\" | base64 -d)\"; tmux send-keys -t \"${target}\" -l -- \"\${payload}\"; sleep 0.08; tmux send-keys -t \"${target}\" C-m'"
+    gcloud_ssh "sudo -u ctf bash -lc 'tmux has-session -t \"${session_name}\" >/dev/null 2>&1 || { echo \"No tmux session ${session_name}\" >&2; exit 1; }; payload=\"\$(printf \"%s\" \"${payload_b64}\" | base64 -d)\"; tmux send-keys -t \"${target}\" -l -- \"\${payload}\"; sleep 0.08; tmux send-keys -t \"${target}\" C-m'"
   else
-    gcloud_ssh "sudo -u ctf bash -lc 'tmux has-session -t ctf >/dev/null 2>&1 || { echo \"No tmux session ctf\" >&2; exit 1; }; payload=\"\$(printf \"%s\" \"${payload_b64}\" | base64 -d)\"; tmux send-keys -t \"${target}\" -l -- \"\${payload}\"'"
+    gcloud_ssh "sudo -u ctf bash -lc 'tmux has-session -t \"${session_name}\" >/dev/null 2>&1 || { echo \"No tmux session ${session_name}\" >&2; exit 1; }; payload=\"\$(printf \"%s\" \"${payload_b64}\" | base64 -d)\"; tmux send-keys -t \"${target}\" -l -- \"\${payload}\"'"
   fi
   echo "Sent input to ${target}"
 }
@@ -1090,6 +1092,7 @@ cmd_key() {
   parse_selector_args "$@"
   set -- ${PARSED_SELECTOR_ARGS[@]+"${PARSED_SELECTOR_ARGS[@]}"}
   local target="ctf:supervisor"
+  local session_name=""
   local keys=()
 
   while [[ $# -gt 0 ]]; do
@@ -1111,12 +1114,13 @@ cmd_key() {
     echo "Example: ctfvm key --key C-c --key Enter" >&2
     exit 1
   fi
-  if [[ ! "${target}" =~ ^[A-Za-z0-9:_-]+$ ]]; then
+  if [[ ! "${target}" =~ ^[A-Za-z0-9_.-]+:[A-Za-z0-9_.-]+$ ]]; then
     echo "Invalid target: ${target}" >&2
     exit 1
   fi
+  session_name="${target%%:*}"
 
-  local cmd="tmux has-session -t ctf >/dev/null 2>&1 || { echo \"No tmux session ctf\" >&2; exit 1; }; tmux send-keys -t \"${target}\""
+  local cmd="tmux has-session -t \"${session_name}\" >/dev/null 2>&1 || { echo \"No tmux session ${session_name}\" >&2; exit 1; }; tmux send-keys -t \"${target}\""
   local k
   for k in "${keys[@]}"; do
     if [[ ! "${k}" =~ ^[A-Za-z0-9^:_+-]+$ ]]; then
@@ -1134,7 +1138,7 @@ cmd_sync_down() {
   parse_selector_args "$@"
   set -- ${PARSED_SELECTOR_ARGS[@]+"${PARSED_SELECTOR_ARGS[@]}"}
   local out_dir=""
-  local remote_path="${REMOTE_RUN_DIR}/challenge"
+  local remote_path="/home/ctf/run/challenge"
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -1164,7 +1168,7 @@ cmd_sync_up() {
   parse_selector_args "$@"
   set -- ${PARSED_SELECTOR_ARGS[@]+"${PARSED_SELECTOR_ARGS[@]}"}
   local src_dir=""
-  local remote_path="${REMOTE_RUN_DIR}/challenge"
+  local remote_path="/home/ctf/run/challenge"
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -1557,8 +1561,8 @@ Usage:
   ctfvm monitor [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--zone <zone> --project <project>]]
   ctfvm ui [--host 127.0.0.1] [--port 8765]
   ctfvm inject [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--zone <zone> --project <project>]] --msg <text>
-  ctfvm send [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--zone <zone> --project <project>]] --text <text> [--target ctf:supervisor] [--no-enter]
-  ctfvm key [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--zone <zone> --project <project>]] [--target ctf:supervisor] --key <tmux-key> [--key <tmux-key> ...]
+  ctfvm send [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--zone <zone> --project <project>]] --text <text> [--target <session>:<window-or-pane>] [--no-enter]
+  ctfvm key [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--zone <zone> --project <project>]] [--target <session>:<window-or-pane>] --key <tmux-key> [--key <tmux-key> ...]
   ctfvm ideas [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--zone <zone> --project <project>]] (--ideas "idea1;idea2" | --ideas-file <local-file>) [--parallel <n>] [--model gpt-5.3-codex]
   ctfvm sync-skill [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--zone <zone> --project <project>]] [--skill <skill-name>]
   ctfvm sync-down [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--zone <zone> --project <project>]] [--out <local-dir>] [--remote-path </home/ctf/run/challenge>]
