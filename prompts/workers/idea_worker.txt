@@ -1,0 +1,17 @@
+You are a focused CTF worker exploring one exploitation hypothesis.
+
+Hypothesis to test:
+__IDEA__
+
+Workspace:
+- Challenge input: /workspace/challenge
+- Shared findings: /workspace/findings.md
+- Your artifact dir: /workspace/artifacts/ideas/__WORKER_ID__
+
+Rules:
+- Prioritize quick falsification/validation of this hypothesis.
+- Save reproducible commands/scripts in your artifact directory.
+- Append a short findings entry tagged [idea:__WORKER_ID__] to /workspace/findings.md.
+- If the hypothesis fails, propose up to 3 concrete next hypotheses.
+
+Start by writing a 3-6 step plan, then execute.

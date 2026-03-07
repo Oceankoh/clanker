@@ -1,0 +1,1601 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+STATE_DIR="${REPO_ROOT}/.ctfvm"
+STATE_FILE="${STATE_DIR}/current-run.json"
+RUNS_DIR="${STATE_DIR}/runs"
+CACHE_DIR="${STATE_DIR}/cache"
+DEFAULT_IMAGE_ARCHIVE="${CACHE_DIR}/ctf-toolbox.tar.gz"
+SELECTED_STATE_FILE=""
+PARSED_SELECTOR_ARGS=()
+SEL_PICK="0"
+SEL_RUN_ID=""
+SEL_INSTANCE=""
+SEL_ZONE=""
+SEL_PROJECT=""
+
+require_cmd() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "Missing required command: $1" >&2
+    exit 1
+  fi
+}
+
+json_escape() {
+  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+json_get() {
+  local key="$1"
+  if [[ ! -f "${STATE_FILE}" ]]; then
+    return 1
+  fi
+  sed -n "s/.*\"${key}\": \"\([^\"]*\)\".*/\1/p" "${STATE_FILE}" | head -n1
+}
+
+json_get_from_file() {
+  local key="$1"
+  local file="$2"
+  if [[ ! -f "${file}" ]]; then
+    return 1
+  fi
+  sed -n "s/.*\"${key}\": \"\([^\"]*\)\".*/\1/p" "${file}" | head -n1
+}
+
+project_from_gcloud_config() {
+  local p
+  p="$(gcloud config get-value project 2>/dev/null || true)"
+  if [[ "${p}" == "(unset)" ]]; then
+    p=""
+  fi
+  printf '%s\n' "${p}"
+}
+
+run_id_from_instance_name() {
+  local inst="$1"
+  if [[ "${inst}" =~ ^ctfvm-([a-z0-9-]+-)?([0-9]{8}-[0-9]{6})$ ]]; then
+    printf '%s\n' "${BASH_REMATCH[2]}"
+    return 0
+  fi
+  if [[ "${inst}" == ctfvm-* ]]; then
+    printf '%s\n' "${inst#ctfvm-}"
+    return 0
+  fi
+  printf '%s\n' ""
+}
+
+instance_slug_from_challenge_dir() {
+  local challenge_dir="$1"
+  local base slug
+  base="$(basename "${challenge_dir}")"
+  slug="$(printf '%s' "${base}" \
+    | tr '[:upper:]' '[:lower:]' \
+    | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//; s/-{2,}/-/g')"
+  if [[ -z "${slug}" ]]; then
+    slug="challenge"
+  fi
+  if [[ ! "${slug}" =~ ^[a-z] ]]; then
+    slug="c-${slug}"
+  fi
+  # GCE name limit is 63 chars. With pattern ctfvm-<slug>-<YYYYmmdd-HHMMSS>,
+  # slug must be <= 41 chars.
+  if (( ${#slug} > 41 )); then
+    slug="${slug:0:41}"
+    slug="${slug%-}"
+  fi
+  printf '%s\n' "${slug}"
+}
+
+ensure_state_dir() {
+  mkdir -p "${STATE_DIR}"
+  mkdir -p "${RUNS_DIR}"
+}
+
+write_state() {
+  local instance="$1"
+  local zone="$2"
+  local project="$3"
+  local machine_type="$4"
+  local run_id="$5"
+  local challenge_dir="$6"
+  local timeout_min="$7"
+  local workers="$8"
+  local auth_sync="$9"
+  local no_auth_sync_val="${10}"
+  local ip="${11}"
+
+  ensure_state_dir
+  cat > "${STATE_FILE}" <<JSON
+{
+  "instance": "$(json_escape "${instance}")",
+  "zone": "$(json_escape "${zone}")",
+  "project": "$(json_escape "${project}")",
+  "machine_type": "$(json_escape "${machine_type}")",
+  "run_id": "$(json_escape "${run_id}")",
+  "challenge_dir": "$(json_escape "${challenge_dir}")",
+  "timeout_min": "$(json_escape "${timeout_min}")",
+  "workers": "$(json_escape "${workers}")",
+  "auth_sync": "$(json_escape "${auth_sync}")",
+  "no_auth_sync": "$(json_escape "${no_auth_sync_val}")",
+  "ip": "$(json_escape "${ip}")",
+  "started_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "remote_run_dir": "/home/ctf/run"
+}
+JSON
+  cp "${STATE_FILE}" "${RUNS_DIR}/${run_id}.json"
+}
+
+load_state_required() {
+  load_state_required_for_selector "" ""
+}
+
+resolve_state_file_for_selector() {
+  local run_id="$1"
+  local instance="$2"
+  local state_file=""
+  local f found_run_id found_instance
+
+  if [[ -n "${run_id}" && -n "${instance}" ]]; then
+    echo "Use either --run-id or --instance, not both." >&2
+    exit 1
+  fi
+
+  if [[ -n "${run_id}" ]]; then
+    state_file="${RUNS_DIR}/${run_id}.json"
+    if [[ -f "${state_file}" ]]; then
+      printf '%s\n' "${state_file}"
+      return 0
+    fi
+    if [[ -f "${STATE_FILE}" ]]; then
+      found_run_id="$(json_get_from_file run_id "${STATE_FILE}" || true)"
+      if [[ "${found_run_id}" == "${run_id}" ]]; then
+        printf '%s\n' "${STATE_FILE}"
+        return 0
+      fi
+    fi
+    echo "Run ID not found in local state: ${run_id}" >&2
+    echo "Tip: use the run selector in the web UI if state was created from another workspace." >&2
+    exit 1
+  fi
+
+  if [[ -n "${instance}" ]]; then
+    if [[ -f "${STATE_FILE}" ]]; then
+      found_instance="$(json_get_from_file instance "${STATE_FILE}" || true)"
+      if [[ "${found_instance}" == "${instance}" ]]; then
+        printf '%s\n' "${STATE_FILE}"
+        return 0
+      fi
+    fi
+    for f in "${RUNS_DIR}"/*.json; do
+      [[ -e "${f}" ]] || continue
+      found_instance="$(json_get_from_file instance "${f}" || true)"
+      if [[ "${found_instance}" == "${instance}" ]]; then
+        printf '%s\n' "${f}"
+        return 0
+      fi
+    done
+    echo "Instance not found in local state: ${instance}" >&2
+    echo "Tip: use the run selector in the web UI if state was created from another workspace." >&2
+    exit 1
+  fi
+
+  if [[ -f "${STATE_FILE}" ]]; then
+    printf '%s\n' "${STATE_FILE}"
+    return 0
+  fi
+  echo "No active run. Start one with: ctfvm start --dir <challenge-folder>" >&2
+  exit 1
+}
+
+load_state_required_for_selector() {
+  local run_id="$1"
+  local instance="$2"
+  local selected_file
+
+  selected_file="$(resolve_state_file_for_selector "${run_id}" "${instance}")"
+  SELECTED_STATE_FILE="${selected_file}"
+  if [[ ! -f "${selected_file}" ]]; then
+    echo "No active run. Start one with: ctfvm start --dir <challenge-folder>" >&2
+    exit 1
+  fi
+
+  INSTANCE="$(json_get_from_file instance "${selected_file}")"
+  ZONE="$(json_get_from_file zone "${selected_file}")"
+  PROJECT="$(json_get_from_file project "${selected_file}")"
+  RUN_ID="$(json_get_from_file run_id "${selected_file}")"
+  REMOTE_RUN_DIR="$(json_get_from_file remote_run_dir "${selected_file}")"
+  if [[ -z "${REMOTE_RUN_DIR}" ]]; then
+    REMOTE_RUN_DIR="/home/ctf/run"
+  fi
+
+  if [[ -z "${INSTANCE}" || -z "${ZONE}" || -z "${PROJECT}" ]]; then
+    echo "State file is incomplete: ${selected_file}" >&2
+    exit 1
+  fi
+}
+
+parse_selector_args() {
+  SEL_PICK="0"
+  SEL_RUN_ID=""
+  SEL_INSTANCE=""
+  SEL_ZONE=""
+  SEL_PROJECT=""
+  PARSED_SELECTOR_ARGS=()
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --pick)
+        SEL_PICK="1"; shift ;;
+      --run-id)
+        SEL_RUN_ID="$2"; shift 2 ;;
+      --instance)
+        SEL_INSTANCE="$2"; shift 2 ;;
+      --zone)
+        SEL_ZONE="$2"; shift 2 ;;
+      --project)
+        SEL_PROJECT="$2"; shift 2 ;;
+      *)
+        PARSED_SELECTOR_ARGS+=("$1"); shift ;;
+    esac
+  done
+
+  if [[ "${SEL_PICK}" == "1" && ( -n "${SEL_RUN_ID}" || -n "${SEL_INSTANCE}" || -n "${SEL_ZONE}" || -n "${SEL_PROJECT}" ) ]]; then
+    echo "Use --pick by itself, or explicit selectors (--run-id/--instance [--zone --project])." >&2
+    exit 1
+  fi
+  if [[ -n "${SEL_RUN_ID}" && -n "${SEL_INSTANCE}" ]]; then
+    echo "Use either --run-id or --instance, not both." >&2
+    exit 1
+  fi
+  if [[ -n "${SEL_RUN_ID}" && ( -n "${SEL_ZONE}" || -n "${SEL_PROJECT}" ) ]]; then
+    echo "--run-id cannot be combined with --zone/--project." >&2
+    exit 1
+  fi
+}
+
+resolve_target_required() {
+  if [[ "${SEL_PICK}" == "1" ]]; then
+    if ! choose_running_instance_interactive; then
+      echo "Could not pick a running instance." >&2
+      exit 1
+    fi
+    return 0
+  fi
+
+  if [[ -n "${SEL_RUN_ID}" ]]; then
+    load_state_required_for_selector "${SEL_RUN_ID}" ""
+    return 0
+  fi
+
+  if [[ -n "${SEL_INSTANCE}" ]]; then
+    if [[ -z "${SEL_ZONE}" && -z "${SEL_PROJECT}" ]]; then
+      load_state_required_for_selector "" "${SEL_INSTANCE}"
+      return 0
+    fi
+    INSTANCE="${SEL_INSTANCE}"
+    ZONE="${SEL_ZONE}"
+    PROJECT="${SEL_PROJECT}"
+    if [[ -z "${ZONE}" ]]; then
+      ZONE="$(gcloud config get-value compute/zone 2>/dev/null || true)"
+    fi
+    if [[ -z "${PROJECT}" ]]; then
+      PROJECT="$(gcloud config get-value project 2>/dev/null || true)"
+    fi
+    if [[ -z "${ZONE}" || -z "${PROJECT}" ]]; then
+      echo "When using --instance directly, set --zone/--project or configure gcloud defaults." >&2
+      exit 1
+    fi
+    RUN_ID="$(run_id_from_instance_name "${INSTANCE}")"
+    REMOTE_RUN_DIR="/home/ctf/run"
+    return 0
+  fi
+
+  # Default behavior with no selector flags: same as --pick.
+  if ! choose_running_instance_interactive; then
+    echo "Could not pick a running instance. Use --run-id/--instance after starting one." >&2
+    exit 1
+  fi
+  return 0
+}
+
+choose_running_instance_interactive() {
+  require_cmd gcloud
+  local project
+  project="$(project_from_gcloud_config)"
+  if [[ -z "${project}" ]]; then
+    echo "No gcloud project configured. Set one with: gcloud config set project <project-id>" >&2
+    return 1
+  fi
+
+  local rows
+  rows="$(gcloud compute instances list --project "${project}" --filter='name~^ctfvm- AND status=RUNNING' --format='value(name,zone,status)' 2>/dev/null || true)"
+  if [[ -z "${rows//[[:space:]]/}" ]]; then
+    echo "No running ctfvm instances found in project ${project}." >&2
+    return 1
+  fi
+
+  local -a names zones statuses
+  local line name zone status
+  while IFS= read -r line; do
+    [[ -z "${line//[[:space:]]/}" ]] && continue
+    name="$(awk '{print $1}' <<< "${line}")"
+    zone="$(awk '{print $2}' <<< "${line}")"
+    status="$(awk '{print $3}' <<< "${line}")"
+    zone="${zone##*/}"
+    names+=("${name}")
+    zones+=("${zone}")
+    statuses+=("${status}")
+  done <<< "${rows}"
+
+  local count="${#names[@]}"
+  if [[ "${count}" -eq 0 ]]; then
+    echo "No running ctfvm instances found in project ${project}." >&2
+    return 1
+  fi
+
+  if [[ "${count}" -eq 1 ]]; then
+    INSTANCE="${names[0]}"
+    ZONE="${zones[0]}"
+    PROJECT="${project}"
+    RUN_ID="$(run_id_from_instance_name "${INSTANCE}")"
+    REMOTE_RUN_DIR="/home/ctf/run"
+    return 0
+  fi
+
+  local selected_index=""
+  if [[ -t 0 && -t 1 ]]; then
+    echo "Select a running ctfvm instance:"
+    local i run_hint
+    for i in "${!names[@]}"; do
+      run_hint="$(run_id_from_instance_name "${names[$i]}")"
+      printf '  %s) %s  (run_id=%s, zone=%s, status=%s)\n' \
+        "$((i + 1))" "${names[$i]}" "${run_hint}" "${zones[$i]}" "${statuses[$i]}"
+    done
+    while true; do
+      printf 'Enter selection [1-%s]: ' "${count}" >&2
+      read -r selected_index || return 1
+      if [[ "${selected_index}" =~ ^[0-9]+$ ]] && (( selected_index >= 1 && selected_index <= count )); then
+        selected_index="$((selected_index - 1))"
+        break
+      fi
+      echo "Invalid selection." >&2
+    done
+  else
+    # Non-interactive fallback: use current-run.json if it points to a running ctfvm, else first.
+    if [[ -f "${STATE_FILE}" ]]; then
+      local cur_instance cur_zone
+      cur_instance="$(json_get_from_file instance "${STATE_FILE}" || true)"
+      cur_zone="$(json_get_from_file zone "${STATE_FILE}" || true)"
+      for i in "${!names[@]}"; do
+        if [[ "${names[$i]}" == "${cur_instance}" && "${zones[$i]}" == "${cur_zone}" ]]; then
+          selected_index="${i}"
+          break
+        fi
+      done
+    fi
+    if [[ -z "${selected_index}" ]]; then
+      selected_index="0"
+    fi
+  fi
+
+  INSTANCE="${names[$selected_index]}"
+  ZONE="${zones[$selected_index]}"
+  PROJECT="${project}"
+  RUN_ID="$(run_id_from_instance_name "${INSTANCE}")"
+  REMOTE_RUN_DIR="/home/ctf/run"
+}
+
+gcloud_ssh() {
+  local cmd="$1"
+  gcloud compute ssh "${INSTANCE}" \
+    --zone "${ZONE}" \
+    --project "${PROJECT}" \
+    --command "${cmd}"
+}
+
+wait_for_ssh() {
+  local retries=40
+  local sleep_s=5
+  local i
+
+  for i in $(seq 1 "${retries}"); do
+    if gcloud compute ssh "${INSTANCE}" --zone "${ZONE}" --project "${PROJECT}" --command "echo ready" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep "${sleep_s}"
+  done
+
+  echo "Timed out waiting for SSH to ${INSTANCE}" >&2
+  exit 1
+}
+
+wait_for_remote_bootstrap() {
+  local retries=60
+  local sleep_s=5
+  local i
+
+  for i in $(seq 1 "${retries}"); do
+    if gcloud_ssh "test -d /home/ctf/run && id ctf >/dev/null 2>&1 && command -v docker >/dev/null 2>&1"; then
+      return 0
+    fi
+    sleep "${sleep_s}"
+  done
+
+  echo "Timed out waiting for VM bootstrap to finish (/home/ctf/run, ctf user, docker)." >&2
+  echo "Check startup logs with:" >&2
+  echo "  gcloud compute ssh ${INSTANCE} --zone ${ZONE} --project ${PROJECT} --command 'sudo tail -n 200 /var/log/ctfvm-startup.log'" >&2
+  exit 1
+}
+
+sync_codex_auth() {
+  local codex_home
+  if [[ -n "${CODEX_HOME:-}" ]]; then
+    codex_home="${CODEX_HOME}"
+  else
+    codex_home="${HOME}/.codex"
+  fi
+
+  if [[ ! -d "${codex_home}" ]]; then
+    echo "Codex auth directory not found at ${codex_home}; skipping auth sync." >&2
+    return 0
+  fi
+
+  local base parent
+  base="$(basename "${codex_home}")"
+  parent="$(dirname "${codex_home}")"
+
+  echo "Syncing Codex session data to VM (OAuth session only, no API keys)."
+  COPYFILE_DISABLE=1 tar --no-xattrs -C "${parent}" -cf - "${base}" 2>/dev/null | \
+    gcloud compute ssh "${INSTANCE}" --zone "${ZONE}" --project "${PROJECT}" --command "sudo -u ctf bash -lc 'mkdir -p /home/ctf/run && tar -C /home/ctf/run -xf - && chmod -R go-rwx /home/ctf/run/.codex'"
+}
+
+build_remote_toolbox() {
+  local variant="${1:-lean}"
+  echo "Building toolbox image on VM (${variant} variant; first run may take several minutes)."
+  gcloud_ssh "sudo -u ctf bash -lc 'cd /home/ctf/run/ctf-toolbox && DOCKER_BUILDKIT=1 docker build --build-arg CTF_TOOLBOX_VARIANT=${variant} -t ctf-toolbox:latest .'"
+}
+
+load_remote_toolbox_archive() {
+  local remote_archive="$1"
+  echo "Loading cached toolbox image archive on VM."
+  gcloud_ssh "sudo -u ctf bash -lc 'gzip -dc \"${remote_archive}\" | docker load'"
+}
+
+start_remote_toolbox_container() {
+  local variant="${1:-lean}"
+  echo "Starting toolbox container."
+  gcloud_ssh "sudo -u ctf bash -lc 'uid=\"\$(id -u)\"; gid=\"\$(id -g)\"; mkdir -p /home/ctf/run/.codex; chmod 700 /home/ctf/run/.codex; docker rm -f ctf-toolbox >/dev/null 2>&1 || true; docker run -d --name ctf-toolbox --restart unless-stopped --user \"\${uid}:\${gid}\" -v /home/ctf/run:/workspace -e HOME=/workspace -e CODEX_HOME=/workspace/.codex -e CTF_TOOLBOX_VARIANT=${variant} -e VIRTUAL_ENV=/workspace/.venv -e PATH=/workspace/.venv/bin:/usr/local/bin:/usr/bin:/bin -w /workspace ctf-toolbox:latest sleep infinity'"
+  echo "Enabling passwordless sudo inside container for apt installs..."
+  gcloud_ssh "sudo -u ctf bash -lc '
+    runtime_uid=\"\$(docker exec ctf-toolbox id -u)\"
+    runtime_gid=\"\$(docker exec ctf-toolbox id -g)\"
+    docker exec -u root ctf-toolbox bash -lc \"set -euo pipefail; \
+      if ! command -v sudo >/dev/null 2>&1; then \
+        apt-get update && apt-get install -y --no-install-recommends sudo; \
+      fi; \
+      uid=\\\"\${runtime_uid}\\\"; gid=\\\"\${runtime_gid}\\\"; \
+      if ! getent group \\\"\\\${gid}\\\" >/dev/null; then \
+        groupadd -g \\\"\\\${gid}\\\" ctf-runtime || true; \
+      fi; \
+      if ! getent passwd \\\"\\\${uid}\\\" >/dev/null; then \
+        useradd -m -u \\\"\\\${uid}\\\" -g \\\"\\\${gid}\\\" -o -s /bin/bash ctf-runtime || true; \
+      fi; \
+      runtime_user=\\\$(getent passwd \\\"\\\${uid}\\\" | cut -d: -f1); \
+      echo \\\"\\\${runtime_user} ALL=(ALL) NOPASSWD:ALL\\\" > /etc/sudoers.d/ctf-runtime; \
+      chmod 0440 /etc/sudoers.d/ctf-runtime\"'"
+  echo "Installing Python tooling inside running container (${variant} profile)..."
+  gcloud_ssh "sudo -u ctf bash -lc 'docker exec ctf-toolbox bash -lc \"if [ -x /workspace/install-python-runtime.sh ]; then /workspace/install-python-runtime.sh; elif [ -x /usr/local/bin/install-python-runtime.sh ]; then /usr/local/bin/install-python-runtime.sh; else echo \\\"[python-runtime] missing installer in /workspace and /usr/local/bin\\\" >&2; exit 1; fi\"'"
+}
+
+cmd_image() {
+  if [[ $# -lt 1 ]]; then
+    echo "Usage: ctfvm image <build-local|status> [--archive <path>] [--variant lean|full]" >&2
+    exit 1
+  fi
+
+  local subcmd="$1"
+  shift
+
+  local archive_path="${REPO_ROOT}/${DEFAULT_IMAGE_ARCHIVE}"
+  local platform="linux/amd64"
+  local variant="lean"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --archive)
+        archive_path="$2"; shift 2 ;;
+      --platform)
+        platform="$2"; shift 2 ;;
+      --variant)
+        variant="$2"; shift 2 ;;
+      *)
+        echo "Unknown argument: $1" >&2
+        exit 1 ;;
+    esac
+  done
+
+  if [[ "${variant}" != "lean" && "${variant}" != "full" ]]; then
+    echo "Invalid variant: ${variant}. Use lean or full." >&2
+    exit 1
+  fi
+
+  case "${subcmd}" in
+    build-local)
+      require_cmd docker
+      require_cmd gzip
+      mkdir -p "$(dirname "${archive_path}")"
+      echo "Building local toolbox image (${platform}, ${variant}) from ${REPO_ROOT}/images/ctf-toolbox"
+      export DOCKER_BUILDKIT=1
+      docker build --platform "${platform}" --build-arg "CTF_TOOLBOX_VARIANT=${variant}" -t ctf-toolbox:latest "${REPO_ROOT}/images/ctf-toolbox"
+      echo "Saving local toolbox archive to ${archive_path}"
+      docker save ctf-toolbox:latest | gzip -1 > "${archive_path}"
+      echo "Local image archive ready: ${archive_path}"
+      ;;
+    status)
+      if [[ -f "${archive_path}" ]]; then
+        ls -lh "${archive_path}"
+      else
+        echo "No local image archive at ${archive_path}"
+        exit 1
+      fi
+      ;;
+    *)
+      echo "Unknown image subcommand: ${subcmd}" >&2
+      exit 1
+      ;;
+  esac
+}
+
+cmd_start() {
+  require_cmd gcloud
+  require_cmd tar
+
+  local challenge_dir=""
+  local desc=""
+  local desc_file=""
+  local ideas=""
+  local timeout_min="1440"
+  local machine_type="e2-standard-4"
+  local zone=""
+  local project=""
+  local no_auth_sync="0"
+  local force_remote_build="0"
+  local use_local_image="1"
+  local local_image_archive="${REPO_ROOT}/${DEFAULT_IMAGE_ARCHIVE}"
+  local toolbox_variant="lean"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dir)
+        challenge_dir="$2"; shift 2 ;;
+      --desc)
+        desc="$2"; shift 2 ;;
+      --desc-file)
+        desc_file="$2"; shift 2 ;;
+      --ideas)
+        ideas="$2"; shift 2 ;;
+      --timeout-min)
+        timeout_min="$2"; shift 2 ;;
+      --machine-type)
+        machine_type="$2"; shift 2 ;;
+      --zone)
+        zone="$2"; shift 2 ;;
+      --project)
+        project="$2"; shift 2 ;;
+      --no-auth-sync)
+        no_auth_sync="1"; shift ;;
+      --force-remote-build)
+        force_remote_build="1"; shift ;;
+      --use-local-image)
+        use_local_image="1"; shift ;;
+      --local-image-archive)
+        local_image_archive="$2"; shift 2 ;;
+      --toolbox-variant)
+        toolbox_variant="$2"; shift 2 ;;
+      *)
+        echo "Unknown argument: $1" >&2
+        exit 1 ;;
+    esac
+  done
+
+  if [[ "${toolbox_variant}" != "lean" && "${toolbox_variant}" != "full" ]]; then
+    echo "Invalid toolbox variant: ${toolbox_variant}. Use lean or full." >&2
+    exit 1
+  fi
+
+  if [[ -n "${desc}" && -n "${desc_file}" ]]; then
+    echo "Use either --desc or --desc-file, not both." >&2
+    exit 1
+  fi
+  if [[ -n "${desc_file}" ]]; then
+    if [[ ! -f "${desc_file}" ]]; then
+      echo "Description file not found: ${desc_file}" >&2
+      exit 1
+    fi
+    desc="$(cat "${desc_file}")"
+  fi
+
+  if [[ -z "${challenge_dir}" ]]; then
+    echo "Missing required flag: --dir <challenge-folder>" >&2
+    exit 1
+  fi
+
+  if [[ ! -d "${challenge_dir}" ]]; then
+    echo "Challenge directory not found: ${challenge_dir}" >&2
+    exit 1
+  fi
+
+  if [[ ! -f "${REPO_ROOT}/vm/startup.sh" || ! -f "${REPO_ROOT}/runner/supervisor.sh" || ! -f "${REPO_ROOT}/runner/spawn-idea-workers.sh" || ! -f "${REPO_ROOT}/runner/install-python-runtime.sh" || ! -d "${REPO_ROOT}/skills" ]]; then
+    echo "Required implementation files are missing in repo." >&2
+    exit 1
+  fi
+
+  if [[ -z "${zone}" ]]; then
+    zone="$(gcloud config get-value compute/zone 2>/dev/null || true)"
+  fi
+  if [[ -z "${project}" ]]; then
+    project="$(gcloud config get-value project 2>/dev/null || true)"
+  fi
+
+  if [[ -z "${zone}" || -z "${project}" ]]; then
+    echo "Missing GCP defaults. Set with gcloud config or pass --zone and --project." >&2
+    exit 1
+  fi
+
+  local run_id instance challenge_slug prompt_tmp ip auth_sync
+  local remote_upload_dir="/tmp/ctfvm-upload"
+  run_id="$(date +%Y%m%d-%H%M%S)"
+  challenge_slug="$(instance_slug_from_challenge_dir "${challenge_dir}")"
+  instance="ctfvm-${challenge_slug}-${run_id}"
+  prompt_tmp="$(mktemp)"
+  auth_sync="enabled"
+
+  if [[ "${force_remote_build}" == "1" ]]; then
+    echo "--force-remote-build is disabled. This workflow is local-image only." >&2
+    exit 1
+  fi
+
+  if [[ "${use_local_image}" != "1" ]]; then
+    echo "This workflow requires local image usage; use --local-image-archive if needed." >&2
+    exit 1
+  fi
+
+  if [[ ! -f "${local_image_archive}" ]]; then
+    echo "Local image archive not found: ${local_image_archive}" >&2
+    echo "Build it with: ${SCRIPT_DIR}/ctfvm image build-local [--archive <path>] [--variant ${toolbox_variant}]" >&2
+    exit 1
+  fi
+  echo "Using local toolbox image archive: ${local_image_archive}"
+
+  {
+    echo "Challenge description:"
+    echo "${desc:-"(none provided)"}"
+    echo
+    echo "Initial ideas:"
+    echo "${ideas:-"(none provided)"}"
+    echo
+    if [[ -f "${REPO_ROOT}/prompts/supervisor/instructions.txt" ]]; then
+      cat "${REPO_ROOT}/prompts/supervisor/instructions.txt"
+    else
+      cat <<'PROMPT'
+Objectives:
+- Solve the challenge safely and document reproducible steps.
+- Save important outputs to /workspace/artifacts.
+- Keep a concise running summary in /workspace/findings.md.
+- Use $ctf-idea-workers when parallel hypothesis testing is needed.
+- Use $webhook-site-callbacks when callback probes or blind-vector confirmation is needed.
+- If blocked, produce concrete next-step hypotheses.
+PROMPT
+    fi
+  } > "${prompt_tmp}"
+
+  echo "Creating VM ${instance} in ${project}/${zone}"
+  gcloud compute instances create "${instance}" \
+    --project "${project}" \
+    --zone "${zone}" \
+    --machine-type "${machine_type}" \
+    --image-family debian-12 \
+    --image-project debian-cloud \
+    --boot-disk-size 80GB \
+    --scopes https://www.googleapis.com/auth/cloud-platform \
+    --metadata "ctfvm-timeout-min=${timeout_min}" \
+    --metadata-from-file "startup-script=${REPO_ROOT}/vm/startup.sh"
+
+  INSTANCE="${instance}"
+  ZONE="${zone}"
+  PROJECT="${project}"
+
+  echo "Waiting for VM SSH availability..."
+  wait_for_ssh
+
+  echo "Waiting for VM bootstrap readiness..."
+  wait_for_remote_bootstrap
+
+  gcloud_ssh "mkdir -p ${remote_upload_dir} && rm -rf ${remote_upload_dir}/*"
+
+  echo "Uploading challenge and runner files..."
+  gcloud compute scp --recurse "${challenge_dir}" "${instance}:${remote_upload_dir}/challenge" --zone "${zone}" --project "${project}"
+  gcloud compute scp "${prompt_tmp}" "${instance}:${remote_upload_dir}/challenge_prompt.txt" --zone "${zone}" --project "${project}"
+  gcloud compute scp "${REPO_ROOT}/runner/supervisor.sh" "${REPO_ROOT}/runner/spawn-idea-workers.sh" "${REPO_ROOT}/runner/install-python-runtime.sh" "${instance}:${remote_upload_dir}/" --zone "${zone}" --project "${project}"
+  if [[ -d "${REPO_ROOT}/prompts" ]]; then
+    gcloud compute scp --recurse "${REPO_ROOT}/prompts" "${instance}:${remote_upload_dir}/" --zone "${zone}" --project "${project}"
+  fi
+  gcloud compute scp --recurse "${REPO_ROOT}/skills" "${instance}:${remote_upload_dir}/" --zone "${zone}" --project "${project}"
+  gcloud compute scp "${local_image_archive}" "${instance}:${remote_upload_dir}/ctf-toolbox.tar.gz" --zone "${zone}" --project "${project}"
+
+  gcloud_ssh "sudo mkdir -p /home/ctf/run /home/ctf/run/.codex/skills && sudo rm -rf /home/ctf/run/challenge /home/ctf/run/prompts /home/ctf/run/.codex/skills/* && sudo cp -R ${remote_upload_dir}/challenge /home/ctf/run/challenge && if [ -d ${remote_upload_dir}/prompts ]; then sudo cp -R ${remote_upload_dir}/prompts /home/ctf/run/prompts; fi && if [ -d ${remote_upload_dir}/skills ]; then sudo cp -R ${remote_upload_dir}/skills/. /home/ctf/run/.codex/skills/; fi && sudo cp ${remote_upload_dir}/challenge_prompt.txt /home/ctf/run/challenge_prompt.txt && sudo cp ${remote_upload_dir}/supervisor.sh ${remote_upload_dir}/spawn-idea-workers.sh ${remote_upload_dir}/install-python-runtime.sh /home/ctf/run/ && sudo chown -R ctf:ctf /home/ctf/run && sudo chmod 644 /home/ctf/run/challenge_prompt.txt && sudo -u ctf chmod +x /home/ctf/run/supervisor.sh /home/ctf/run/spawn-idea-workers.sh /home/ctf/run/install-python-runtime.sh"
+
+  if [[ "${no_auth_sync}" == "0" ]]; then
+    sync_codex_auth
+  else
+    auth_sync="disabled"
+  fi
+
+  if ! gcloud_ssh "test -f ${remote_upload_dir}/ctf-toolbox.tar.gz"; then
+    echo "Local archive missing on VM after upload; aborting (local-image-only mode)." >&2
+    exit 1
+  fi
+  load_remote_toolbox_archive "${remote_upload_dir}/ctf-toolbox.tar.gz"
+  start_remote_toolbox_container "${toolbox_variant}"
+  gcloud_ssh "rm -rf ${remote_upload_dir}"
+
+  local supervisor_cmd="/home/ctf/run/supervisor.sh --run-dir /home/ctf/run --prompt-file /home/ctf/run/challenge_prompt.txt"
+
+  echo "Launching tmux supervisor..."
+  gcloud_ssh "sudo -u ctf bash -lc 'mkdir -p /home/ctf/run/logs /home/ctf/run/artifacts && tmux kill-session -t ctf >/dev/null 2>&1 || true && tmux new-session -d -s ctf -n supervisor \"${supervisor_cmd}\"'"
+
+  ip="$(gcloud compute instances describe "${instance}" --zone "${zone}" --project "${project}" --format='get(networkInterfaces[0].accessConfigs[0].natIP)')"
+
+  write_state "${instance}" "${zone}" "${project}" "${machine_type}" "${run_id}" "$(cd "${challenge_dir}" && pwd)" "${timeout_min}" "" "${auth_sync}" "${no_auth_sync}" "${ip}"
+
+  rm -f "${prompt_tmp}"
+
+  echo "Run started."
+  echo "  Instance: ${instance}"
+  echo "  IP: ${ip}"
+  echo "  Attach: ${SCRIPT_DIR}/ctfvm attach --run-id ${run_id}"
+  echo "  Logs:   ${SCRIPT_DIR}/ctfvm logs --run-id ${run_id}"
+}
+
+cmd_status() {
+  parse_selector_args "$@"
+  set -- ${PARSED_SELECTOR_ARGS[@]+"${PARSED_SELECTOR_ARGS[@]}"}
+  if [[ $# -gt 0 ]]; then
+    echo "Unknown argument: $1" >&2
+    exit 1
+  fi
+  resolve_target_required
+  local status ip
+  status="$(gcloud compute instances describe "${INSTANCE}" --zone "${ZONE}" --project "${PROJECT}" --format='get(status)' 2>/dev/null || true)"
+  ip="$(gcloud compute instances describe "${INSTANCE}" --zone "${ZONE}" --project "${PROJECT}" --format='get(networkInterfaces[0].accessConfigs[0].natIP)' 2>/dev/null || true)"
+
+  echo "Instance: ${INSTANCE}"
+  echo "Project:  ${PROJECT}"
+  echo "Zone:     ${ZONE}"
+  echo "Status:   ${status:-UNKNOWN}"
+  echo "IP:       ${ip:-unknown}"
+  echo "Run ID:   ${RUN_ID}"
+  echo "State:    ${STATE_FILE}"
+}
+
+cmd_attach() {
+  parse_selector_args "$@"
+  set -- ${PARSED_SELECTOR_ARGS[@]+"${PARSED_SELECTOR_ARGS[@]}"}
+  if [[ $# -gt 0 ]]; then
+    echo "Unknown argument: $1" >&2
+    exit 1
+  fi
+  resolve_target_required
+  gcloud compute ssh "${INSTANCE}" --zone "${ZONE}" --project "${PROJECT}" -- -t 'sudo -u ctf tmux select-window -t ctf:supervisor >/dev/null 2>&1 || true; sudo -u ctf tmux attach -t ctf || sudo -u ctf tmux ls'
+}
+
+cmd_chat() {
+  parse_selector_args "$@"
+  set -- ${PARSED_SELECTOR_ARGS[@]+"${PARSED_SELECTOR_ARGS[@]}"}
+  if [[ $# -gt 0 ]]; then
+    echo "Unknown argument: $1" >&2
+    exit 1
+  fi
+  resolve_target_required
+  gcloud compute ssh "${INSTANCE}" --zone "${ZONE}" --project "${PROJECT}" -- -t 'sudo -u ctf tmux attach -t ctf:supervisor || sudo -u ctf tmux ls'
+}
+
+cmd_shell() {
+  parse_selector_args "$@"
+  set -- ${PARSED_SELECTOR_ARGS[@]+"${PARSED_SELECTOR_ARGS[@]}"}
+  if [[ $# -gt 0 ]]; then
+    echo "Unknown argument: $1" >&2
+    exit 1
+  fi
+  resolve_target_required
+  gcloud compute ssh "${INSTANCE}" --zone "${ZONE}" --project "${PROJECT}" -- -t 'sudo -u ctf -i'
+}
+
+cmd_logs() {
+  parse_selector_args "$@"
+  set -- ${PARSED_SELECTOR_ARGS[@]+"${PARSED_SELECTOR_ARGS[@]}"}
+  if [[ $# -gt 0 ]]; then
+    echo "Unknown argument: $1" >&2
+    exit 1
+  fi
+  resolve_target_required
+  gcloud_ssh "sudo -u ctf bash -lc 'tail -n 200 -f ${REMOTE_RUN_DIR}/logs/supervisor.log'"
+}
+
+cmd_monitor() {
+  parse_selector_args "$@"
+  set -- ${PARSED_SELECTOR_ARGS[@]+"${PARSED_SELECTOR_ARGS[@]}"}
+  if [[ $# -gt 0 ]]; then
+    echo "Unknown argument: $1" >&2
+    exit 1
+  fi
+  resolve_target_required
+  gcloud_ssh "sudo -u ctf bash -lc '
+    if ! tmux has-session -t ctf 2>/dev/null; then
+      echo \"No tmux session named ctf found.\"
+      exit 1
+    fi
+    while true; do
+      if [ -n \"${TERM:-}\" ] && [ \"${TERM}\" != \"dumb\" ]; then
+        clear || true
+      fi
+      echo \"=== ctfvm monitor: ${INSTANCE} (${ZONE}) ===\"
+      date -u +\"UTC %Y-%m-%d %H:%M:%S\"
+      echo
+      echo \"--- tmux windows ---\"
+      tmux list-windows -t ctf || true
+      echo
+      echo \"--- supervisor pane (last 120 lines) ---\"
+      tmux capture-pane -p -t ctf:supervisor -S -120 2>/dev/null || echo \"supervisor window not found\"
+      sleep 2
+    done
+  '"
+}
+
+cmd_ui() {
+  local host="127.0.0.1"
+  local port="8765"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --host)
+        host="$2"; shift 2 ;;
+      --port)
+        port="$2"; shift 2 ;;
+      *)
+        echo "Unknown argument: $1" >&2
+        exit 1 ;;
+    esac
+  done
+
+  require_cmd python3
+  python3 "${REPO_ROOT}/scripts/ctfvm_ui.py" --host "${host}" --port "${port}"
+}
+
+cmd_inject() {
+  parse_selector_args "$@"
+  set -- ${PARSED_SELECTOR_ARGS[@]+"${PARSED_SELECTOR_ARGS[@]}"}
+  local msg=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --msg)
+        msg="$2"; shift 2 ;;
+      *)
+        echo "Unknown argument: $1" >&2
+        exit 1 ;;
+    esac
+  done
+
+  resolve_target_required
+
+  if [[ -z "${msg}" ]]; then
+    echo "Missing required flag: --msg \"...\"" >&2
+    exit 1
+  fi
+
+  local line payload_b64
+  line="[$(date -u +%Y-%m-%dT%H:%M:%SZ)] ${msg}"
+  payload_b64="$(printf '%s' "${line}" | base64)"
+  gcloud_ssh "sudo -u ctf bash -lc 'printf \"%s\" \"${payload_b64}\" | base64 -d >> ${REMOTE_RUN_DIR}/inject.queue && printf \"\\n\" >> ${REMOTE_RUN_DIR}/inject.queue'"
+  echo "Injected message into ${REMOTE_RUN_DIR}/inject.queue"
+}
+
+cmd_send() {
+  parse_selector_args "$@"
+  set -- ${PARSED_SELECTOR_ARGS[@]+"${PARSED_SELECTOR_ARGS[@]}"}
+  local text=""
+  local target="ctf:supervisor"
+  local enter="1"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --text)
+        text="$2"; shift 2 ;;
+      --target)
+        target="$2"; shift 2 ;;
+      --no-enter)
+        enter="0"; shift ;;
+      *)
+        echo "Unknown argument: $1" >&2
+        exit 1 ;;
+    esac
+  done
+
+  resolve_target_required
+
+  if [[ -z "${text}" ]]; then
+    echo "Missing required flag: --text \"...\"" >&2
+    exit 1
+  fi
+  if [[ ! "${target}" =~ ^[A-Za-z0-9:_-]+$ ]]; then
+    echo "Invalid target: ${target}" >&2
+    echo "Allowed target format: ctf:supervisor, ctf:0, ctf:idea-001" >&2
+    exit 1
+  fi
+
+  local payload_b64
+  payload_b64="$(printf '%s' "${text}" | base64 | tr -d '\n')"
+  if [[ "${enter}" == "1" ]]; then
+    # Send payload and submit key in one remote tmux call to avoid race between separate SSH calls.
+    gcloud_ssh "sudo -u ctf bash -lc 'tmux has-session -t ctf >/dev/null 2>&1 || { echo \"No tmux session ctf\" >&2; exit 1; }; payload=\"\$(printf \"%s\" \"${payload_b64}\" | base64 -d)\"; tmux send-keys -t \"${target}\" -l -- \"\${payload}\"; sleep 0.08; tmux send-keys -t \"${target}\" C-m'"
+  else
+    gcloud_ssh "sudo -u ctf bash -lc 'tmux has-session -t ctf >/dev/null 2>&1 || { echo \"No tmux session ctf\" >&2; exit 1; }; payload=\"\$(printf \"%s\" \"${payload_b64}\" | base64 -d)\"; tmux send-keys -t \"${target}\" -l -- \"\${payload}\"'"
+  fi
+  echo "Sent input to ${target}"
+}
+
+cmd_ideas() {
+  parse_selector_args "$@"
+  set -- ${PARSED_SELECTOR_ARGS[@]+"${PARSED_SELECTOR_ARGS[@]}"}
+  local ideas=""
+  local ideas_file=""
+  local parallel=""
+  local model=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --ideas)
+        ideas="$2"; shift 2 ;;
+      --ideas-file)
+        ideas_file="$2"; shift 2 ;;
+      --parallel)
+        parallel="$2"; shift 2 ;;
+      --model)
+        model="$2"; shift 2 ;;
+      *)
+        echo "Unknown argument: $1" >&2
+        exit 1 ;;
+    esac
+  done
+
+  resolve_target_required
+
+  if [[ -n "${ideas}" && -n "${ideas_file}" ]]; then
+    echo "Use either --ideas or --ideas-file, not both." >&2
+    exit 1
+  fi
+  if [[ -z "${ideas}" && -z "${ideas_file}" ]]; then
+    echo "Missing required input. Use --ideas or --ideas-file." >&2
+    exit 1
+  fi
+  if [[ -n "${parallel}" && ( ! "${parallel}" =~ ^[0-9]+$ || "${parallel}" -lt 1 ) ]]; then
+    echo "Invalid --parallel value: ${parallel} (must be >= 1)." >&2
+    exit 1
+  fi
+  if [[ -n "${model}" && ! "${model}" =~ ^[A-Za-z0-9._:-]+$ ]]; then
+    echo "Invalid --model value: ${model}" >&2
+    echo "Allowed characters: letters, numbers, dot, underscore, colon, hyphen." >&2
+    exit 1
+  fi
+
+  local ideas_content=""
+  if [[ -n "${ideas_file}" ]]; then
+    if [[ ! -f "${ideas_file}" ]]; then
+      echo "Ideas file not found: ${ideas_file}" >&2
+      exit 1
+    fi
+    ideas_content="$(cat "${ideas_file}")"
+  else
+    ideas_content="${ideas}"
+  fi
+
+  if [[ -z "${ideas_content//[[:space:]]/}" ]]; then
+    echo "No non-empty ideas provided." >&2
+    exit 1
+  fi
+
+  local remote_ideas_file payload_b64 run_cmd rc
+  remote_ideas_file="${REMOTE_RUN_DIR}/ideas-input-$(date +%Y%m%d-%H%M%S)-$RANDOM.txt"
+  payload_b64="$(printf '%s' "${ideas_content}" | base64 | tr -d '\n')"
+
+  gcloud_ssh "sudo -u ctf bash -lc 'printf \"%s\" \"${payload_b64}\" | base64 -d > ${remote_ideas_file} && chmod 600 ${remote_ideas_file}'"
+
+  run_cmd="/home/ctf/run/spawn-idea-workers.sh --run-dir /home/ctf/run --ideas-file ${remote_ideas_file}"
+  if [[ -n "${parallel}" ]]; then
+    run_cmd="${run_cmd} --parallel ${parallel}"
+  fi
+  if [[ -n "${model}" ]]; then
+    run_cmd="${run_cmd} --model ${model}"
+  fi
+
+  set +e
+  gcloud_ssh "sudo -u ctf bash -lc '${run_cmd}'"
+  rc=$?
+  gcloud_ssh "sudo -u ctf bash -lc 'rm -f ${remote_ideas_file}'" >/dev/null 2>&1 || true
+  set -e
+
+  if [[ "${rc}" -ne 0 ]]; then
+    echo "Failed to spawn idea worker tmux windows. Check ${REMOTE_RUN_DIR}/logs/supervisor.log and tmux session state." >&2
+    exit "${rc}"
+  fi
+
+  echo "Idea worker windows spawned in tmux session ctf."
+  echo "  Attach:    ${SCRIPT_DIR}/ctfvm attach --run-id ${RUN_ID}"
+  echo "  Steer:     ${SCRIPT_DIR}/ctfvm send --run-id ${RUN_ID} --target ctf:idea-001 --text \"...\""
+  echo "  Logs:      ${REMOTE_RUN_DIR}/logs/worker-idea-*.log"
+  echo "  Artifacts: ${REMOTE_RUN_DIR}/artifacts/ideas/"
+}
+
+cmd_sync_skill() {
+  parse_selector_args "$@"
+  set -- ${PARSED_SELECTOR_ARGS[@]+"${PARSED_SELECTOR_ARGS[@]}"}
+  local skill_name="ctf-idea-workers"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --skill)
+        skill_name="$2"; shift 2 ;;
+      *)
+        echo "Unknown argument: $1" >&2
+        exit 1 ;;
+    esac
+  done
+
+  resolve_target_required
+
+  if [[ ! "${skill_name}" =~ ^[a-z0-9-]+$ ]]; then
+    echo "Invalid skill name: ${skill_name}" >&2
+    echo "Use lowercase letters, digits, and hyphens only." >&2
+    exit 1
+  fi
+
+  local local_skill_dir remote_tmp
+  local_skill_dir="${REPO_ROOT}/skills/${skill_name}"
+  if [[ ! -f "${local_skill_dir}/SKILL.md" ]]; then
+    echo "Skill not found or invalid: ${local_skill_dir}" >&2
+    exit 1
+  fi
+
+  remote_tmp="/tmp/ctfvm-skill-sync-${skill_name}-$$"
+  gcloud_ssh "mkdir -p ${remote_tmp}"
+  gcloud compute scp --recurse "${local_skill_dir}" "${INSTANCE}:${remote_tmp}/" --zone "${ZONE}" --project "${PROJECT}"
+  gcloud_ssh "sudo mkdir -p /home/ctf/run/.codex/skills && sudo rm -rf /home/ctf/run/.codex/skills/${skill_name} && sudo cp -R ${remote_tmp}/${skill_name} /home/ctf/run/.codex/skills/${skill_name} && sudo chown -R ctf:ctf /home/ctf/run/.codex/skills/${skill_name} && rm -rf ${remote_tmp}"
+
+  echo "Synced skill ${skill_name} to /home/ctf/run/.codex/skills/${skill_name}"
+}
+
+cmd_key() {
+  parse_selector_args "$@"
+  set -- ${PARSED_SELECTOR_ARGS[@]+"${PARSED_SELECTOR_ARGS[@]}"}
+  local target="ctf:supervisor"
+  local keys=()
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --target)
+        target="$2"; shift 2 ;;
+      --key)
+        keys+=("$2"); shift 2 ;;
+      *)
+        echo "Unknown argument: $1" >&2
+        exit 1 ;;
+    esac
+  done
+
+  resolve_target_required
+
+  if [[ ${#keys[@]} -eq 0 ]]; then
+    echo "Missing required flag: --key <tmux-key>" >&2
+    echo "Example: ctfvm key --key C-c --key Enter" >&2
+    exit 1
+  fi
+  if [[ ! "${target}" =~ ^[A-Za-z0-9:_-]+$ ]]; then
+    echo "Invalid target: ${target}" >&2
+    exit 1
+  fi
+
+  local cmd="tmux has-session -t ctf >/dev/null 2>&1 || { echo \"No tmux session ctf\" >&2; exit 1; }; tmux send-keys -t \"${target}\""
+  local k
+  for k in "${keys[@]}"; do
+    if [[ ! "${k}" =~ ^[A-Za-z0-9^:_+-]+$ ]]; then
+      echo "Invalid key token: ${k}" >&2
+      exit 1
+    fi
+    cmd="${cmd} ${k}"
+  done
+
+  gcloud_ssh "sudo -u ctf bash -lc '${cmd}'"
+  echo "Sent keys to ${target}: ${keys[*]}"
+}
+
+cmd_sync_down() {
+  parse_selector_args "$@"
+  set -- ${PARSED_SELECTOR_ARGS[@]+"${PARSED_SELECTOR_ARGS[@]}"}
+  local out_dir=""
+  local remote_path="${REMOTE_RUN_DIR}/challenge"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --out)
+        out_dir="$2"; shift 2 ;;
+      --remote-path)
+        remote_path="$2"; shift 2 ;;
+      *)
+        echo "Unknown argument: $1" >&2
+        exit 1 ;;
+    esac
+  done
+
+  resolve_target_required
+
+  if [[ -z "${out_dir}" ]]; then
+    out_dir="./ctfvm-live-${RUN_ID}"
+  fi
+
+  mkdir -p "${out_dir}"
+  gcloud_ssh "sudo -u ctf bash -lc 'test -d \"${remote_path}\"'"
+  gcloud_ssh "sudo -u ctf bash -lc 'tar -C \"${remote_path}\" -cf - .'" | tar -C "${out_dir}" -xf -
+  echo "Synced remote ${remote_path} -> $(cd "${out_dir}" && pwd)"
+}
+
+cmd_sync_up() {
+  parse_selector_args "$@"
+  set -- ${PARSED_SELECTOR_ARGS[@]+"${PARSED_SELECTOR_ARGS[@]}"}
+  local src_dir=""
+  local remote_path="${REMOTE_RUN_DIR}/challenge"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --src)
+        src_dir="$2"; shift 2 ;;
+      --remote-path)
+        remote_path="$2"; shift 2 ;;
+      *)
+        echo "Unknown argument: $1" >&2
+        exit 1 ;;
+    esac
+  done
+
+  resolve_target_required
+
+  if [[ -z "${src_dir}" ]]; then
+    echo "Missing required flag: --src <local-dir>" >&2
+    exit 1
+  fi
+  if [[ ! -d "${src_dir}" ]]; then
+    echo "Source directory not found: ${src_dir}" >&2
+    exit 1
+  fi
+
+  tar -C "${src_dir}" -cf - . | gcloud_ssh "sudo -u ctf bash -lc 'mkdir -p \"${remote_path}\" && tar -C \"${remote_path}\" -xf -'"
+  echo "Synced $(cd "${src_dir}" && pwd) -> remote ${remote_path}"
+}
+
+cmd_vscode() {
+  parse_selector_args "$@"
+  set -- ${PARSED_SELECTOR_ARGS[@]+"${PARSED_SELECTOR_ARGS[@]}"}
+  resolve_target_required
+  require_cmd gcloud
+  require_cmd code
+
+  local remote_path="${REMOTE_RUN_DIR}/challenge"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --remote-path)
+        remote_path="$2"; shift 2 ;;
+      *)
+        echo "Unknown argument: $1" >&2
+        exit 1 ;;
+    esac
+  done
+
+  # Ensure gcloud-managed SSH host aliases exist for Remote-SSH.
+  gcloud compute config-ssh --project "${PROJECT}" --quiet >/dev/null
+
+  local host_alias
+  host_alias="${INSTANCE}.${ZONE}.${PROJECT}"
+  code --folder-uri "vscode-remote://ssh-remote+${host_alias}${remote_path}"
+  echo "Opened VS Code Remote-SSH at ${host_alias}:${remote_path}"
+}
+
+cmd_fetch() {
+  parse_selector_args "$@"
+  set -- ${PARSED_SELECTOR_ARGS[@]+"${PARSED_SELECTOR_ARGS[@]}"}
+  local out_dir=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --out)
+        out_dir="$2"; shift 2 ;;
+      *)
+        echo "Unknown argument: $1" >&2
+        exit 1 ;;
+    esac
+  done
+
+  resolve_target_required
+
+  if [[ -z "${out_dir}" ]]; then
+    out_dir="./ctfvm-output-${RUN_ID}"
+  fi
+
+  mkdir -p "${out_dir}"
+
+  local remote_tar="/tmp/ctfvm-${RUN_ID}.tar.gz"
+  gcloud_ssh "sudo -u ctf bash -lc 'cd ${REMOTE_RUN_DIR} && tar -czf ${remote_tar} findings.md artifacts logs inject.queue challenge_prompt.txt 2>/dev/null || tar -czf ${remote_tar} artifacts logs challenge_prompt.txt'"
+  gcloud compute scp "${INSTANCE}:${remote_tar}" "${out_dir}/" --zone "${ZONE}" --project "${PROJECT}"
+
+  tar -xzf "${out_dir}/ctfvm-${RUN_ID}.tar.gz" -C "${out_dir}"
+  echo "Fetched artifacts into: $(cd "${out_dir}" && pwd)"
+}
+
+cmd_destroy() {
+  require_cmd gcloud
+  local no_wipe="0"
+  local destroy_all="0"
+  local pick="0"
+  local run_id_selector=""
+  local clear_state="0"
+  local local_selector_used="0"
+  local instance_override=""
+  local zone_override=""
+  local project_override=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --all)
+        destroy_all="1"; shift ;;
+      --pick)
+        pick="1"; shift ;;
+      --run-id)
+        run_id_selector="$2"; shift 2 ;;
+      --instance)
+        instance_override="$2"; shift 2 ;;
+      --zone)
+        zone_override="$2"; shift 2 ;;
+      --project)
+        project_override="$2"; shift 2 ;;
+      --no-wipe-auth)
+        no_wipe="1"; shift ;;
+      *)
+        echo "Unknown argument: $1" >&2
+        exit 1 ;;
+    esac
+  done
+
+  cleanup_local_state_for_instance() {
+    local inst="$1"
+    local zn="$2"
+    local proj="$3"
+    local f fi_inst fi_zone fi_proj
+    local run_guess=""
+    if [[ "${inst}" == ctfvm-* ]]; then
+      run_guess="$(run_id_from_instance_name "${inst}")"
+      rm -f "${RUNS_DIR}/${run_guess}.json"
+    fi
+    for f in "${RUNS_DIR}"/*.json; do
+      [[ -e "${f}" ]] || continue
+      fi_inst="$(json_get_from_file instance "${f}" || true)"
+      fi_zone="$(json_get_from_file zone "${f}" || true)"
+      fi_proj="$(json_get_from_file project "${f}" || true)"
+      if [[ "${fi_inst}" == "${inst}" && "${fi_zone}" == "${zn}" && "${fi_proj}" == "${proj}" ]]; then
+        rm -f "${f}"
+      fi
+    done
+    if [[ -f "${STATE_FILE}" ]]; then
+      fi_inst="$(json_get instance || true)"
+      fi_zone="$(json_get zone || true)"
+      fi_proj="$(json_get project || true)"
+      if [[ "${fi_inst}" == "${inst}" && "${fi_zone}" == "${zn}" && "${fi_proj}" == "${proj}" ]]; then
+        rm -f "${STATE_FILE}"
+      fi
+    fi
+  }
+
+  destroy_one_instance() {
+    local inst="$1"
+    local zn="$2"
+    local proj="$3"
+    if [[ "${no_wipe}" == "0" ]]; then
+      echo "Wiping VM Codex session material before deletion: ${inst} (${zn})"
+      gcloud compute ssh "${inst}" --zone "${zn}" --project "${proj}" --command "sudo -u ctf bash -lc '
+        if [ -d /home/ctf/run/.codex ]; then
+          find /home/ctf/run/.codex -type f -exec shred -u {} + 2>/dev/null || rm -rf /home/ctf/run/.codex
+        fi
+        if [ -d /home/ctf/.codex ]; then
+          find /home/ctf/.codex -type f -exec shred -u {} + 2>/dev/null || rm -rf /home/ctf/.codex
+        fi
+      '" || true
+    fi
+    echo "Deleting instance ${inst}..."
+    if ! gcloud compute instances delete "${inst}" --zone "${zn}" --project "${proj}" --quiet; then
+      echo "Instance deletion returned non-zero for ${inst} (possibly already deleted)." >&2
+    fi
+    cleanup_local_state_for_instance "${inst}" "${zn}" "${proj}"
+  }
+
+  if [[ "${destroy_all}" == "1" && ( "${pick}" == "1" || -n "${run_id_selector}" || -n "${instance_override}" || -n "${zone_override}" || -n "${project_override}" ) ]]; then
+    echo "Use --all by itself (optionally with --no-wipe-auth)." >&2
+    exit 1
+  fi
+  if [[ "${pick}" == "1" && ( -n "${run_id_selector}" || -n "${instance_override}" || -n "${zone_override}" || -n "${project_override}" ) ]]; then
+    echo "Use --pick by itself, or use explicit selectors (--run-id/--instance/--zone/--project)." >&2
+    exit 1
+  fi
+  if [[ -n "${run_id_selector}" && -n "${instance_override}" ]]; then
+    echo "Use either --run-id or --instance, not both." >&2
+    exit 1
+  fi
+  if [[ -n "${run_id_selector}" && ( -n "${zone_override}" || -n "${project_override}" ) ]]; then
+    echo "--run-id cannot be combined with --zone/--project." >&2
+    exit 1
+  fi
+
+  if [[ "${destroy_all}" == "1" ]]; then
+    local project_all rows_all line_all inst_all zone_all count_all
+    project_all="$(project_from_gcloud_config)"
+    if [[ -z "${project_all}" ]]; then
+      echo "No gcloud project configured. Set one with: gcloud config set project <project-id>" >&2
+      exit 1
+    fi
+    rows_all="$(gcloud compute instances list --project "${project_all}" --filter='name~^ctfvm- AND status=RUNNING' --format='value(name,zone,status)' 2>/dev/null || true)"
+    if [[ -z "${rows_all//[[:space:]]/}" ]]; then
+      echo "No running ctfvm instances found in project ${project_all}."
+      exit 0
+    fi
+    count_all=0
+    while IFS= read -r line_all; do
+      [[ -z "${line_all//[[:space:]]/}" ]] && continue
+      inst_all="$(awk '{print $1}' <<< "${line_all}")"
+      zone_all="$(awk '{print $2}' <<< "${line_all}")"
+      zone_all="${zone_all##*/}"
+      [[ -z "${inst_all}" || -z "${zone_all}" ]] && continue
+      destroy_one_instance "${inst_all}" "${zone_all}" "${project_all}"
+      count_all=$((count_all + 1))
+    done <<< "${rows_all}"
+    echo "Destroyed ${count_all} ctfvm instance(s)."
+    echo "Matching local state entries cleared."
+    return 0
+  fi
+
+  if [[ "${pick}" == "1" || ( -z "${run_id_selector}" && -z "${instance_override}" ) ]]; then
+    if ! choose_running_instance_interactive; then
+      echo "Could not pick a running instance." >&2
+      exit 1
+    fi
+  elif [[ -n "${run_id_selector}" ]]; then
+    load_state_required_for_selector "${run_id_selector}" ""
+    local_selector_used="1"
+  elif [[ -n "${instance_override}" && -z "${zone_override}" && -z "${project_override}" ]]; then
+    load_state_required_for_selector "" "${instance_override}"
+    local_selector_used="1"
+  elif [[ -n "${instance_override}" ]]; then
+    INSTANCE="${instance_override}"
+    ZONE="${zone_override}"
+    PROJECT="${project_override}"
+    if [[ -z "${ZONE}" ]]; then
+      ZONE="$(gcloud config get-value compute/zone 2>/dev/null || true)"
+    fi
+    if [[ -z "${PROJECT}" ]]; then
+      PROJECT="$(gcloud config get-value project 2>/dev/null || true)"
+    fi
+    if [[ -z "${ZONE}" || -z "${PROJECT}" ]]; then
+      echo "When using --instance directly, set --zone/--project or configure gcloud defaults." >&2
+      exit 1
+    fi
+    if [[ "${INSTANCE}" == ctfvm-* ]]; then
+      RUN_ID="$(run_id_from_instance_name "${INSTANCE}")"
+    else
+      RUN_ID=""
+    fi
+  else
+    load_state_required
+    local_selector_used="1"
+  fi
+
+  if [[ -f "${STATE_FILE}" ]]; then
+    local state_instance state_zone state_project
+    state_instance="$(json_get instance || true)"
+    state_zone="$(json_get zone || true)"
+    state_project="$(json_get project || true)"
+    if [[ "${state_instance}" == "${INSTANCE}" && "${state_zone}" == "${ZONE}" && "${state_project}" == "${PROJECT}" ]]; then
+      clear_state="1"
+    fi
+  fi
+
+  if [[ "${no_wipe}" == "0" ]]; then
+    echo "Wiping VM Codex session material before deletion..."
+    gcloud_ssh "sudo -u ctf bash -lc '
+      if [ -d /home/ctf/run/.codex ]; then
+        find /home/ctf/run/.codex -type f -exec shred -u {} + 2>/dev/null || rm -rf /home/ctf/run/.codex
+      fi
+      if [ -d /home/ctf/.codex ]; then
+        find /home/ctf/.codex -type f -exec shred -u {} + 2>/dev/null || rm -rf /home/ctf/.codex
+      fi
+    '" || true
+  fi
+
+  echo "Deleting instance ${INSTANCE}..."
+  if ! gcloud compute instances delete "${INSTANCE}" --zone "${ZONE}" --project "${PROJECT}" --quiet; then
+    echo "Instance deletion returned non-zero (possibly already deleted). Clearing local state anyway."
+  fi
+
+  cleanup_local_state_for_instance "${INSTANCE}" "${ZONE}" "${PROJECT}"
+
+  if [[ "${local_selector_used}" == "1" || "${clear_state}" == "1" ]]; then
+    echo "Run destroyed and matching local state cleared."
+  else
+    echo "Run destroyed."
+  fi
+}
+
+cmd_cleanup_state() {
+  require_cmd gcloud
+  ensure_state_dir
+
+  local dry_run="0"
+  local prune_non_running="0"
+  local removed=0
+  local kept=0
+  local checked=0
+  local promoted_current="0"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dry-run)
+        dry_run="1"; shift ;;
+      --prune-non-running)
+        prune_non_running="1"; shift ;;
+      *)
+        echo "Unknown argument: $1" >&2
+        exit 1 ;;
+    esac
+  done
+
+  cleanup_one_state_file() {
+    local file="$1"
+    local label="$2"
+    local inst zn proj status reason remove_now
+
+    [[ -f "${file}" ]] || return 0
+
+    inst="$(json_get_from_file instance "${file}" || true)"
+    zn="$(json_get_from_file zone "${file}" || true)"
+    proj="$(json_get_from_file project "${file}" || true)"
+    checked=$((checked + 1))
+
+    remove_now="0"
+    reason=""
+    if [[ -z "${inst}" || -z "${zn}" || -z "${proj}" ]]; then
+      remove_now="1"
+      reason="incomplete metadata"
+    else
+      status="$(gcloud compute instances describe "${inst}" --zone "${zn}" --project "${proj}" --format='get(status)' 2>/dev/null || true)"
+      if [[ -z "${status}" ]]; then
+        remove_now="1"
+        reason="instance not found"
+      elif [[ "${prune_non_running}" == "1" && "${status}" != "RUNNING" ]]; then
+        remove_now="1"
+        reason="instance status=${status}"
+      fi
+    fi
+
+    if [[ "${remove_now}" == "1" ]]; then
+      removed=$((removed + 1))
+      if [[ "${dry_run}" == "1" ]]; then
+        echo "[dry-run] remove ${label}: ${file} (${reason})"
+      else
+        rm -f "${file}"
+        echo "Removed ${label}: ${file} (${reason})"
+      fi
+    else
+      kept=$((kept + 1))
+    fi
+  }
+
+  local f
+  for f in "${RUNS_DIR}"/*.json; do
+    [[ -e "${f}" ]] || continue
+    cleanup_one_state_file "${f}" "run"
+  done
+  if [[ -f "${STATE_FILE}" ]]; then
+    cleanup_one_state_file "${STATE_FILE}" "current"
+  fi
+
+  if [[ "${dry_run}" == "0" && ! -f "${STATE_FILE}" ]]; then
+    local latest_run=""
+    latest_run="$(ls -1t "${RUNS_DIR}"/*.json 2>/dev/null | head -n1 || true)"
+    if [[ -n "${latest_run}" && -f "${latest_run}" ]]; then
+      cp "${latest_run}" "${STATE_FILE}"
+      promoted_current="1"
+      echo "Set current state from: ${latest_run}"
+    fi
+  fi
+
+  echo "Cleanup complete: checked=${checked}, removed=${removed}, kept=${kept}"
+  if [[ "${dry_run}" == "1" ]]; then
+    echo "Dry-run only: no files were changed."
+  fi
+  if [[ "${promoted_current}" == "1" ]]; then
+    echo "Current state was missing and has been restored from the newest remaining run."
+  fi
+}
+
+usage() {
+  cat <<USAGE
+Usage:
+  ctfvm start --dir <challenge-folder> [--desc <text> | --desc-file <path>] [--ideas <text>] [--timeout-min 1440] [--machine-type e2-standard-4] [--zone <zone>] [--project <project>] [--no-auth-sync] [--local-image-archive <path>]
+  ctfvm image build-local [--archive <path>] [--platform linux/amd64] [--variant lean|full]
+  ctfvm image status [--archive <path>]
+  ctfvm status [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--zone <zone> --project <project>]]
+  ctfvm attach [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--zone <zone> --project <project>]]
+  ctfvm chat [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--zone <zone> --project <project>]]
+  ctfvm shell [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--zone <zone> --project <project>]]
+  ctfvm logs [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--zone <zone> --project <project>]]
+  ctfvm monitor [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--zone <zone> --project <project>]]
+  ctfvm ui [--host 127.0.0.1] [--port 8765]
+  ctfvm inject [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--zone <zone> --project <project>]] --msg <text>
+  ctfvm send [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--zone <zone> --project <project>]] --text <text> [--target ctf:supervisor] [--no-enter]
+  ctfvm key [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--zone <zone> --project <project>]] [--target ctf:supervisor] --key <tmux-key> [--key <tmux-key> ...]
+  ctfvm ideas [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--zone <zone> --project <project>]] (--ideas "idea1;idea2" | --ideas-file <local-file>) [--parallel <n>] [--model gpt-5.3-codex]
+  ctfvm sync-skill [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--zone <zone> --project <project>]] [--skill <skill-name>]
+  ctfvm sync-down [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--zone <zone> --project <project>]] [--out <local-dir>] [--remote-path </home/ctf/run/challenge>]
+  ctfvm sync-up [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--zone <zone> --project <project>]] --src <local-dir> [--remote-path </home/ctf/run/challenge>]
+  ctfvm vscode [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--zone <zone> --project <project>]] [--remote-path </home/ctf/run/challenge>]
+  ctfvm fetch [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--zone <zone> --project <project>]] [--out <local-dir>]
+  ctfvm destroy [--pick | --all | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...>] [--zone <zone> --project <project>] [--no-wipe-auth]
+  ctfvm cleanup-state [--dry-run] [--prune-non-running]
+USAGE
+}
+
+main() {
+  if [[ $# -lt 1 ]]; then
+    usage
+    exit 1
+  fi
+
+  local cmd="$1"
+  shift
+
+  case "${cmd}" in
+    image)
+      cmd_image "$@" ;;
+    start) cmd_start "$@" ;;
+    status) cmd_status "$@" ;;
+    attach) cmd_attach "$@" ;;
+    chat) cmd_chat "$@" ;;
+    shell) cmd_shell "$@" ;;
+    logs) cmd_logs "$@" ;;
+    monitor) cmd_monitor "$@" ;;
+    ui) cmd_ui "$@" ;;
+    inject) cmd_inject "$@" ;;
+    send) cmd_send "$@" ;;
+    key) cmd_key "$@" ;;
+    ideas) cmd_ideas "$@" ;;
+    sync-skill) cmd_sync_skill "$@" ;;
+    sync-down) cmd_sync_down "$@" ;;
+    sync-up) cmd_sync_up "$@" ;;
+    vscode) cmd_vscode "$@" ;;
+    fetch) cmd_fetch "$@" ;;
+    destroy) cmd_destroy "$@" ;;
+    cleanup-state) cmd_cleanup_state "$@" ;;
+    *)
+      echo "Unknown command: ${cmd}" >&2
+      usage
+      exit 1 ;;
+  esac
+}
+
+main "$@"

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Webhook.site Callbacks"
+  short_description: "Webhook.site callback capture and replay for CTF."
+  default_prompt: "Use $webhook-site-callbacks to generate callback URLs, send probe requests, and summarize captured interactions."
