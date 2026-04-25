@@ -16,6 +16,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
   file \
   gdb \
   git \
+  ripgrep \
   iproute2 \
   iputils-ping \
   jq \
@@ -39,10 +40,6 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 
 RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
 
-RUN npm config set fund false \
-  && npm config set update-notifier false \
-  && (npm install -g @openai/codex || npm install -g codex-cli)
-
 RUN if [ "${CTF_TOOLBOX_VARIANT}" = "full" ]; then \
     apt-get update && apt-get install -y --no-install-recommends \
       sagemath \
@@ -53,10 +50,8 @@ RUN if [ "${CTF_TOOLBOX_VARIANT}" = "full" ]; then \
 COPY install-python-runtime.sh /usr/local/bin/install-python-runtime.sh
 RUN chmod +x /usr/local/bin/install-python-runtime.sh
 
-COPY addons /opt/ctf-toolbox/addons
-RUN chmod +x /opt/ctf-toolbox/addons/*.sh
-
 COPY codex-config /opt/ctf-toolbox/codex-config
+COPY mcp /opt/ctf-toolbox/mcp
 
 RUN useradd -m -s /bin/bash ctf \
   && usermod -aG sudo ctf \
@@ -67,6 +62,5 @@ WORKDIR /workspace
 ENV HOME=/home/ctf
 ENV VIRTUAL_ENV=/home/ctf/.venv
 ENV PATH=/home/ctf/.venv/bin:/usr/local/bin:$PATH
-ENV CTF_ADDONS_DIR=/opt/ctf-toolbox/addons
 
 CMD ["sleep", "infinity"]

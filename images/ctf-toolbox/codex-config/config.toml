@@ -1,6 +1,12 @@
 model = "gpt-5.4"
 model_reasoning_effort = "high"
 
+[projects."/workspace"]
+trust_level = "trusted"
+
+[projects."/workspace/challenge"]
+trust_level = "trusted"
+
 [features]
 multi_agent = true
 
@@ -11,3 +17,7 @@ config_file = "roles/exploit_tester.toml"
 [agents.docs_researcher]
 description = "Read-heavy docs and behavior validation role. Use for command semantics, protocol details, API usage, and minimal reproducible behavior checks before risky actions."
 config_file = "roles/docs_researcher.toml"
+
+[mcp_servers.gdb]
+command = "python3"
+args = ["/opt/ctf-toolbox/mcp/gdb_mcp.py"]

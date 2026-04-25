@@ -7,7 +7,70 @@ STATE_DIR="${REPO_ROOT}/.ctfvm"
 STATE_FILE="${STATE_DIR}/current-run.json"
 RUNS_DIR="${STATE_DIR}/runs"
 CACHE_DIR="${STATE_DIR}/cache"
+BRIDGES_DIR="${STATE_DIR}/bridges"
+CONFIG_FILE="${STATE_DIR}/config.json"
 DEFAULT_IMAGE_ARCHIVE="${CACHE_DIR}/ctf-toolbox.tar.gz"
+DEFAULT_DO_PROJECT="digitalocean"
+DEFAULT_CONTROL_PORT="${CTFVM_CONTROL_PORT:-443}"
+REMOTE_BRIDGE_DIR="/home/ctf/run/bridge"
+
+load_repo_env() {
+  local env_file="${CTFVM_ENV_FILE:-${REPO_ROOT}/.env}"
+  if [[ ! -f "${env_file}" ]]; then
+    return 0
+  fi
+  set -a
+  # shellcheck disable=SC1090
+  . "${env_file}"
+  set +a
+}
+
+load_repo_env
+
+DEFAULT_PROVIDER="${CTFVM_PROVIDER:-gcp}"
+
+env_first_set() {
+  local name=""
+  for name in "$@"; do
+    [[ -n "${name}" ]] || continue
+    if [[ -n "${!name:-}" ]]; then
+      printf '%s\n' "${!name}"
+      return 0
+    fi
+  done
+  printf '%s\n' ""
+}
+
+provider_env_prefix() {
+  case "$1" in
+    gcp) printf '%s\n' "CTFVM_GCP" ;;
+    digitalocean) printf '%s\n' "CTFVM_DO" ;;
+    *) return 1 ;;
+  esac
+}
+
+provider_env_name() {
+  local provider="$1"
+  local suffix="$2"
+  printf '%s_%s\n' "$(provider_env_prefix "${provider}")" "${suffix}"
+}
+
+provider_env_value() {
+  local provider="$1"
+  local suffix="$2"
+  env_first_set "$(provider_env_name "${provider}" "${suffix}")" "CTFVM_${suffix}"
+}
+
+resolve_repo_path() {
+  local path="${1:-}"
+  if [[ -z "${path}" || "${path}" == /* ]]; then
+    printf '%s\n' "${path}"
+    return 0
+  fi
+  printf '%s\n' "${REPO_ROOT}/${path}"
+}
+
+. "${REPO_ROOT}/scripts/lib/ctfvm/providers.sh"
 SELECTED_STATE_FILE=""
 PARSED_SELECTOR_ARGS=()
 SEL_PICK="0"
@@ -15,6 +78,12 @@ SEL_RUN_ID=""
 SEL_INSTANCE=""
 SEL_ZONE=""
 SEL_PROJECT=""
+SEL_PROVIDER=""
+CONTROL_SCHEME="http"
+CONTROL_HOST=""
+CONTROL_PORT="${DEFAULT_CONTROL_PORT}"
+CONTROL_USER=""
+CONTROL_PASSWORD=""
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -44,13 +113,138 @@ json_get_from_file() {
   sed -n "s/.*\"${key}\": \"\([^\"]*\)\".*/\1/p" "${file}" | head -n1
 }
 
+random_alnum() {
+  local length="${1:-32}"
+  python3 - "${length}" <<'PY'
+import secrets
+import string
+import sys
+
+alphabet = string.ascii_letters + string.digits
+length = int(sys.argv[1])
+print("".join(secrets.choice(alphabet) for _ in range(length)), end="")
+PY
+}
+
+control_endpoint() {
+  local host="${CONTROL_HOST:-${IP:-}}"
+  local port="${CONTROL_PORT:-${DEFAULT_CONTROL_PORT}}"
+  local scheme="${CONTROL_SCHEME:-http}"
+  if [[ -z "${host}" ]]; then
+    printf '%s\n' ""
+    return 0
+  fi
+  printf '%s\n' "${scheme}://${host}:${port}"
+}
+
+control_plane_configured() {
+  [[ -n "${CONTROL_USER:-}" && -n "${CONTROL_PASSWORD:-}" && -n "$(control_endpoint)" ]]
+}
+
+load_control_plane_from_file() {
+  local file="$1"
+  CONTROL_SCHEME="$(json_get_from_file control_scheme "${file}" || true)"
+  CONTROL_HOST="$(json_get_from_file control_host "${file}" || true)"
+  CONTROL_PORT="$(json_get_from_file control_port "${file}" || true)"
+  CONTROL_USER="$(json_get_from_file control_user "${file}" || true)"
+  CONTROL_PASSWORD="$(json_get_from_file control_password "${file}" || true)"
+  [[ -n "${CONTROL_SCHEME}" ]] || CONTROL_SCHEME="http"
+  [[ -n "${CONTROL_PORT}" ]] || CONTROL_PORT="${DEFAULT_CONTROL_PORT}"
+}
+
 project_from_gcloud_config() {
   local p
+  p="$(env_first_set CTFVM_GCP_PROJECT GOOGLE_CLOUD_PROJECT CLOUDSDK_CORE_PROJECT)"
+  if [[ -n "${p}" ]]; then
+    printf '%s\n' "${p}"
+    return 0
+  fi
   p="$(gcloud config get-value project 2>/dev/null || true)"
   if [[ "${p}" == "(unset)" ]]; then
     p=""
   fi
   printf '%s\n' "${p}"
+}
+
+zone_from_gcloud_config() {
+  local z
+  z="$(env_first_set CTFVM_GCP_ZONE CLOUDSDK_COMPUTE_ZONE)"
+  if [[ -n "${z}" ]]; then
+    printf '%s\n' "${z}"
+    return 0
+  fi
+  z="$(gcloud config get-value compute/zone 2>/dev/null || true)"
+  if [[ "${z}" == "(unset)" ]]; then
+    z=""
+  fi
+  printf '%s\n' "${z}"
+}
+
+region_from_zone() {
+  local zone="$1"
+  if [[ -z "${zone}" || "${zone}" != *-* ]]; then
+    printf '%s\n' ""
+    return 0
+  fi
+  printf '%s\n' "${zone%-[a-z]}"
+}
+
+normalize_provider() {
+  ctfvm_provider_normalize "$@"
+}
+
+default_provider() {
+  ctfvm_provider_normalize "${DEFAULT_PROVIDER}"
+}
+
+provider_from_state_file() {
+  local file="$1"
+  local provider
+  provider="$(json_get_from_file provider "${file}" || true)"
+  if [[ -z "${provider}" ]]; then
+    provider="gcp"
+  fi
+  normalize_provider "${provider}"
+}
+
+provider_label() {
+  ctfvm_provider_label "$@"
+}
+
+provider_location_label() {
+  ctfvm_provider_location_label "$@"
+}
+
+provider_scope_label() {
+  ctfvm_provider_scope_label "$@"
+}
+
+do_region_from_env() {
+  ctfvm_provider_call digitalocean default_location
+}
+
+do_project_name() {
+  ctfvm_provider_call digitalocean default_scope
+}
+
+doctl_droplet_get_field() {
+  ctfvm_provider_call digitalocean get_field "$@"
+}
+
+do_region_for_instance() {
+  ctfvm_provider_call digitalocean get_region "$1"
+}
+
+do_status_for_instance() {
+  ctfvm_provider_call digitalocean get_status "$1"
+}
+
+do_ip_for_instance() {
+  ctfvm_provider_call digitalocean get_ip "$1"
+}
+
+resolve_do_ssh_keys() {
+  ctfvm_provider_call digitalocean resolve_ssh_keys "$@"
 }
 
 run_id_from_instance_name() {
@@ -91,24 +285,358 @@ instance_slug_from_challenge_dir() {
 ensure_state_dir() {
   mkdir -p "${STATE_DIR}"
   mkdir -p "${RUNS_DIR}"
+  mkdir -p "${BRIDGES_DIR}"
+}
+
+write_config() {
+  local provider="$1"
+  local toolbox_image_ref="$2"
+  local variant="$3"
+  local project="$4"
+  local location="$5"
+  local repository="$6"
+  local image_name="$7"
+  local tag="$8"
+
+  ensure_state_dir
+  local gcp_ref gcp_ref_lean gcp_ref_full gcp_project gcp_location gcp_repository gcp_image_name gcp_tag_lean gcp_tag_full
+  local do_ref do_ref_lean do_ref_full do_project do_location do_repository do_image_name do_tag_lean do_tag_full
+
+  gcp_ref="$(config_get_for_provider gcp toolbox_image_ref || true)"
+  gcp_ref_lean="$(config_get_for_provider gcp toolbox_image_ref_lean || true)"
+  gcp_ref_full="$(config_get_for_provider gcp toolbox_image_ref_full || true)"
+  gcp_project="$(config_get_for_provider gcp toolbox_project || true)"
+  gcp_location="$(config_get_for_provider gcp toolbox_location || true)"
+  gcp_repository="$(config_get_for_provider gcp toolbox_repository || true)"
+  gcp_image_name="$(config_get_for_provider gcp toolbox_image_name || true)"
+  gcp_tag_lean="$(config_get_for_provider gcp toolbox_tag_lean || true)"
+  gcp_tag_full="$(config_get_for_provider gcp toolbox_tag_full || true)"
+
+  do_ref="$(config_get_for_provider digitalocean toolbox_image_ref || true)"
+  do_ref_lean="$(config_get_for_provider digitalocean toolbox_image_ref_lean || true)"
+  do_ref_full="$(config_get_for_provider digitalocean toolbox_image_ref_full || true)"
+  do_project="$(config_get_for_provider digitalocean toolbox_project || true)"
+  do_location="$(config_get_for_provider digitalocean toolbox_location || true)"
+  do_repository="$(config_get_for_provider digitalocean toolbox_repository || true)"
+  do_image_name="$(config_get_for_provider digitalocean toolbox_image_name || true)"
+  do_tag_lean="$(config_get_for_provider digitalocean toolbox_tag_lean || true)"
+  do_tag_full="$(config_get_for_provider digitalocean toolbox_tag_full || true)"
+
+  case "$(normalize_provider "${provider}")" in
+    gcp)
+      gcp_ref="${toolbox_image_ref}"
+      gcp_project="${project}"
+      gcp_location="${location}"
+      gcp_repository="${repository}"
+      gcp_image_name="${image_name}"
+      case "${variant}" in
+        lean)
+          gcp_ref_lean="${toolbox_image_ref}"
+          gcp_tag_lean="${tag}" ;;
+        full)
+          gcp_ref_full="${toolbox_image_ref}"
+          gcp_tag_full="${tag}" ;;
+      esac
+      ;;
+    digitalocean)
+      do_ref="${toolbox_image_ref}"
+      do_project="${project}"
+      do_location="${location}"
+      do_repository="${repository}"
+      do_image_name="${image_name}"
+      case "${variant}" in
+        lean)
+          do_ref_lean="${toolbox_image_ref}"
+          do_tag_lean="${tag}" ;;
+        full)
+          do_ref_full="${toolbox_image_ref}"
+          do_tag_full="${tag}" ;;
+      esac
+      ;;
+  esac
+
+  cat > "${CONFIG_FILE}" <<JSON
+{
+  "gcp_toolbox_image_ref": "$(json_escape "${gcp_ref}")",
+  "gcp_toolbox_image_ref_lean": "$(json_escape "${gcp_ref_lean}")",
+  "gcp_toolbox_image_ref_full": "$(json_escape "${gcp_ref_full}")",
+  "gcp_toolbox_project": "$(json_escape "${gcp_project}")",
+  "gcp_toolbox_location": "$(json_escape "${gcp_location}")",
+  "gcp_toolbox_repository": "$(json_escape "${gcp_repository}")",
+  "gcp_toolbox_image_name": "$(json_escape "${gcp_image_name}")",
+  "gcp_toolbox_tag_lean": "$(json_escape "${gcp_tag_lean}")",
+  "gcp_toolbox_tag_full": "$(json_escape "${gcp_tag_full}")",
+  "digitalocean_toolbox_image_ref": "$(json_escape "${do_ref}")",
+  "digitalocean_toolbox_image_ref_lean": "$(json_escape "${do_ref_lean}")",
+  "digitalocean_toolbox_image_ref_full": "$(json_escape "${do_ref_full}")",
+  "digitalocean_toolbox_project": "$(json_escape "${do_project}")",
+  "digitalocean_toolbox_location": "$(json_escape "${do_location}")",
+  "digitalocean_toolbox_repository": "$(json_escape "${do_repository}")",
+  "digitalocean_toolbox_image_name": "$(json_escape "${do_image_name}")",
+  "digitalocean_toolbox_tag_lean": "$(json_escape "${do_tag_lean}")",
+  "digitalocean_toolbox_tag_full": "$(json_escape "${do_tag_full}")",
+  "toolbox_image_ref": "$(json_escape "${gcp_ref}")",
+  "toolbox_image_ref_lean": "$(json_escape "${gcp_ref_lean}")",
+  "toolbox_image_ref_full": "$(json_escape "${gcp_ref_full}")",
+  "toolbox_project": "$(json_escape "${gcp_project}")",
+  "toolbox_location": "$(json_escape "${gcp_location}")",
+  "toolbox_repository": "$(json_escape "${gcp_repository}")",
+  "toolbox_image_name": "$(json_escape "${gcp_image_name}")",
+  "toolbox_tag_lean": "$(json_escape "${gcp_tag_lean}")",
+  "toolbox_tag_full": "$(json_escape "${gcp_tag_full}")",
+  "updated_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+JSON
+}
+
+config_get() {
+  local key="$1"
+  json_get_from_file "${key}" "${CONFIG_FILE}"
+}
+
+config_get_for_provider() {
+  local provider="$1"
+  local key="$2"
+  local provider_key
+  provider_key="$(normalize_provider "${provider}")_${key}"
+  json_get_from_file "${provider_key}" "${CONFIG_FILE}"
+}
+
+resolve_toolbox_image_ref() {
+  local provider="$1"
+  local variant="$2"
+  local project="${3:-}"
+  local zone="${4:-}"
+  local location="${5:-}"
+  local repository="${6:-}"
+  local image_name="${7:-}"
+  local tag="${8:-}"
+  local image_ref=""
+  local configured_project=""
+  local configured_location=""
+  local configured_repository=""
+  local configured_image_name=""
+  local configured_tag=""
+
+  case "${variant}" in
+    lean)
+      image_ref="$(env_first_set "$(provider_env_name "${provider}" "TOOLBOX_IMAGE_REF_LEAN")" "CTFVM_TOOLBOX_IMAGE_REF_LEAN")"
+      if [[ -z "${image_ref}" ]]; then
+        image_ref="$(config_get_for_provider "${provider}" toolbox_image_ref_lean || true)"
+      fi
+      configured_tag="$(config_get_for_provider "${provider}" toolbox_tag_lean || true)" ;;
+    full)
+      image_ref="$(env_first_set "$(provider_env_name "${provider}" "TOOLBOX_IMAGE_REF_FULL")" "CTFVM_TOOLBOX_IMAGE_REF_FULL")"
+      if [[ -z "${image_ref}" ]]; then
+        image_ref="$(config_get_for_provider "${provider}" toolbox_image_ref_full || true)"
+      fi
+      configured_tag="$(config_get_for_provider "${provider}" toolbox_tag_full || true)" ;;
+  esac
+  if [[ -z "${image_ref}" && "${provider}" == "gcp" ]]; then
+    case "${variant}" in
+      lean)
+        image_ref="$(config_get toolbox_image_ref_lean || true)"
+        configured_tag="${configured_tag:-$(config_get toolbox_tag_lean || true)}" ;;
+      full)
+        image_ref="$(config_get toolbox_image_ref_full || true)"
+        configured_tag="${configured_tag:-$(config_get toolbox_tag_full || true)}" ;;
+    esac
+  fi
+  if [[ -z "${image_ref}" ]]; then
+    image_ref="$(env_first_set "$(provider_env_name "${provider}" "TOOLBOX_IMAGE_REF")" "CTFVM_TOOLBOX_IMAGE_REF")"
+  fi
+
+  if [[ -n "${image_ref}" && -z "${location}${repository}${image_name}${tag}" ]]; then
+    printf '%s\n' "${image_ref}"
+    return 0
+  fi
+
+  configured_project="$(config_get_for_provider "${provider}" toolbox_project || true)"
+  configured_location="$(config_get_for_provider "${provider}" toolbox_location || true)"
+  configured_repository="$(config_get_for_provider "${provider}" toolbox_repository || true)"
+  configured_image_name="$(config_get_for_provider "${provider}" toolbox_image_name || true)"
+  if [[ "${provider}" == "gcp" ]]; then
+    configured_project="${configured_project:-$(config_get toolbox_project || true)}"
+    configured_location="${configured_location:-$(config_get toolbox_location || true)}"
+    configured_repository="${configured_repository:-$(config_get toolbox_repository || true)}"
+    configured_image_name="${configured_image_name:-$(config_get toolbox_image_name || true)}"
+  fi
+
+  if [[ -z "${project}" ]]; then
+    project="$(provider_env_value "${provider}" "PROJECT")"
+    if [[ -z "${project}" ]]; then
+      project="${configured_project}"
+    fi
+  fi
+  if [[ -z "${location}" ]]; then
+    location="$(provider_env_value "${provider}" "TOOLBOX_LOCATION")"
+    if [[ -z "${location}" ]]; then
+      location="${configured_location}"
+    fi
+  fi
+  if [[ -z "${location}" && -n "${zone}" ]]; then
+    location="$(ctfvm_provider_call "${provider}" default_registry_location "${zone}" || true)"
+  fi
+  if [[ -z "${repository}" ]]; then
+    repository="$(provider_env_value "${provider}" "TOOLBOX_REPOSITORY")"
+    if [[ -z "${repository}" ]]; then
+      repository="${configured_repository:-ctfvm}"
+    fi
+  fi
+  if [[ -z "${image_name}" ]]; then
+    image_name="$(provider_env_value "${provider}" "TOOLBOX_IMAGE_NAME")"
+    if [[ -z "${image_name}" ]]; then
+      image_name="${configured_image_name:-ctf-toolbox}"
+    fi
+  fi
+  if [[ -z "${tag}" ]]; then
+    tag="${configured_tag:-${variant}}"
+  fi
+
+  if [[ -z "${repository}" || -z "${image_name}" || -z "${tag}" ]]; then
+    if [[ -z "${image_ref}" ]]; then
+      image_ref="$(config_get_for_provider "${provider}" toolbox_image_ref || true)"
+    fi
+    if [[ -z "${image_ref}" && "${provider}" == "gcp" ]]; then
+      image_ref="$(config_get toolbox_image_ref || true)"
+    fi
+    printf '%s\n' "${image_ref}"
+    return 0
+  fi
+
+  ctfvm_provider_call "${provider}" registry_image_ref "${project}" "${location}" "${repository}" "${image_name}" "${tag}"
+}
+
+describe_toolbox_resolution() {
+  local provider="$1"
+  local project="$2"
+  local location="$3"
+  local repository="$4"
+  local image_name="$5"
+  local tag="$6"
+  printf '%s\n' "provider=${provider} scope=${project} location=${location} repository=${repository} image=${image_name} tag=${tag}"
+}
+
+resolve_toolbox_tag() {
+  local provider="$1"
+  local variant="$2"
+  local tag="${3:-}"
+  if [[ -n "${tag}" ]]; then
+    printf '%s\n' "${tag}"
+    return 0
+  fi
+  case "${variant}" in
+    lean)
+      tag="$(env_first_set "$(provider_env_name "${provider}" "TOOLBOX_TAG_LEAN")" "CTFVM_TOOLBOX_TAG_LEAN")"
+      if [[ -z "${tag}" ]]; then
+        tag="$(config_get_for_provider "${provider}" toolbox_tag_lean || true)"
+      fi ;;
+    full)
+      tag="$(env_first_set "$(provider_env_name "${provider}" "TOOLBOX_TAG_FULL")" "CTFVM_TOOLBOX_TAG_FULL")"
+      if [[ -z "${tag}" ]]; then
+        tag="$(config_get_for_provider "${provider}" toolbox_tag_full || true)"
+      fi ;;
+  esac
+  if [[ -z "${tag}" && "${provider}" == "gcp" ]]; then
+    case "${variant}" in
+      lean)
+        tag="$(config_get toolbox_tag_lean || true)" ;;
+      full)
+        tag="$(config_get toolbox_tag_full || true)" ;;
+    esac
+  fi
+  if [[ -z "${tag}" ]]; then
+    tag="${variant}"
+  fi
+  printf '%s\n' "${tag}"
+}
+
+resolve_toolbox_repository() {
+  local provider="$1"
+  local repository="${2:-}"
+  if [[ -z "${repository}" ]]; then
+    repository="$(provider_env_value "${provider}" "TOOLBOX_REPOSITORY")"
+  fi
+  if [[ -z "${repository}" ]]; then
+    repository="$(config_get_for_provider "${provider}" toolbox_repository || true)"
+  fi
+  if [[ -z "${repository}" && "${provider}" == "gcp" ]]; then
+    repository="$(config_get toolbox_repository || true)"
+  fi
+  if [[ -z "${repository}" && "${provider}" == "digitalocean" ]]; then
+    repository="$(ctfvm_provider_call "${provider}" default_registry_repository || true)"
+  fi
+  if [[ -z "${repository}" && "${provider}" != "digitalocean" ]]; then
+    repository="ctfvm"
+  fi
+  printf '%s\n' "${repository}"
+}
+
+resolve_toolbox_image_name() {
+  local provider="$1"
+  local image_name="${2:-}"
+  if [[ -z "${image_name}" ]]; then
+    image_name="$(provider_env_value "${provider}" "TOOLBOX_IMAGE_NAME")"
+  fi
+  if [[ -z "${image_name}" ]]; then
+    image_name="$(config_get_for_provider "${provider}" toolbox_image_name || true)"
+  fi
+  if [[ -z "${image_name}" && "${provider}" == "gcp" ]]; then
+    image_name="$(config_get toolbox_image_name || true)"
+  fi
+  if [[ -z "${image_name}" ]]; then
+    image_name="ctf-toolbox"
+  fi
+  printf '%s\n' "${image_name}"
+}
+
+resolve_toolbox_location() {
+  local provider="$1"
+  local location="${2:-}"
+  local zone="${3:-}"
+  if [[ -z "${location}" ]]; then
+    location="$(provider_env_value "${provider}" "TOOLBOX_LOCATION")"
+  fi
+  if [[ -z "${location}" ]]; then
+    location="$(config_get_for_provider "${provider}" toolbox_location || true)"
+  fi
+  if [[ -z "${location}" && "${provider}" == "gcp" ]]; then
+    location="$(config_get toolbox_location || true)"
+  fi
+  if [[ -z "${location}" && -n "${zone}" ]]; then
+    location="$(ctfvm_provider_call "${provider}" default_registry_location "${zone}" || true)"
+  fi
+  printf '%s\n' "${location}"
 }
 
 write_state() {
-  local instance="$1"
-  local zone="$2"
-  local project="$3"
-  local machine_type="$4"
-  local run_id="$5"
-  local challenge_dir="$6"
-  local timeout_min="$7"
-  local workers="$8"
-  local auth_sync="$9"
-  local no_auth_sync_val="${10}"
-  local ip="${11}"
+  local provider="$1"
+  local instance="$2"
+  local zone="$3"
+  local project="$4"
+  local machine_type="$5"
+  local run_id="$6"
+  local challenge_dir="$7"
+  local timeout_min="$8"
+  local workers="$9"
+  local auth_sync="${10}"
+  local no_auth_sync_val="${11}"
+  local ip="${12}"
+  local boot_image="${13}"
+  local boot_image_family="${14}"
+  local boot_image_project="${15}"
+  local toolbox_image_ref="${16}"
+  local toolbox_image_source="${17}"
+  local control_scheme="${18}"
+  local control_host="${19}"
+  local control_port="${20}"
+  local control_user="${21}"
+  local control_password="${22}"
 
   ensure_state_dir
   cat > "${STATE_FILE}" <<JSON
 {
+  "provider": "$(json_escape "${provider}")",
   "instance": "$(json_escape "${instance}")",
   "zone": "$(json_escape "${zone}")",
   "project": "$(json_escape "${project}")",
@@ -120,25 +648,68 @@ write_state() {
   "auth_sync": "$(json_escape "${auth_sync}")",
   "no_auth_sync": "$(json_escape "${no_auth_sync_val}")",
   "ip": "$(json_escape "${ip}")",
+  "control_scheme": "$(json_escape "${control_scheme}")",
+  "control_host": "$(json_escape "${control_host}")",
+  "control_port": "$(json_escape "${control_port}")",
+  "control_user": "$(json_escape "${control_user}")",
+  "control_password": "$(json_escape "${control_password}")",
+  "boot_image": "$(json_escape "${boot_image}")",
+  "boot_image_family": "$(json_escape "${boot_image_family}")",
+  "boot_image_project": "$(json_escape "${boot_image_project}")",
+  "toolbox_image_ref": "$(json_escape "${toolbox_image_ref}")",
+  "toolbox_image_source": "$(json_escape "${toolbox_image_source}")",
   "started_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "remote_run_dir": "/home/ctf/run"
 }
 JSON
   cp "${STATE_FILE}" "${RUNS_DIR}/${run_id}.json"
+  cp "${STATE_FILE}" "${RUNS_DIR}/${instance}.json"
 }
 
 load_state_required() {
-  load_state_required_for_selector "" ""
+  load_state_required_for_selector "" "" ""
+}
+
+find_state_file_for_ip() {
+  local ip="$1"
+  local found_ip=""
+  local f
+
+  if [[ -z "${ip}" ]]; then
+    return 0
+  fi
+
+  if [[ -f "${STATE_FILE}" ]]; then
+    found_ip="$(json_get_from_file ip "${STATE_FILE}" || true)"
+    if [[ "${found_ip}" == "${ip}" ]]; then
+      printf '%s\n' "${STATE_FILE}"
+      return 0
+    fi
+  fi
+
+  for f in "${RUNS_DIR}"/*.json; do
+    [[ -e "${f}" ]] || continue
+    found_ip="$(json_get_from_file ip "${f}" || true)"
+    if [[ "${found_ip}" == "${ip}" ]]; then
+      printf '%s\n' "${f}"
+      return 0
+    fi
+  done
 }
 
 resolve_state_file_for_selector() {
   local run_id="$1"
   local instance="$2"
+  local ip="$3"
   local state_file=""
   local f found_run_id found_instance
+  local selector_count=0
 
-  if [[ -n "${run_id}" && -n "${instance}" ]]; then
-    echo "Use either --run-id or --instance, not both." >&2
+  [[ -n "${run_id}" ]] && ((selector_count+=1))
+  [[ -n "${instance}" ]] && ((selector_count+=1))
+  [[ -n "${ip}" ]] && ((selector_count+=1))
+  if (( selector_count > 1 )); then
+    echo "Use only one selector: --run-id, --instance, or --ip." >&2
     exit 1
   fi
 
@@ -181,6 +752,17 @@ resolve_state_file_for_selector() {
     exit 1
   fi
 
+  if [[ -n "${ip}" ]]; then
+    state_file="$(find_state_file_for_ip "${ip}")"
+    if [[ -n "${state_file}" ]]; then
+      printf '%s\n' "${state_file}"
+      return 0
+    fi
+    echo "IP not found in local state: ${ip}" >&2
+    echo "Tip: use the run selector in the web UI if state was created from another workspace." >&2
+    exit 1
+  fi
+
   if [[ -f "${STATE_FILE}" ]]; then
     printf '%s\n' "${STATE_FILE}"
     return 0
@@ -192,25 +774,41 @@ resolve_state_file_for_selector() {
 load_state_required_for_selector() {
   local run_id="$1"
   local instance="$2"
+  local ip="$3"
   local selected_file
 
-  selected_file="$(resolve_state_file_for_selector "${run_id}" "${instance}")"
+  selected_file="$(resolve_state_file_for_selector "${run_id}" "${instance}" "${ip}")"
   SELECTED_STATE_FILE="${selected_file}"
   if [[ ! -f "${selected_file}" ]]; then
     echo "No active run. Start one with: ctfvm start --dir <challenge-folder>" >&2
     exit 1
   fi
 
+  PROVIDER="$(provider_from_state_file "${selected_file}")"
   INSTANCE="$(json_get_from_file instance "${selected_file}")"
   ZONE="$(json_get_from_file zone "${selected_file}")"
   PROJECT="$(json_get_from_file project "${selected_file}")"
   RUN_ID="$(json_get_from_file run_id "${selected_file}")"
   REMOTE_RUN_DIR="$(json_get_from_file remote_run_dir "${selected_file}")"
+  IP="$(json_get_from_file ip "${selected_file}" || true)"
+  load_control_plane_from_file "${selected_file}"
   if [[ -z "${REMOTE_RUN_DIR}" ]]; then
     REMOTE_RUN_DIR="/home/ctf/run"
   fi
 
-  if [[ -z "${INSTANCE}" || -z "${ZONE}" || -z "${PROJECT}" ]]; then
+  if [[ "${PROVIDER}" == "digitalocean" ]]; then
+    if [[ -z "${ZONE}" ]]; then
+      ZONE="$(do_region_for_instance "${INSTANCE}")"
+      if [[ -z "${ZONE}" ]]; then
+        ZONE="$(do_region_from_env)"
+      fi
+    fi
+    if [[ -z "${PROJECT}" ]]; then
+      PROJECT="$(do_project_name)"
+    fi
+  fi
+
+  if [[ -z "${INSTANCE}" || -z "${PROJECT}" || ( "${PROVIDER}" != "digitalocean" && -z "${ZONE}" ) ]]; then
     echo "State file is incomplete: ${selected_file}" >&2
     exit 1
   fi
@@ -220,8 +818,10 @@ parse_selector_args() {
   SEL_PICK="0"
   SEL_RUN_ID=""
   SEL_INSTANCE=""
+  SEL_IP=""
   SEL_ZONE=""
   SEL_PROJECT=""
+  SEL_PROVIDER=""
   PARSED_SELECTOR_ARGS=()
 
   while [[ $# -gt 0 ]]; do
@@ -232,25 +832,29 @@ parse_selector_args() {
         SEL_RUN_ID="$2"; shift 2 ;;
       --instance)
         SEL_INSTANCE="$2"; shift 2 ;;
+      --ip)
+        SEL_IP="$2"; shift 2 ;;
       --zone)
         SEL_ZONE="$2"; shift 2 ;;
       --project)
         SEL_PROJECT="$2"; shift 2 ;;
+      --provider)
+        SEL_PROVIDER="$(normalize_provider "$2")"; shift 2 ;;
       *)
         PARSED_SELECTOR_ARGS+=("$1"); shift ;;
     esac
   done
 
-  if [[ "${SEL_PICK}" == "1" && ( -n "${SEL_RUN_ID}" || -n "${SEL_INSTANCE}" || -n "${SEL_ZONE}" || -n "${SEL_PROJECT}" ) ]]; then
-    echo "Use --pick by itself, or explicit selectors (--run-id/--instance [--zone --project])." >&2
+  if [[ "${SEL_PICK}" == "1" && ( -n "${SEL_RUN_ID}" || -n "${SEL_INSTANCE}" || -n "${SEL_IP}" || -n "${SEL_ZONE}" || -n "${SEL_PROJECT}" || -n "${SEL_PROVIDER}" ) ]]; then
+    echo "Use --pick by itself, or explicit selectors (--run-id/--instance/--ip [--provider --zone --project])." >&2
     exit 1
   fi
-  if [[ -n "${SEL_RUN_ID}" && -n "${SEL_INSTANCE}" ]]; then
-    echo "Use either --run-id or --instance, not both." >&2
+  if (( (${#SEL_RUN_ID} > 0 ? 1 : 0) + (${#SEL_INSTANCE} > 0 ? 1 : 0) + (${#SEL_IP} > 0 ? 1 : 0) > 1 )); then
+    echo "Use only one selector: --run-id, --instance, or --ip." >&2
     exit 1
   fi
-  if [[ -n "${SEL_RUN_ID}" && ( -n "${SEL_ZONE}" || -n "${SEL_PROJECT}" ) ]]; then
-    echo "--run-id cannot be combined with --zone/--project." >&2
+  if [[ -n "${SEL_RUN_ID}" && ( -n "${SEL_IP}" || -n "${SEL_ZONE}" || -n "${SEL_PROJECT}" || -n "${SEL_PROVIDER}" ) ]]; then
+    echo "--run-id cannot be combined with --ip/--provider/--zone/--project." >&2
     exit 1
   fi
 }
@@ -265,30 +869,56 @@ resolve_target_required() {
   fi
 
   if [[ -n "${SEL_RUN_ID}" ]]; then
-    load_state_required_for_selector "${SEL_RUN_ID}" ""
+    load_state_required_for_selector "${SEL_RUN_ID}" "" ""
+    return 0
+  fi
+
+  if [[ -n "${SEL_IP}" ]]; then
+    load_state_required_for_selector "" "" "${SEL_IP}"
     return 0
   fi
 
   if [[ -n "${SEL_INSTANCE}" ]]; then
-    if [[ -z "${SEL_ZONE}" && -z "${SEL_PROJECT}" ]]; then
-      load_state_required_for_selector "" "${SEL_INSTANCE}"
+    if [[ -z "${SEL_ZONE}" && -z "${SEL_PROJECT}" && -z "${SEL_PROVIDER}" ]]; then
+      load_state_required_for_selector "" "${SEL_INSTANCE}" ""
       return 0
     fi
+    PROVIDER="$(normalize_provider "${SEL_PROVIDER:-$(default_provider)}")"
     INSTANCE="${SEL_INSTANCE}"
     ZONE="${SEL_ZONE}"
     PROJECT="${SEL_PROJECT}"
-    if [[ -z "${ZONE}" ]]; then
-      ZONE="$(gcloud config get-value compute/zone 2>/dev/null || true)"
-    fi
-    if [[ -z "${PROJECT}" ]]; then
-      PROJECT="$(gcloud config get-value project 2>/dev/null || true)"
-    fi
-    if [[ -z "${ZONE}" || -z "${PROJECT}" ]]; then
-      echo "When using --instance directly, set --zone/--project or configure gcloud defaults." >&2
-      exit 1
-    fi
+    case "${PROVIDER}" in
+      gcp)
+        if [[ -z "${ZONE}" ]]; then
+          ZONE="$(zone_from_gcloud_config)"
+        fi
+        if [[ -z "${PROJECT}" ]]; then
+          PROJECT="$(project_from_gcloud_config)"
+        fi
+        if [[ -z "${ZONE}" || -z "${PROJECT}" ]]; then
+          echo "When using --instance directly with GCP, set --zone/--project or configure gcloud defaults." >&2
+          exit 1
+        fi
+        ;;
+      digitalocean)
+        if [[ -z "${ZONE}" ]]; then
+          ZONE="$(do_region_from_env)"
+        fi
+        if [[ -z "${ZONE}" ]] && command -v doctl >/dev/null 2>&1; then
+          ZONE="$(do_region_for_instance "${INSTANCE}")"
+        fi
+        if [[ -z "${PROJECT}" ]]; then
+          PROJECT="$(do_project_name)"
+        fi
+        if [[ -z "${ZONE}" ]]; then
+          echo "When using --instance directly with DigitalOcean, set --zone <region> or install/configure doctl." >&2
+          exit 1
+        fi
+        ;;
+    esac
     RUN_ID="$(run_id_from_instance_name "${INSTANCE}")"
     REMOTE_RUN_DIR="/home/ctf/run"
+    IP=""
     return 0
   fi
 
@@ -300,58 +930,90 @@ resolve_target_required() {
   return 0
 }
 
+resolve_interactive_ssh_target_required() {
+  local state_file=""
+
+  if [[ -n "${SEL_IP}" ]]; then
+    state_file="$(find_state_file_for_ip "${SEL_IP}")"
+    if [[ -n "${state_file}" ]]; then
+      load_state_required_for_selector "" "" "${SEL_IP}"
+      return 0
+    fi
+
+    PROVIDER="$(normalize_provider "${SEL_PROVIDER:-digitalocean}")"
+    if [[ "${PROVIDER}" != "digitalocean" ]]; then
+      echo "--ip fallback is only supported for DigitalOcean/direct SSH targets." >&2
+      exit 1
+    fi
+    INSTANCE=""
+    RUN_ID=""
+    ZONE="${SEL_ZONE:-$(do_region_from_env)}"
+    PROJECT="${SEL_PROJECT:-$(do_project_name)}"
+    REMOTE_RUN_DIR="/home/ctf/run"
+    IP="${SEL_IP}"
+    CONTROL_SCHEME="http"
+    CONTROL_HOST="${IP}"
+    CONTROL_PORT="${DEFAULT_CONTROL_PORT}"
+    CONTROL_USER=""
+    CONTROL_PASSWORD=""
+    return 0
+  fi
+
+  resolve_target_required
+}
+
+list_running_gcp_instances() {
+  ctfvm_provider_call gcp list_running
+}
+
+list_running_do_instances() {
+  ctfvm_provider_call digitalocean list_running
+}
+
 choose_running_instance_interactive() {
-  require_cmd gcloud
-  local project
-  project="$(project_from_gcloud_config)"
-  if [[ -z "${project}" ]]; then
-    echo "No gcloud project configured. Set one with: gcloud config set project <project-id>" >&2
-    return 1
-  fi
-
-  local rows
-  rows="$(gcloud compute instances list --project "${project}" --filter='name~^ctfvm- AND status=RUNNING' --format='value(name,zone,status)' 2>/dev/null || true)"
-  if [[ -z "${rows//[[:space:]]/}" ]]; then
-    echo "No running ctfvm instances found in project ${project}." >&2
-    return 1
-  fi
-
-  local -a names zones statuses
-  local line name zone status
+  local -a providers names zones projects statuses ips
+  local line provider name zone project status ip
   while IFS= read -r line; do
     [[ -z "${line//[[:space:]]/}" ]] && continue
-    name="$(awk '{print $1}' <<< "${line}")"
-    zone="$(awk '{print $2}' <<< "${line}")"
-    status="$(awk '{print $3}' <<< "${line}")"
-    zone="${zone##*/}"
+    provider="$(awk -F'\t' '{print $1}' <<< "${line}")"
+    name="$(awk -F'\t' '{print $2}' <<< "${line}")"
+    zone="$(awk -F'\t' '{print $3}' <<< "${line}")"
+    project="$(awk -F'\t' '{print $4}' <<< "${line}")"
+    status="$(awk -F'\t' '{print $5}' <<< "${line}")"
+    ip="$(awk -F'\t' '{print $6}' <<< "${line}")"
+    providers+=("${provider}")
     names+=("${name}")
     zones+=("${zone}")
+    projects+=("${project}")
     statuses+=("${status}")
-  done <<< "${rows}"
+    ips+=("${ip}")
+  done < <(
+    ctfvm_provider_list_running_all
+  )
 
   local count="${#names[@]}"
+  local selected_index=""
   if [[ "${count}" -eq 0 ]]; then
-    echo "No running ctfvm instances found in project ${project}." >&2
+    if [[ -f "${STATE_FILE}" ]]; then
+      load_state_required
+      return 0
+    fi
+    echo "No running ctfvm instances found across configured providers." >&2
     return 1
   fi
 
   if [[ "${count}" -eq 1 ]]; then
-    INSTANCE="${names[0]}"
-    ZONE="${zones[0]}"
-    PROJECT="${project}"
-    RUN_ID="$(run_id_from_instance_name "${INSTANCE}")"
-    REMOTE_RUN_DIR="/home/ctf/run"
-    return 0
+    selected_index="0"
   fi
 
-  local selected_index=""
   if [[ -t 0 && -t 1 ]]; then
     echo "Select a running ctfvm instance:"
     local i run_hint
     for i in "${!names[@]}"; do
       run_hint="$(run_id_from_instance_name "${names[$i]}")"
-      printf '  %s) %s  (run_id=%s, zone=%s, status=%s)\n' \
-        "$((i + 1))" "${names[$i]}" "${run_hint}" "${zones[$i]}" "${statuses[$i]}"
+      printf '  %s) %s  (provider=%s, run_id=%s, %s=%s, status=%s)\n' \
+        "$((i + 1))" "${names[$i]}" "$(provider_label "${providers[$i]}")" "${run_hint}" \
+        "$(printf '%s' "$(provider_location_label "${providers[$i]}")" | tr '[:upper:]' '[:lower:]')" "${zones[$i]}" "${statuses[$i]}"
     done
     while true; do
       printf 'Enter selection [1-%s]: ' "${count}" >&2
@@ -363,13 +1025,14 @@ choose_running_instance_interactive() {
       echo "Invalid selection." >&2
     done
   else
-    # Non-interactive fallback: use current-run.json if it points to a running ctfvm, else first.
     if [[ -f "${STATE_FILE}" ]]; then
-      local cur_instance cur_zone
+      local cur_instance cur_zone cur_project cur_provider
       cur_instance="$(json_get_from_file instance "${STATE_FILE}" || true)"
       cur_zone="$(json_get_from_file zone "${STATE_FILE}" || true)"
+      cur_project="$(json_get_from_file project "${STATE_FILE}" || true)"
+      cur_provider="$(provider_from_state_file "${STATE_FILE}")"
       for i in "${!names[@]}"; do
-        if [[ "${names[$i]}" == "${cur_instance}" && "${zones[$i]}" == "${cur_zone}" ]]; then
+        if [[ "${providers[$i]}" == "${cur_provider}" && "${names[$i]}" == "${cur_instance}" && "${zones[$i]}" == "${cur_zone}" && "${projects[$i]}" == "${cur_project}" ]]; then
           selected_index="${i}"
           break
         fi
@@ -380,34 +1043,165 @@ choose_running_instance_interactive() {
     fi
   fi
 
+  PROVIDER="${providers[$selected_index]}"
   INSTANCE="${names[$selected_index]}"
   ZONE="${zones[$selected_index]}"
-  PROJECT="${project}"
+  PROJECT="${projects[$selected_index]}"
   RUN_ID="$(run_id_from_instance_name "${INSTANCE}")"
+  IP="${ips[$selected_index]}"
   REMOTE_RUN_DIR="/home/ctf/run"
+  CONTROL_SCHEME="http"
+  CONTROL_HOST="${IP}"
+  CONTROL_PORT="${DEFAULT_CONTROL_PORT}"
+  CONTROL_USER=""
+  CONTROL_PASSWORD=""
+}
+
+refresh_instance_ip() {
+  IP="$(ctfvm_provider_call "${PROVIDER}" get_ip "${INSTANCE}" "${ZONE}" "${PROJECT}" || true)"
+  if [[ -z "${CONTROL_HOST:-}" ]]; then
+    CONTROL_HOST="${IP}"
+  fi
+}
+
+instance_status_for() {
+  local provider="$1"
+  local instance="$2"
+  local zone="$3"
+  local project="$4"
+  ctfvm_provider_call "${provider}" get_status "${instance}" "${zone}" "${project}" || true
+}
+
+instance_ip_for() {
+  local provider="$1"
+  local instance="$2"
+  local zone="$3"
+  local project="$4"
+  ctfvm_provider_call "${provider}" get_ip "${instance}" "${zone}" "${project}" || true
 }
 
 gcloud_ssh() {
   local cmd="$1"
-  gcloud compute ssh "${INSTANCE}" \
-    --zone "${ZONE}" \
-    --project "${PROJECT}" \
-    --command "${cmd}"
+  if [[ -z "${IP:-}" ]]; then
+    refresh_instance_ip
+  fi
+  if control_plane_configured; then
+    python3 "${REPO_ROOT}/scripts/ctfvm_control_client.py" \
+      --endpoint "$(control_endpoint)" \
+      --user "${CONTROL_USER}" \
+      --password "${CONTROL_PASSWORD}" \
+      exec \
+      --timeout "${CTFVM_CONTROL_TIMEOUT_SEC:-1800}" \
+      --command "${cmd}"
+    return $?
+  fi
+  if [[ "${PROVIDER}" == "digitalocean" && -z "${IP:-}" ]]; then
+    echo "Could not determine public IP for DigitalOcean instance ${INSTANCE}." >&2
+    return 1
+  fi
+  ctfvm_provider_call "${PROVIDER}" ssh_exec "${INSTANCE}" "${ZONE}" "${PROJECT}" "${IP:-}" "${cmd}"
 }
 
-wait_for_ssh() {
-  local retries=40
+vm_ssh_tty() {
+  local cmd="$1"
+  if [[ -z "${IP:-}" ]]; then
+    refresh_instance_ip
+  fi
+  if [[ "${PROVIDER}" == "digitalocean" && -z "${IP:-}" ]]; then
+    echo "Could not determine public IP for DigitalOcean instance ${INSTANCE}." >&2
+    return 1
+  fi
+  ctfvm_provider_call "${PROVIDER}" ssh_tty "${INSTANCE}" "${ZONE}" "${PROJECT}" "${IP:-}" "${cmd}"
+}
+
+upload_dir_to_remote() {
+  local src_dir="$1"
+  local remote_dir="$2"
+  if control_plane_configured; then
+    gcloud_ssh "mkdir -p \"${remote_dir}\" && rm -rf \"${remote_dir}\"/*"
+    COPYFILE_DISABLE=1 tar --no-xattrs -C "${src_dir}" -cf - . | \
+      python3 "${REPO_ROOT}/scripts/ctfvm_control_client.py" \
+        --endpoint "$(control_endpoint)" \
+        --user "${CONTROL_USER}" \
+        --password "${CONTROL_PASSWORD}" \
+        upload-tar \
+        --timeout "${CTFVM_CONTROL_UPLOAD_TIMEOUT_SEC:-240}" \
+        --dest "${remote_dir}"
+    return $?
+  fi
+  COPYFILE_DISABLE=1 tar --no-xattrs -C "${src_dir}" -cf - . | gcloud_ssh "mkdir -p \"${remote_dir}\" && tar -C \"${remote_dir}\" -xf -"
+}
+
+upload_file_to_remote() {
+  local src_file="$1"
+  local remote_path="$2"
+  local mode="${3:-}"
+  if control_plane_configured; then
+    local -a upload_cmd=(
+      python3 "${REPO_ROOT}/scripts/ctfvm_control_client.py"
+      --endpoint "$(control_endpoint)"
+      --user "${CONTROL_USER}"
+      --password "${CONTROL_PASSWORD}"
+      upload-file
+      --timeout "${CTFVM_CONTROL_UPLOAD_TIMEOUT_SEC:-600}"
+      --path "${remote_path}"
+    )
+    if [[ -n "${mode}" ]]; then
+      upload_cmd+=(--mode "${mode}")
+    fi
+    "${upload_cmd[@]}" < "${src_file}"
+    return $?
+  fi
+  cat "${src_file}" | gcloud_ssh "cat > \"${remote_path}\""
+}
+
+download_file_from_remote() {
+  local remote_path="$1"
+  local out_file="$2"
+  if control_plane_configured; then
+    python3 "${REPO_ROOT}/scripts/ctfvm_control_client.py" \
+      --endpoint "$(control_endpoint)" \
+      --user "${CONTROL_USER}" \
+      --password "${CONTROL_PASSWORD}" \
+      download-file \
+      --timeout "${CTFVM_CONTROL_DOWNLOAD_TIMEOUT_SEC:-600}" \
+      --path "${remote_path}" > "${out_file}"
+    return $?
+  fi
+  gcloud_ssh "cat \"${remote_path}\"" > "${out_file}"
+}
+
+shell_quote_args() {
+  local arg
+  for arg in "$@"; do
+    printf '%q ' "${arg}"
+  done
+}
+
+wait_for_control_plane() {
+  local retries=120
   local sleep_s=5
   local i
 
   for i in $(seq 1 "${retries}"); do
-    if gcloud compute ssh "${INSTANCE}" --zone "${ZONE}" --project "${PROJECT}" --command "echo ready" >/dev/null 2>&1; then
+    if [[ -z "${IP:-}" ]]; then
+      refresh_instance_ip
+    fi
+    if control_plane_configured && \
+      python3 "${REPO_ROOT}/scripts/ctfvm_control_client.py" \
+        --endpoint "$(control_endpoint)" \
+        --user "${CONTROL_USER}" \
+        --password "${CONTROL_PASSWORD}" \
+        health \
+        --timeout 5 >/dev/null 2>&1; then
       return 0
     fi
     sleep "${sleep_s}"
   done
 
-  echo "Timed out waiting for SSH to ${INSTANCE}" >&2
+  echo "Timed out waiting for control plane to become reachable on ${INSTANCE}" >&2
+  echo "This usually means the VM is still in early bootstrap or the control-plane port (${CONTROL_PORT}) is blocked somewhere on the path." >&2
+  echo "If you are reusing existing Terraform firewall rules, re-apply them so they allow the current CTFVM_CONTROL_PORT value." >&2
   exit 1
 }
 
@@ -417,15 +1211,29 @@ wait_for_remote_bootstrap() {
   local i
 
   for i in $(seq 1 "${retries}"); do
-    if gcloud_ssh "test -d /home/ctf/run && id ctf >/dev/null 2>&1 && command -v docker >/dev/null 2>&1"; then
+    if gcloud_ssh "test -f /var/lib/ctfvm/bootstrap-ready \
+      && test -d /home/ctf/run \
+      && id ctf >/dev/null 2>&1 \
+      && getent group docker >/dev/null 2>&1 \
+      && command -v docker >/dev/null 2>&1 \
+      && sudo -u ctf bash -lc 'id -nG | tr \" \" \"\\n\" | grep -qx docker && docker info >/dev/null 2>&1' \
+      && test -x /opt/ctfvm/npm-global/bin/codex"; then
       return 0
     fi
     sleep "${sleep_s}"
   done
 
-  echo "Timed out waiting for VM bootstrap to finish (/home/ctf/run, ctf user, docker)." >&2
+  echo "Timed out waiting for VM bootstrap to finish (/home/ctf/run, ctf user, docker, codex)." >&2
   echo "Check startup logs with:" >&2
-  echo "  gcloud compute ssh ${INSTANCE} --zone ${ZONE} --project ${PROJECT} --command 'sudo tail -n 200 /var/log/ctfvm-startup.log'" >&2
+  case "${PROVIDER}" in
+    gcp)
+      echo "  gcloud compute ssh ${INSTANCE} --zone ${ZONE} --project ${PROJECT} --command 'sudo tail -n 200 /var/log/ctfvm-startup.log'" >&2
+      ;;
+    digitalocean)
+      refresh_instance_ip
+      echo "  ssh root@${IP} 'sudo tail -n 200 /var/log/ctfvm-startup.log'" >&2
+      ;;
+  esac
   exit 1
 }
 
@@ -448,13 +1256,29 @@ sync_codex_auth() {
 
   echo "Syncing Codex session data to VM (OAuth session only, no API keys)."
   COPYFILE_DISABLE=1 tar --no-xattrs -C "${parent}" -cf - "${base}" 2>/dev/null | \
-    gcloud compute ssh "${INSTANCE}" --zone "${ZONE}" --project "${PROJECT}" --command "sudo -u ctf bash -lc 'mkdir -p /home/ctf/run && tar -C /home/ctf/run -xf - && chmod -R go-rwx /home/ctf/run/.codex'"
+    gcloud_ssh "sudo -u ctf bash -lc 'mkdir -p /home/ctf/run && tar -C /home/ctf/run -xf - && chmod -R go-rwx /home/ctf/run/.codex'"
 }
 
 install_managed_codex_config() {
   local remote_upload_dir="$1"
+  local ida_mcp_url="${CTFVM_DEFAULT_IDA_MCP_URL:-}"
+  local remote_cmd remote_cmd_q
   echo "Installing managed Codex agent-role config in /home/ctf/run/.codex."
-  gcloud_ssh "sudo mkdir -p /home/ctf/run/.codex /home/ctf/run/.codex/roles && if [ -f ${remote_upload_dir}/codex-config/config.toml ]; then sudo cp ${remote_upload_dir}/codex-config/config.toml /home/ctf/run/.codex/config.toml; fi && if [ -d ${remote_upload_dir}/codex-config/roles ]; then sudo rm -rf /home/ctf/run/.codex/roles && sudo mkdir -p /home/ctf/run/.codex/roles && sudo cp -R ${remote_upload_dir}/codex-config/roles/. /home/ctf/run/.codex/roles/; fi && sudo chown -R ctf:ctf /home/ctf/run/.codex && sudo chmod 700 /home/ctf/run/.codex && if [ -f /home/ctf/run/.codex/config.toml ]; then sudo chmod 600 /home/ctf/run/.codex/config.toml; fi && if [ -d /home/ctf/run/.codex/roles ]; then sudo find /home/ctf/run/.codex/roles -type f -name '*.toml' -exec chmod 600 {} +; fi"
+  remote_cmd="set -euo pipefail; mkdir -p /home/ctf/run/.codex /home/ctf/run/.codex/roles; if [ -f ${remote_upload_dir}/codex-config/config.toml ]; then cp ${remote_upload_dir}/codex-config/config.toml /home/ctf/run/.codex/config.toml; fi; if [ -d ${remote_upload_dir}/codex-config/roles ]; then rm -rf /home/ctf/run/.codex/roles; mkdir -p /home/ctf/run/.codex/roles; cp -R ${remote_upload_dir}/codex-config/roles/. /home/ctf/run/.codex/roles/; fi"
+  if [[ -n "${ida_mcp_url}" ]]; then
+    remote_cmd="${remote_cmd}; if [ -f /home/ctf/run/.codex/config.toml ] && ! grep -q '^\\[mcp_servers\\.ida\\]$' /home/ctf/run/.codex/config.toml; then cat >> /home/ctf/run/.codex/config.toml <<'EOF'
+
+[mcp_servers.ida]
+url = \"${ida_mcp_url}\"
+EOF
+fi"
+  fi
+  remote_cmd="${remote_cmd}; chown -R ctf:ctf /home/ctf/run/.codex; chmod 700 /home/ctf/run/.codex; if [ -f /home/ctf/run/.codex/config.toml ]; then chmod 600 /home/ctf/run/.codex/config.toml; fi; if [ -d /home/ctf/run/.codex/roles ]; then find /home/ctf/run/.codex/roles -type f -name '*.toml' -exec chmod 600 {} +; fi"
+  printf -v remote_cmd_q '%q' "${remote_cmd}"
+  gcloud_ssh "sudo bash -lc ${remote_cmd_q}"
+  if [[ -n "${ida_mcp_url}" ]]; then
+    echo "Managed Codex config includes default ida MCP server: ${ida_mcp_url}"
+  fi
 }
 
 build_remote_toolbox() {
@@ -469,10 +1293,16 @@ load_remote_toolbox_archive() {
   gcloud_ssh "sudo -u ctf bash -lc 'gzip -dc \"${remote_archive}\" | docker load'"
 }
 
+pull_remote_toolbox_image() {
+  local image_ref="$1"
+  echo "Pulling toolbox image: ${image_ref}"
+  ctfvm_provider_call "${PROVIDER}" registry_pull_remote "${image_ref}"
+}
+
 start_remote_toolbox_container() {
   local variant="${1:-lean}"
   echo "Starting toolbox container."
-  gcloud_ssh "sudo -u ctf bash -lc 'uid=\"\$(id -u)\"; gid=\"\$(id -g)\"; mkdir -p /home/ctf/run/.codex; chmod 700 /home/ctf/run/.codex; docker rm -f ctf-toolbox >/dev/null 2>&1 || true; docker run -d --name ctf-toolbox --restart unless-stopped --user \"\${uid}:\${gid}\" -v /home/ctf/run:/workspace -e HOME=/workspace -e CODEX_HOME=/workspace/.codex -e CTF_TOOLBOX_VARIANT=${variant} -e VIRTUAL_ENV=/workspace/.venv -e PATH=/workspace/.venv/bin:/usr/local/bin:/usr/bin:/bin -w /workspace ctf-toolbox:latest sleep infinity'"
+  gcloud_ssh "sudo -u ctf bash -lc 'uid=\"\$(id -u)\"; gid=\"\$(id -g)\"; mkdir -p /home/ctf/run/.codex; chmod 700 /home/ctf/run/.codex; docker rm -f ctf-toolbox >/dev/null 2>&1 || true; docker run -d --name ctf-toolbox --restart unless-stopped --add-host host.docker.internal:host-gateway --user \"\${uid}:\${gid}\" -v /home/ctf/run:/workspace -v /opt/ctfvm/npm-global:/opt/ctfvm/npm-global:ro -e HOME=/workspace -e CODEX_HOME=/workspace/.codex -e CTF_TOOLBOX_VARIANT=${variant} -e CTFVM_CODEX_PREFIX=/opt/ctfvm/npm-global -e VIRTUAL_ENV=/workspace/.venv -e PATH=/workspace/.venv/bin:/opt/ctfvm/npm-global/bin:/usr/local/bin:/usr/bin:/bin -w /workspace ctf-toolbox:latest sleep infinity'"
   echo "Enabling passwordless sudo inside container for apt installs..."
   gcloud_ssh "sudo -u ctf bash -lc '
     runtime_uid=\"\$(docker exec ctf-toolbox id -u)\"
@@ -495,26 +1325,410 @@ start_remote_toolbox_container() {
   gcloud_ssh "sudo -u ctf bash -lc 'docker exec ctf-toolbox bash -lc \"if [ -x /workspace/install-python-runtime.sh ]; then /workspace/install-python-runtime.sh; elif [ -x /usr/local/bin/install-python-runtime.sh ]; then /usr/local/bin/install-python-runtime.sh; else echo \\\"[python-runtime] missing installer in /workspace and /usr/local/bin\\\" >&2; exit 1; fi\"'"
 }
 
+launch_supervisor_tmux() {
+  local run_dir="${1:-/home/ctf/run}"
+  local prompt_file="${2:-/home/ctf/run/challenge_prompt.txt}"
+  local supervisor_cmd="${run_dir}/supervisor.sh --run-dir ${run_dir} --prompt-file ${prompt_file}"
+  local remote_cmd remote_cmd_q
+
+  remote_cmd="mkdir -p ${run_dir}/logs ${run_dir}/artifacts; if tmux has-session -t ctf 2>/dev/null; then if tmux list-windows -t ctf -F \"#{window_name}\" | grep -qx supervisor; then tmux respawn-window -k -t ctf:supervisor \"${supervisor_cmd}\"; else tmux new-window -d -t ctf: -n supervisor \"${supervisor_cmd}\"; fi; else tmux new-session -d -s ctf -n supervisor \"${supervisor_cmd}\"; fi"
+  printf -v remote_cmd_q '%q' "${remote_cmd}"
+  gcloud_ssh "sudo -u ctf bash -lc ${remote_cmd_q}"
+}
+
+run_remote_codex_mcp() {
+  local quoted_args
+  local remote_cmd
+  local remote_cmd_q
+
+  quoted_args="$(shell_quote_args "$@")"
+  remote_cmd="docker ps --format \"{{.Names}}\" | grep -qx ctf-toolbox || { echo \"ctf-toolbox container not running.\" >&2; exit 1; }; docker exec -i -w /workspace -e HOME=/workspace -e CODEX_HOME=/workspace/.codex ctf-toolbox codex mcp ${quoted_args}"
+  printf -v remote_cmd_q '%q' "${remote_cmd}"
+  gcloud_ssh "sudo -u ctf bash -lc ${remote_cmd_q}"
+}
+
+bridge_target_key() {
+  if [[ -n "${RUN_ID:-}" ]]; then
+    printf '%s\n' "${RUN_ID}"
+  else
+    printf '%s\n' "${INSTANCE}"
+  fi
+}
+
+bridge_state_dir() {
+  printf '%s\n' "${BRIDGES_DIR}/$(bridge_target_key)"
+}
+
+bridge_state_file() {
+  local bridge_name="$1"
+  printf '%s\n' "$(bridge_state_dir)/${bridge_name}.json"
+}
+
+bridge_local_log_file() {
+  local bridge_name="$1"
+  printf '%s\n' "$(bridge_state_dir)/${bridge_name}.ssh.log"
+}
+
+bridge_remote_json_file() {
+  local bridge_name="$1"
+  printf '%s\n' "${REMOTE_BRIDGE_DIR}/${bridge_name}.json"
+}
+
+bridge_remote_env_file() {
+  local bridge_name="$1"
+  printf '%s\n' "${REMOTE_BRIDGE_DIR}/${bridge_name}.env"
+}
+
+bridge_remote_socat_log_file() {
+  local bridge_name="$1"
+  local target_name="$2"
+  printf '%s\n' "${REMOTE_BRIDGE_DIR}/${bridge_name}-${target_name}.socat.log"
+}
+
+bridge_env_token() {
+  local raw="$1"
+  local token
+  token="$(printf '%s' "${raw}" | tr '[:lower:]' '[:upper:]' | sed -E 's/[^A-Z0-9]+/_/g; s/^_+//; s/_+$//; s/_+/_/g')"
+  if [[ -z "${token}" ]]; then
+    token="TARGET"
+  fi
+  if [[ "${token}" =~ ^[0-9] ]]; then
+    token="TARGET_${token}"
+  fi
+  printf '%s\n' "${token}"
+}
+
+bridge_port_valid() {
+  local port="$1"
+  [[ "${port}" =~ ^[0-9]+$ ]] || return 1
+  (( port >= 1 && port <= 65535 ))
+}
+
+bridge_remove_local_state_file() {
+  local state_file="$1"
+  local state_dir
+  state_dir="$(dirname "${state_file}")"
+  rm -f "${state_file}"
+  rm -f "${state_file%.json}.ssh.log"
+  rmdir "${state_dir}" >/dev/null 2>&1 || true
+}
+
+bridge_write_normalized_targets() {
+  local config_file="$1"
+  local out_file="$2"
+  local raw_file=""
+  local count=0
+  local name=""
+  local host=""
+  local internal_port=""
+  local vm_port=""
+  local existing=""
+  local -a seen_names=()
+  local -a seen_vm_ports=()
+
+  require_cmd jq
+  if [[ ! -f "${config_file}" ]]; then
+    echo "Bridge config not found: ${config_file}" >&2
+    return 1
+  fi
+  if ! jq -e '.targets | type == "array" and length > 0' "${config_file}" >/dev/null; then
+    echo "Bridge config must contain a non-empty .targets array." >&2
+    return 1
+  fi
+
+  raw_file="$(mktemp)"
+  if ! jq -er '.targets[] | [(.name | tostring), (.internal_host | tostring), (.internal_port | tonumber | tostring), (.vm_port | tonumber | tostring)] | @tsv' "${config_file}" > "${raw_file}"; then
+    rm -f "${raw_file}"
+    echo "Bridge config is invalid. Expected targets with name, internal_host, internal_port, and vm_port." >&2
+    return 1
+  fi
+
+  : > "${out_file}"
+  while IFS=$'\t' read -r name host internal_port vm_port || [[ -n "${name}${host}${internal_port}${vm_port}" ]]; do
+    count=$((count + 1))
+    if [[ ! "${name}" =~ ^[A-Za-z][A-Za-z0-9_-]*$ ]]; then
+      rm -f "${raw_file}"
+      echo "Invalid target name: ${name}. Use leading letters followed by letters, digits, hyphens, or underscores." >&2
+      return 1
+    fi
+    if [[ -z "${host}" ]]; then
+      rm -f "${raw_file}"
+      echo "Target ${name} is missing internal_host." >&2
+      return 1
+    fi
+    if ! bridge_port_valid "${internal_port}"; then
+      rm -f "${raw_file}"
+      echo "Target ${name} has invalid internal_port: ${internal_port}" >&2
+      return 1
+    fi
+    if ! bridge_port_valid "${vm_port}"; then
+      rm -f "${raw_file}"
+      echo "Target ${name} has invalid vm_port: ${vm_port}" >&2
+      return 1
+    fi
+    for existing in "${seen_names[@]}"; do
+      if [[ "${existing}" == "${name}" ]]; then
+        rm -f "${raw_file}"
+        echo "Duplicate bridge target name: ${name}" >&2
+        return 1
+      fi
+    done
+    for existing in "${seen_vm_ports[@]}"; do
+      if [[ "${existing}" == "${vm_port}" ]]; then
+        rm -f "${raw_file}"
+        echo "Duplicate vm_port in bridge config: ${vm_port}" >&2
+        return 1
+      fi
+    done
+    seen_names+=("${name}")
+    seen_vm_ports+=("${vm_port}")
+    printf '%s\t%s\t%s\t%s\n' "${name}" "${host}" "${internal_port}" "${vm_port}" >> "${out_file}"
+  done < "${raw_file}"
+  rm -f "${raw_file}"
+
+  if [[ "${count}" -eq 0 ]]; then
+    echo "Bridge config has no targets." >&2
+    return 1
+  fi
+}
+
+bridge_write_env_file() {
+  local targets_file="$1"
+  local out_file="$2"
+  local name=""
+  local _host=""
+  local _internal_port=""
+  local vm_port=""
+  local prefix=""
+
+  {
+    echo "# Generated by ctfvm bridge"
+    while IFS=$'\t' read -r name _host _internal_port vm_port _extra || [[ -n "${name}${vm_port}" ]]; do
+      prefix="$(bridge_env_token "${name}")"
+      printf 'CTF_BRIDGE_%s_HOST=%s\n' "${prefix}" "host.docker.internal"
+      printf 'CTF_BRIDGE_%s_PORT=%s\n' "${prefix}" "${vm_port}"
+    done < "${targets_file}"
+  } > "${out_file}"
+}
+
+bridge_write_local_state_json() {
+  local bridge_name="$1"
+  local targets_file="$2"
+  local ssh_pid="$3"
+  local ssh_log="$4"
+  local out_file="$5"
+
+  jq -Rn \
+    --arg name "${bridge_name}" \
+    --arg provider "${PROVIDER}" \
+    --arg instance "${INSTANCE}" \
+    --arg zone "${ZONE}" \
+    --arg project "${PROJECT}" \
+    --arg run_id "${RUN_ID:-}" \
+    --arg remote_run_dir "${REMOTE_RUN_DIR}" \
+    --arg remote_bridge_dir "${REMOTE_BRIDGE_DIR}" \
+    --arg ssh_log "${ssh_log}" \
+    --arg updated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --argjson ssh_pid "${ssh_pid}" \
+    '
+      [inputs | select(length > 0) | split("\t") | {
+        name: .[0],
+        internal_host: .[1],
+        internal_port: (.[2] | tonumber),
+        vm_port: (.[3] | tonumber),
+        remote_socat_pid: (.[4] | tonumber),
+        container_host: "host.docker.internal"
+      }] as $targets
+      | {
+          name: $name,
+          provider: $provider,
+          instance: $instance,
+          zone: $zone,
+          project: $project,
+          run_id: $run_id,
+          remote_run_dir: $remote_run_dir,
+          remote_bridge_dir: $remote_bridge_dir,
+          ssh_pid: $ssh_pid,
+          ssh_log: $ssh_log,
+          targets: $targets,
+          updated_at: $updated_at
+        }
+    ' < "${targets_file}" > "${out_file}"
+}
+
+bridge_write_remote_state_json() {
+  local bridge_name="$1"
+  local targets_file="$2"
+  local out_file="$3"
+
+  jq -Rn \
+    --arg name "${bridge_name}" \
+    --arg provider "${PROVIDER}" \
+    --arg instance "${INSTANCE}" \
+    --arg zone "${ZONE}" \
+    --arg project "${PROJECT}" \
+    --arg run_id "${RUN_ID:-}" \
+    --arg remote_run_dir "${REMOTE_RUN_DIR}" \
+    --arg updated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    '
+      [inputs | select(length > 0) | split("\t") | {
+        name: .[0],
+        internal_host: .[1],
+        internal_port: (.[2] | tonumber),
+        vm_port: (.[3] | tonumber),
+        remote_socat_pid: (.[4] | tonumber),
+        container_host: "host.docker.internal"
+      }] as $targets
+      | {
+          name: $name,
+          provider: $provider,
+          instance: $instance,
+          zone: $zone,
+          project: $project,
+          run_id: $run_id,
+          remote_run_dir: $remote_run_dir,
+          targets: $targets,
+          updated_at: $updated_at
+        }
+    ' < "${targets_file}" > "${out_file}"
+}
+
+bridge_start_local_tunnel() {
+  local log_file="$1"
+  shift
+  local -a ssh_args=(
+    -N
+    -o ExitOnForwardFailure=yes
+    -o ServerAliveInterval=30
+    -o ServerAliveCountMax=3
+  )
+  local forward=""
+  local arg=""
+  local ssh_pid=""
+  local -a ssh_cmd=()
+
+  if [[ -z "${IP:-}" ]]; then
+    refresh_instance_ip
+  fi
+  for forward in "$@"; do
+    ssh_args+=(-R "${forward}")
+  done
+
+  while IFS= read -r arg; do
+    ssh_cmd+=("${arg}")
+  done < <(ctfvm_provider_call "${PROVIDER}" ssh_argv "${INSTANCE}" "${ZONE}" "${PROJECT}" "${IP:-}" "${ssh_args[@]}")
+
+  if [[ "${#ssh_cmd[@]}" -eq 0 ]]; then
+    echo "Failed to build SSH command for bridge tunnel." >&2
+    return 1
+  fi
+
+  ssh_pid="$(
+    nohup "${ssh_cmd[@]}" > "${log_file}" 2>&1 &
+    printf '%s\n' "$!"
+  )"
+  sleep 2
+  if ! kill -0 "${ssh_pid}" >/dev/null 2>&1; then
+    cat "${log_file}" >&2 || true
+    return 1
+  fi
+  printf '%s\n' "${ssh_pid}"
+}
+
+bridge_start_remote_socat() {
+  local docker_gateway_ip="$1"
+  local vm_port="$2"
+  local bridge_name="$3"
+  local target_name="$4"
+  local listen_arg=""
+  local connect_arg=""
+  local log_file=""
+  local listen_q=""
+  local connect_q=""
+  local log_q=""
+  local remote_cmd=""
+  local remote_cmd_q=""
+
+  listen_arg="TCP-LISTEN:${vm_port},bind=${docker_gateway_ip},reuseaddr,fork"
+  connect_arg="TCP:127.0.0.1:${vm_port}"
+  log_file="$(bridge_remote_socat_log_file "${bridge_name}" "${target_name}")"
+  printf -v listen_q '%q' "${listen_arg}"
+  printf -v connect_q '%q' "${connect_arg}"
+  printf -v log_q '%q' "${log_file}"
+  remote_cmd="set -euo pipefail; log_file=${log_q}; nohup socat ${listen_q} ${connect_q} >\"\${log_file}\" 2>&1 & pid=\$!; sleep 1; kill -0 \"\${pid}\" >/dev/null 2>&1 || { cat \"\${log_file}\" >&2; exit 1; }; printf '%s\n' \"\${pid}\""
+  printf -v remote_cmd_q '%q' "${remote_cmd}"
+  gcloud_ssh "sudo -u ctf bash -lc ${remote_cmd_q}"
+}
+
+bridge_kill_remote_pid() {
+  local pid="$1"
+  gcloud_ssh "sudo -u ctf bash -lc 'kill ${pid} >/dev/null 2>&1 || true'" >/dev/null 2>&1 || true
+}
+
+bridge_local_pid_alive() {
+  local pid="$1"
+  kill -0 "${pid}" >/dev/null 2>&1
+}
+
+bridge_remote_pid_alive() {
+  local pid="$1"
+  gcloud_ssh "sudo -u ctf bash -lc 'kill -0 ${pid} >/dev/null 2>&1'" >/dev/null 2>&1
+}
+
+bridge_container_host_ready() {
+  gcloud_ssh "sudo -u ctf bash -lc 'docker ps --format \"{{.Names}}\" | grep -qx ctf-toolbox && docker exec ctf-toolbox getent hosts host.docker.internal >/dev/null 2>&1'"
+}
+
+bridge_container_gateway_ip() {
+  gcloud_ssh "sudo -u ctf bash -lc 'docker exec ctf-toolbox getent hosts host.docker.internal | awk \"NR==1 {print \\$1}\"'"
+}
+
 cmd_image() {
   if [[ $# -lt 1 ]]; then
-    echo "Usage: ctfvm image <build-local|status> [--archive <path>] [--variant lean|full]" >&2
+    echo "Usage: ctfvm image <build-local|push-registry|push-ar|status> [options]" >&2
     exit 1
   fi
 
   local subcmd="$1"
   shift
 
-  local archive_path="${REPO_ROOT}/${DEFAULT_IMAGE_ARCHIVE}"
+  local provider
+  provider="$(default_provider)"
+  local archive_path
+  archive_path="$(resolve_repo_path "${CTFVM_LOCAL_IMAGE_ARCHIVE:-${DEFAULT_IMAGE_ARCHIVE}}")"
   local platform="linux/amd64"
-  local variant="lean"
+  local variant="${CTFVM_TOOLBOX_VARIANT:-lean}"
+  local project=""
+  local location=""
+  local repository=""
+  local image_name=""
+  local tag=""
+  local image_ref=""
+  local registry_tier="basic"
   while [[ $# -gt 0 ]]; do
     case "$1" in
+      --provider)
+        provider="$(normalize_provider "$2")"; shift 2 ;;
       --archive)
         archive_path="$2"; shift 2 ;;
       --platform)
         platform="$2"; shift 2 ;;
       --variant)
         variant="$2"; shift 2 ;;
+      --project)
+        project="$2"; shift 2 ;;
+      --location)
+        location="$2"; shift 2 ;;
+      --repository)
+        repository="$2"; shift 2 ;;
+      --image-name)
+        image_name="$2"; shift 2 ;;
+      --tag)
+        tag="$2"; shift 2 ;;
+      --image-ref)
+        image_ref="$2"; shift 2 ;;
+      --registry-tier)
+        registry_tier="$2"; shift 2 ;;
       *)
         echo "Unknown argument: $1" >&2
         exit 1 ;;
@@ -525,6 +1739,8 @@ cmd_image() {
     echo "Invalid variant: ${variant}. Use lean or full." >&2
     exit 1
   fi
+
+  archive_path="$(resolve_repo_path "${archive_path}")"
 
   case "${subcmd}" in
     build-local)
@@ -538,12 +1754,82 @@ cmd_image() {
       docker save ctf-toolbox:latest | gzip -1 > "${archive_path}"
       echo "Local image archive ready: ${archive_path}"
       ;;
+    push-ar|push-registry)
+      if [[ "${subcmd}" == "push-ar" ]]; then
+        provider="gcp"
+      fi
+      require_cmd docker
+      ctfvm_provider_call "${provider}" require_registry_prereqs
+
+      if [[ "${provider}" == "gcp" && -z "${project}" ]]; then
+        project="$(ctfvm_provider_call "${provider}" default_scope)"
+      elif [[ "${provider}" == "digitalocean" && -z "${project}" ]]; then
+        project="$(ctfvm_provider_call "${provider}" default_scope)"
+      fi
+      if [[ -z "${location}" ]]; then
+        location="$(resolve_toolbox_location "${provider}" "" "$(ctfvm_provider_call "${provider}" default_location || true)")"
+      fi
+      if [[ "${provider}" == "gcp" && ( -z "${project}" || -z "${location}" ) ]]; then
+        echo "Missing GCP registry target. Set gcloud project/zone or pass --project and --location." >&2
+        exit 1
+      fi
+      if [[ "${provider}" == "digitalocean" && -z "${location}" ]]; then
+        echo "Missing DigitalOcean registry region. Pass --location or set CTFVM_DO_REGION." >&2
+        exit 1
+      fi
+      if [[ -z "${tag}" ]]; then
+        tag="$(resolve_toolbox_tag "${provider}" "${variant}")"
+      fi
+      repository="$(resolve_toolbox_repository "${provider}" "${repository}")"
+      image_name="$(resolve_toolbox_image_name "${provider}" "${image_name}")"
+      if [[ "${provider}" == "digitalocean" && -z "${repository}" ]]; then
+        echo "Missing DigitalOcean registry name. Pass --repository <registry-name> or create/login to a DOCR registry first." >&2
+        exit 1
+      fi
+      if [[ -z "${image_ref}" ]]; then
+        image_ref="$(ctfvm_provider_call "${provider}" registry_image_ref "${project}" "${location}" "${repository}" "${image_name}" "${tag}")"
+      fi
+
+      echo "Preparing $(provider_label "${provider}") registry target"
+      ctfvm_provider_call "${provider}" registry_prepare_local_push "${project}" "${location}" "${repository}" "${registry_tier}"
+
+      echo "Building local toolbox image (${platform}, ${variant}) from ${REPO_ROOT}/images/ctf-toolbox"
+      export DOCKER_BUILDKIT=1
+      docker build --platform "${platform}" --build-arg "CTF_TOOLBOX_VARIANT=${variant}" -t ctf-toolbox:latest "${REPO_ROOT}/images/ctf-toolbox"
+      echo "Tagging image as ${image_ref}"
+      docker tag ctf-toolbox:latest "${image_ref}"
+      echo "Pushing image to remote registry"
+      docker push "${image_ref}"
+      write_config "${provider}" "${image_ref}" "${variant}" "${project}" "${location}" "${repository}" "${image_name}" "${tag}"
+      echo "Remote registry image ready: ${image_ref}"
+      echo "Saved as default ${provider} ${variant} toolbox image in ${CONFIG_FILE}"
+      ;;
     status)
       if [[ -f "${archive_path}" ]]; then
         ls -lh "${archive_path}"
       else
         echo "No local image archive at ${archive_path}"
-        exit 1
+      fi
+      if [[ -f "${CONFIG_FILE}" ]]; then
+        local p configured_ref configured_ref_lean configured_ref_full configured_project configured_location configured_repository configured_image_name configured_tag_lean configured_tag_full
+        for p in gcp digitalocean; do
+          configured_ref="$(config_get_for_provider "${p}" toolbox_image_ref || true)"
+          configured_ref_lean="$(config_get_for_provider "${p}" toolbox_image_ref_lean || true)"
+          configured_ref_full="$(config_get_for_provider "${p}" toolbox_image_ref_full || true)"
+          configured_project="$(config_get_for_provider "${p}" toolbox_project || true)"
+          configured_location="$(config_get_for_provider "${p}" toolbox_location || true)"
+          configured_repository="$(config_get_for_provider "${p}" toolbox_repository || true)"
+          configured_image_name="$(config_get_for_provider "${p}" toolbox_image_name || true)"
+          configured_tag_lean="$(config_get_for_provider "${p}" toolbox_tag_lean || true)"
+          configured_tag_full="$(config_get_for_provider "${p}" toolbox_tag_full || true)"
+          [[ -z "${configured_ref}${configured_ref_lean}${configured_ref_full}" ]] && continue
+          echo "$(provider_label "${p}"):"
+          [[ -n "${configured_ref}" ]] && echo "  Default toolbox image: ${configured_ref}"
+          [[ -n "${configured_ref_lean}" ]] && echo "  Lean toolbox image:    ${configured_ref_lean}"
+          [[ -n "${configured_ref_full}" ]] && echo "  Full toolbox image:    ${configured_ref_full}"
+          [[ -n "${configured_project}${configured_location}${configured_repository}${configured_image_name}" ]] && echo "  Defaults:              $(describe_toolbox_resolution "${p}" "${configured_project}" "${configured_location}" "${configured_repository}" "${configured_image_name}" "${configured_tag_lean:-lean}")"
+          [[ -n "${configured_tag_full}" ]] && echo "  Full tag:              ${configured_tag_full}"
+        done
       fi
       ;;
     *)
@@ -553,26 +1839,68 @@ cmd_image() {
   esac
 }
 
+render_startup_script() {
+  local provider="$1"
+  local timeout_min="$2"
+  local control_port="$3"
+  local control_user="$4"
+  local control_password="$5"
+  local out_file="$6"
+  local control_server_b64
+
+  control_server_b64="$(base64 < "${REPO_ROOT}/vm/control_server.py" | tr -d '\n')"
+
+  sed \
+    -e "s/__CTFVM_PROVIDER__/$(json_escape "${provider}")/g" \
+    -e "s/__CTFVM_TIMEOUT_MIN__/$(json_escape "${timeout_min}")/g" \
+    -e "s/__CTFVM_CONTROL_PORT__/$(json_escape "${control_port}")/g" \
+    -e "s/__CTFVM_CONTROL_USER__/$(json_escape "${control_user}")/g" \
+    -e "s/__CTFVM_CONTROL_PASSWORD__/$(json_escape "${control_password}")/g" \
+    -e "s#__CTFVM_CONTROL_SERVER_INSTALL__#printf '%s' '${control_server_b64}' | base64 -d > /usr/local/bin/ctfvm-control-server.py#g" \
+    "${REPO_ROOT}/vm/startup.sh" > "${out_file}"
+}
+
 cmd_start() {
-  require_cmd gcloud
   require_cmd tar
 
+  local provider
+  provider="$(default_provider)"
   local challenge_dir=""
   local desc=""
   local desc_file=""
   local ideas=""
-  local timeout_min="1440"
-  local machine_type="e2-standard-4"
+  local timeout_min="${CTFVM_TIMEOUT_MIN:-1440}"
+  local machine_type="${CTFVM_GCP_MACHINE_TYPE:-e2-standard-4}"
+  local size_slug="${CTFVM_DO_SIZE_SLUG:-s-4vcpu-8gb}"
   local zone=""
   local project=""
   local no_auth_sync="0"
   local force_remote_build="0"
-  local use_local_image="1"
-  local local_image_archive="${REPO_ROOT}/${DEFAULT_IMAGE_ARCHIVE}"
-  local toolbox_variant="lean"
+  local use_local_image="0"
+  local local_image_archive
+  local toolbox_variant="${CTFVM_TOOLBOX_VARIANT:-lean}"
+  local toolbox_image_ref=""
+  local toolbox_location=""
+  local toolbox_repository=""
+  local toolbox_image_name=""
+  local toolbox_tag=""
+  local boot_image=""
+  local boot_image_family=""
+  local boot_image_project=""
+  local env_do_ssh_keys=""
+  local -a do_ssh_keys=()
+  local -a create_args=()
+
+  local_image_archive="$(resolve_repo_path "${CTFVM_LOCAL_IMAGE_ARCHIVE:-${DEFAULT_IMAGE_ARCHIVE}}")"
+  env_do_ssh_keys="$(env_first_set CTFVM_DO_SSH_KEYS CTFVM_DO_SSH_KEY)"
+  if [[ -n "${env_do_ssh_keys}" ]]; then
+    IFS=',' read -r -a do_ssh_keys <<< "${env_do_ssh_keys}"
+  fi
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
+      --provider)
+        provider="$(normalize_provider "$2")"; shift 2 ;;
       --dir)
         challenge_dir="$2"; shift 2 ;;
       --desc)
@@ -585,10 +1913,30 @@ cmd_start() {
         timeout_min="$2"; shift 2 ;;
       --machine-type)
         machine_type="$2"; shift 2 ;;
+      --size-slug)
+        size_slug="$2"; shift 2 ;;
       --zone)
         zone="$2"; shift 2 ;;
       --project)
         project="$2"; shift 2 ;;
+      --ssh-key)
+        do_ssh_keys+=("$2"); shift 2 ;;
+      --toolbox-image)
+        toolbox_image_ref="$2"; shift 2 ;;
+      --toolbox-location)
+        toolbox_location="$2"; shift 2 ;;
+      --toolbox-repository)
+        toolbox_repository="$2"; shift 2 ;;
+      --toolbox-image-name)
+        toolbox_image_name="$2"; shift 2 ;;
+      --toolbox-tag)
+        toolbox_tag="$2"; shift 2 ;;
+      --boot-image)
+        boot_image="$2"; shift 2 ;;
+      --boot-image-family)
+        boot_image_family="$2"; shift 2 ;;
+      --boot-image-project)
+        boot_image_project="$2"; shift 2 ;;
       --no-auth-sync)
         no_auth_sync="1"; shift ;;
       --force-remote-build)
@@ -608,6 +1956,42 @@ cmd_start() {
   if [[ "${toolbox_variant}" != "lean" && "${toolbox_variant}" != "full" ]]; then
     echo "Invalid toolbox variant: ${toolbox_variant}. Use lean or full." >&2
     exit 1
+  fi
+
+  local_image_archive="$(resolve_repo_path "${local_image_archive}")"
+
+  if [[ "${use_local_image}" == "1" && -n "${toolbox_image_ref}" ]]; then
+    echo "Use either --toolbox-image or --use-local-image, not both." >&2
+    exit 1
+  fi
+  if [[ "${use_local_image}" == "1" && ( -n "${toolbox_location}" || -n "${toolbox_repository}" || -n "${toolbox_image_name}" || -n "${toolbox_tag}" ) ]]; then
+    echo "Toolbox registry flags cannot be combined with --use-local-image." >&2
+    exit 1
+  fi
+
+  if [[ -n "${boot_image}" && -n "${boot_image_family}" && "${provider}" == "gcp" ]]; then
+    echo "Use either --boot-image or --boot-image-family, not both." >&2
+    exit 1
+  fi
+
+  if [[ "${provider}" == "gcp" ]]; then
+    if [[ -z "${boot_image}" && -z "${boot_image_family}" ]]; then
+      boot_image="$(env_first_set CTFVM_GCP_BOOT_IMAGE)"
+      if [[ -z "${boot_image}" ]]; then
+        boot_image_family="${CTFVM_GCP_BOOT_IMAGE_FAMILY:-debian-12}"
+        boot_image_project="${CTFVM_GCP_BOOT_IMAGE_PROJECT:-debian-cloud}"
+      fi
+    fi
+  else
+    if [[ -n "${boot_image_family}" && -z "${boot_image}" ]]; then
+      boot_image="${boot_image_family}"
+      boot_image_family=""
+    fi
+    if [[ -z "${boot_image}" ]]; then
+      boot_image="${CTFVM_DO_BOOT_IMAGE:-ubuntu-24-04-x64}"
+    fi
+    boot_image_family=""
+    boot_image_project=""
   fi
 
   if [[ -n "${desc}" && -n "${desc_file}" ]]; then
@@ -632,47 +2016,116 @@ cmd_start() {
     exit 1
   fi
 
-  if [[ ! -f "${REPO_ROOT}/vm/startup.sh" || ! -f "${REPO_ROOT}/runner/supervisor.sh" || ! -f "${REPO_ROOT}/runner/spawn-idea-workers.sh" || ! -f "${REPO_ROOT}/runner/subagent-tmux-bridge.sh" || ! -f "${REPO_ROOT}/runner/install-python-runtime.sh" || ! -d "${REPO_ROOT}/skills" || ! -f "${REPO_ROOT}/images/ctf-toolbox/codex-config/config.toml" ]]; then
+  if [[ ! -f "${REPO_ROOT}/vm/startup.sh" || ! -f "${REPO_ROOT}/vm/control_server.py" || ! -f "${REPO_ROOT}/runner/supervisor.sh" || ! -f "${REPO_ROOT}/runner/spawn-idea-workers.sh" || ! -f "${REPO_ROOT}/runner/subagent-tmux-bridge.sh" || ! -f "${REPO_ROOT}/runner/install-python-runtime.sh" || ! -d "${REPO_ROOT}/skills" || ! -f "${REPO_ROOT}/images/ctf-toolbox/codex-config/config.toml" ]]; then
     echo "Required implementation files are missing in repo." >&2
     exit 1
   fi
 
-  if [[ -z "${zone}" ]]; then
-    zone="$(gcloud config get-value compute/zone 2>/dev/null || true)"
-  fi
-  if [[ -z "${project}" ]]; then
-    project="$(gcloud config get-value project 2>/dev/null || true)"
-  fi
+  case "${provider}" in
+    gcp)
+      ctfvm_provider_call "${provider}" require_start_prereqs
+      if [[ -z "${zone}" ]]; then
+        zone="$(ctfvm_provider_call "${provider}" default_location)"
+      fi
+      if [[ -z "${project}" ]]; then
+        project="$(ctfvm_provider_call "${provider}" default_scope)"
+      fi
+      if [[ -z "${zone}" || -z "${project}" ]]; then
+        echo "Missing GCP defaults. Set with gcloud config or pass --zone and --project." >&2
+        exit 1
+      fi
+      ;;
+    digitalocean)
+      ctfvm_provider_call "${provider}" require_start_prereqs
+      if [[ -z "${zone}" ]]; then
+        zone="$(ctfvm_provider_call "${provider}" default_location)"
+      fi
+      if [[ -z "${zone}" ]]; then
+        echo "Missing DigitalOcean region. Pass --zone <region> or set CTFVM_DO_REGION." >&2
+        exit 1
+      fi
+      project="$(ctfvm_provider_call "${provider}" default_scope)"
+      ;;
+  esac
 
-  if [[ -z "${zone}" || -z "${project}" ]]; then
-    echo "Missing GCP defaults. Set with gcloud config or pass --zone and --project." >&2
-    exit 1
-  fi
-
-  local run_id instance challenge_slug prompt_tmp ip auth_sync
+  local run_id instance challenge_slug prompt_tmp startup_tmp upload_tmp ip auth_sync toolbox_image_source ssh_keys_csv
+  local control_port control_user control_password
   local remote_upload_dir="/tmp/ctfvm-upload"
   run_id="$(date +%Y%m%d-%H%M%S)"
   challenge_slug="$(instance_slug_from_challenge_dir "${challenge_dir}")"
   instance="ctfvm-${challenge_slug}-${run_id}"
+  control_port="${DEFAULT_CONTROL_PORT}"
+  control_user="ctfvm"
+  control_password="$(random_alnum 32)"
   prompt_tmp="$(mktemp)"
+  startup_tmp="$(mktemp)"
+  upload_tmp="$(mktemp -d)"
   auth_sync="enabled"
+  toolbox_image_source="artifact-registry"
+  render_startup_script "${provider}" "${timeout_min}" "${control_port}" "${control_user}" "${control_password}" "${startup_tmp}"
 
   if [[ "${force_remote_build}" == "1" ]]; then
-    echo "--force-remote-build is disabled. This workflow is local-image only." >&2
+    echo "--force-remote-build is disabled. Use Artifact Registry or --use-local-image." >&2
     exit 1
   fi
 
-  if [[ "${use_local_image}" != "1" ]]; then
-    echo "This workflow requires local image usage; use --local-image-archive if needed." >&2
-    exit 1
+  if [[ "${use_local_image}" == "1" ]]; then
+    toolbox_image_source="local-archive"
+    if [[ ! -f "${local_image_archive}" ]]; then
+      echo "Local image archive not found: ${local_image_archive}" >&2
+      echo "Build it with: ${SCRIPT_DIR}/ctfvm image build-local [--archive <path>] [--variant ${toolbox_variant}]" >&2
+      exit 1
+    fi
+    echo "Using local toolbox image archive: ${local_image_archive}"
+  else
+    case "${provider}" in
+      gcp)
+        toolbox_location="$(resolve_toolbox_location "${provider}" "${toolbox_location}" "${zone}")"
+        toolbox_repository="$(resolve_toolbox_repository "${provider}" "${toolbox_repository}")"
+        toolbox_image_name="$(resolve_toolbox_image_name "${provider}" "${toolbox_image_name}")"
+        toolbox_tag="$(resolve_toolbox_tag "${provider}" "${toolbox_variant}" "${toolbox_tag}")"
+        if [[ -z "${toolbox_image_ref}" ]]; then
+          toolbox_image_ref="$(resolve_toolbox_image_ref "${provider}" "${toolbox_variant}" "${project}" "${zone}" "${toolbox_location}" "${toolbox_repository}" "${toolbox_image_name}" "${toolbox_tag}")"
+        fi
+        if [[ -n "${toolbox_image_ref}" ]]; then
+          echo "Using toolbox image from remote registry: ${toolbox_image_ref}"
+          echo "Resolved from $(describe_toolbox_resolution "${provider}" "${project}" "${toolbox_location}" "${toolbox_repository}" "${toolbox_image_name}" "${toolbox_tag}")"
+        elif [[ -f "${local_image_archive}" ]]; then
+          toolbox_image_source="local-archive"
+          use_local_image="1"
+          echo "No remote registry toolbox image configured for variant ${toolbox_variant}; falling back to local archive ${local_image_archive}"
+        else
+          echo "No remote registry toolbox image configured for variant ${toolbox_variant}." >&2
+          echo "Push one with: ${SCRIPT_DIR}/ctfvm image push-registry --provider ${provider} [--project <project>] [--location <region>] [--variant ${toolbox_variant}]" >&2
+          echo "Or use the legacy archive flow with: ${SCRIPT_DIR}/ctfvm start --dir <challenge-folder> --use-local-image" >&2
+          exit 1
+        fi
+        ;;
+      digitalocean)
+        toolbox_location="$(resolve_toolbox_location "${provider}" "${toolbox_location}" "${zone}")"
+        toolbox_repository="$(resolve_toolbox_repository "${provider}" "${toolbox_repository}")"
+        toolbox_image_name="$(resolve_toolbox_image_name "${provider}" "${toolbox_image_name}")"
+        toolbox_tag="$(resolve_toolbox_tag "${provider}" "${toolbox_variant}" "${toolbox_tag}")"
+        if [[ -z "${toolbox_image_ref}" ]]; then
+          toolbox_image_ref="$(resolve_toolbox_image_ref "${provider}" "${toolbox_variant}" "${project}" "${zone}" "${toolbox_location}" "${toolbox_repository}" "${toolbox_image_name}" "${toolbox_tag}")"
+        fi
+        if [[ -n "${toolbox_image_ref}" ]]; then
+          toolbox_image_source="registry"
+          echo "Using toolbox image from remote registry: ${toolbox_image_ref}"
+          echo "Resolved from $(describe_toolbox_resolution "${provider}" "${project}" "${toolbox_location}" "${toolbox_repository}" "${toolbox_image_name}" "${toolbox_tag}")"
+        elif [[ -f "${local_image_archive}" ]]; then
+          toolbox_image_source="local-archive"
+          use_local_image="1"
+          echo "No remote registry image configured for DigitalOcean; falling back to local archive ${local_image_archive}"
+        else
+          echo "No remote registry image configured for DigitalOcean." >&2
+          echo "Push one with: ${SCRIPT_DIR}/ctfvm image push-registry --provider digitalocean [--location <region>] [--repository <registry-name>] [--image-name <name>] [--variant ${toolbox_variant}]" >&2
+          echo "Or build the archive with: ${SCRIPT_DIR}/ctfvm image build-local [--variant ${toolbox_variant}]" >&2
+          exit 1
+        fi
+        ;;
+    esac
   fi
-
-  if [[ ! -f "${local_image_archive}" ]]; then
-    echo "Local image archive not found: ${local_image_archive}" >&2
-    echo "Build it with: ${SCRIPT_DIR}/ctfvm image build-local [--archive <path>] [--variant ${toolbox_variant}]" >&2
-    exit 1
-  fi
-  echo "Using local toolbox image archive: ${local_image_archive}"
 
   {
     echo "Challenge description:"
@@ -687,8 +2140,17 @@ cmd_start() {
       cat <<'PROMPT'
 Objectives:
 - Solve the challenge safely and document reproducible steps.
+- Prefer solving the challenge locally inside `/workspace/challenge` as far as possible before interacting with any remote target or service.
 - Save important outputs to /workspace/artifacts.
 - Keep a concise running summary in /workspace/findings.md.
+- Environment facts:
+- The working tree is /workspace and the challenge is in /workspace/challenge.
+- Python tooling is preinitialized in /workspace/.venv and `python`, `pip`, and `uv` should be on PATH.
+- Prefer `uv` for Python work: use `uv run`, `uv pip install`, or `/workspace/.venv/bin/python` explicitly when useful.
+- Do not assume Python or a package manager is missing without checking `command -v python python3 pip uv`.
+- You may install missing Python packages yourself with `uv pip install --python /workspace/.venv/bin/python <package>`.
+- You may install missing system packages yourself with `sudo apt-get update && sudo apt-get install -y <package>`.
+- If a missing dependency blocks progress, install it instead of stopping, then record what you installed in /workspace/findings.md.
 - Use $ctf-exploit-subagent for parallel exploit-path testing.
 - Use $ctf-docs-subagent for docs lookup and command-behavior verification.
 - Use $webhook-site-callbacks when callback probes or blind-vector confirmation is needed.
@@ -697,40 +2159,70 @@ PROMPT
     fi
   } > "${prompt_tmp}"
 
-  echo "Creating VM ${instance} in ${project}/${zone}"
-  gcloud compute instances create "${instance}" \
-    --project "${project}" \
-    --zone "${zone}" \
-    --machine-type "${machine_type}" \
-    --image-family debian-12 \
-    --image-project debian-cloud \
-    --boot-disk-size 80GB \
-    --scopes https://www.googleapis.com/auth/cloud-platform \
-    --metadata "ctfvm-timeout-min=${timeout_min}" \
-    --metadata-from-file "startup-script=${REPO_ROOT}/vm/startup.sh"
+  echo "Creating $(provider_label "${provider}") VM ${instance} in ${project}/${zone}"
+  case "${provider}" in
+    gcp)
+      if [[ -n "${boot_image}" ]]; then
+        echo "Using boot image: ${boot_image}${boot_image_project:+ (project ${boot_image_project})}"
+      else
+        echo "Using boot image family: ${boot_image_family}${boot_image_project:+ (project ${boot_image_project})}"
+      fi
+      ctfvm_provider_call "${provider}" create_instance "${instance}" "${zone}" "${project}" "${machine_type}" "${startup_tmp}" "${boot_image}" "${boot_image_family}" "${boot_image_project}"
+      ;;
+    digitalocean)
+      if [[ "${#do_ssh_keys[@]}" -gt 0 ]]; then
+        ssh_keys_csv="$(resolve_do_ssh_keys "${do_ssh_keys[@]}")"
+      else
+        ssh_keys_csv="$(resolve_do_ssh_keys)"
+      fi
+      if [[ -z "${ssh_keys_csv}" ]]; then
+        echo "No DigitalOcean SSH keys configured; continuing with HTTP control plane only."
+      fi
+      echo "Using boot image: ${boot_image}"
+      ctfvm_provider_call "${provider}" create_instance "${instance}" "${zone}" "${project}" "${size_slug}" "${startup_tmp}" "${boot_image}" "${ssh_keys_csv}"
+      machine_type="${size_slug}"
+      ;;
+  esac
 
+  PROVIDER="${provider}"
   INSTANCE="${instance}"
   ZONE="${zone}"
   PROJECT="${project}"
+  IP=""
+  CONTROL_SCHEME="http"
+  CONTROL_HOST=""
+  CONTROL_PORT="${control_port}"
+  CONTROL_USER="${control_user}"
+  CONTROL_PASSWORD="${control_password}"
 
-  echo "Waiting for VM SSH availability..."
-  wait_for_ssh
+  if [[ "${provider}" == "digitalocean" ]]; then
+    ZONE="$(do_region_for_instance "${instance}")"
+  fi
+
+  echo "Waiting for VM control plane availability..."
+  wait_for_control_plane
 
   echo "Waiting for VM bootstrap readiness..."
   wait_for_remote_bootstrap
 
+  mkdir -p "${upload_tmp}/challenge"
+  cp -R "${challenge_dir}/." "${upload_tmp}/challenge/"
+  cp "${prompt_tmp}" "${upload_tmp}/challenge_prompt.txt"
+  cp "${REPO_ROOT}/runner/supervisor.sh" "${REPO_ROOT}/runner/spawn-idea-workers.sh" "${REPO_ROOT}/runner/subagent-tmux-bridge.sh" "${REPO_ROOT}/runner/install-python-runtime.sh" "${upload_tmp}/"
+  if [[ -d "${REPO_ROOT}/prompts" ]]; then
+    cp -R "${REPO_ROOT}/prompts" "${upload_tmp}/"
+  fi
+  cp -R "${REPO_ROOT}/skills" "${upload_tmp}/"
+  cp -R "${REPO_ROOT}/images/ctf-toolbox/codex-config" "${upload_tmp}/"
+
   gcloud_ssh "mkdir -p ${remote_upload_dir} && rm -rf ${remote_upload_dir}/*"
 
   echo "Uploading challenge and runner files..."
-  gcloud compute scp --recurse "${challenge_dir}" "${instance}:${remote_upload_dir}/challenge" --zone "${zone}" --project "${project}"
-  gcloud compute scp "${prompt_tmp}" "${instance}:${remote_upload_dir}/challenge_prompt.txt" --zone "${zone}" --project "${project}"
-  gcloud compute scp "${REPO_ROOT}/runner/supervisor.sh" "${REPO_ROOT}/runner/spawn-idea-workers.sh" "${REPO_ROOT}/runner/subagent-tmux-bridge.sh" "${REPO_ROOT}/runner/install-python-runtime.sh" "${instance}:${remote_upload_dir}/" --zone "${zone}" --project "${project}"
-  if [[ -d "${REPO_ROOT}/prompts" ]]; then
-    gcloud compute scp --recurse "${REPO_ROOT}/prompts" "${instance}:${remote_upload_dir}/" --zone "${zone}" --project "${project}"
+  upload_dir_to_remote "${upload_tmp}" "${remote_upload_dir}"
+  if [[ "${use_local_image}" == "1" ]]; then
+    echo "Uploading local toolbox archive..."
+    upload_file_to_remote "${local_image_archive}" "${remote_upload_dir}/ctf-toolbox.tar.gz"
   fi
-  gcloud compute scp --recurse "${REPO_ROOT}/skills" "${instance}:${remote_upload_dir}/" --zone "${zone}" --project "${project}"
-  gcloud compute scp --recurse "${REPO_ROOT}/images/ctf-toolbox/codex-config" "${instance}:${remote_upload_dir}/" --zone "${zone}" --project "${project}"
-  gcloud compute scp "${local_image_archive}" "${instance}:${remote_upload_dir}/ctf-toolbox.tar.gz" --zone "${zone}" --project "${project}"
 
   gcloud_ssh "sudo mkdir -p /home/ctf/run /home/ctf/run/.codex/skills && sudo rm -rf /home/ctf/run/challenge /home/ctf/run/prompts /home/ctf/run/.codex/skills/* && sudo cp -R ${remote_upload_dir}/challenge /home/ctf/run/challenge && if [ -d ${remote_upload_dir}/prompts ]; then sudo cp -R ${remote_upload_dir}/prompts /home/ctf/run/prompts; fi && if [ -d ${remote_upload_dir}/skills ]; then sudo cp -R ${remote_upload_dir}/skills/. /home/ctf/run/.codex/skills/; fi && sudo cp ${remote_upload_dir}/challenge_prompt.txt /home/ctf/run/challenge_prompt.txt && sudo cp ${remote_upload_dir}/supervisor.sh ${remote_upload_dir}/spawn-idea-workers.sh ${remote_upload_dir}/subagent-tmux-bridge.sh ${remote_upload_dir}/install-python-runtime.sh /home/ctf/run/ && sudo chown -R ctf:ctf /home/ctf/run && sudo chmod 644 /home/ctf/run/challenge_prompt.txt && sudo -u ctf chmod +x /home/ctf/run/supervisor.sh /home/ctf/run/spawn-idea-workers.sh /home/ctf/run/subagent-tmux-bridge.sh /home/ctf/run/install-python-runtime.sh"
 
@@ -742,28 +2234,51 @@ PROMPT
 
   install_managed_codex_config "${remote_upload_dir}"
 
-  if ! gcloud_ssh "test -f ${remote_upload_dir}/ctf-toolbox.tar.gz"; then
-    echo "Local archive missing on VM after upload; aborting (local-image-only mode)." >&2
-    exit 1
+  if [[ "${use_local_image}" == "1" ]]; then
+    if ! gcloud_ssh "test -f ${remote_upload_dir}/ctf-toolbox.tar.gz"; then
+      echo "Local archive missing on VM after upload; aborting." >&2
+      exit 1
+    fi
+    load_remote_toolbox_archive "${remote_upload_dir}/ctf-toolbox.tar.gz"
+  else
+    pull_remote_toolbox_image "${toolbox_image_ref}"
   fi
-  load_remote_toolbox_archive "${remote_upload_dir}/ctf-toolbox.tar.gz"
   start_remote_toolbox_container "${toolbox_variant}"
   gcloud_ssh "rm -rf ${remote_upload_dir}"
 
-  local supervisor_cmd="/home/ctf/run/supervisor.sh --run-dir /home/ctf/run --prompt-file /home/ctf/run/challenge_prompt.txt"
-
   echo "Launching tmux supervisor..."
-  gcloud_ssh "sudo -u ctf bash -lc 'mkdir -p /home/ctf/run/logs /home/ctf/run/artifacts && tmux kill-session -t ctf >/dev/null 2>&1 || true && tmux new-session -d -s ctf -n supervisor \"${supervisor_cmd}\"'"
+  gcloud_ssh "sudo -u ctf bash -lc 'tmux kill-session -t ctf >/dev/null 2>&1 || true'"
+  launch_supervisor_tmux "/home/ctf/run" "/home/ctf/run/challenge_prompt.txt"
 
-  ip="$(gcloud compute instances describe "${instance}" --zone "${zone}" --project "${project}" --format='get(networkInterfaces[0].accessConfigs[0].natIP)')"
+  refresh_instance_ip
+  ip="${IP:-}"
+  if [[ "${provider}" == "digitalocean" && -z "${ZONE}" ]]; then
+    ZONE="$(do_region_for_instance "${instance}")"
+    if [[ -z "${ZONE}" ]]; then
+      ZONE="$(do_region_from_env)"
+    fi
+  fi
 
-  write_state "${instance}" "${zone}" "${project}" "${machine_type}" "${run_id}" "$(cd "${challenge_dir}" && pwd)" "${timeout_min}" "" "${auth_sync}" "${no_auth_sync}" "${ip}"
+  write_state "${provider}" "${instance}" "${ZONE}" "${project}" "${machine_type}" "${run_id}" "$(cd "${challenge_dir}" && pwd)" "${timeout_min}" "" "${auth_sync}" "${no_auth_sync}" "${ip}" "${boot_image}" "${boot_image_family}" "${boot_image_project}" "${toolbox_image_ref}" "${toolbox_image_source}" "${CONTROL_SCHEME}" "${CONTROL_HOST:-${ip}}" "${CONTROL_PORT}" "${CONTROL_USER}" "${CONTROL_PASSWORD}"
 
-  rm -f "${prompt_tmp}"
+  rm -f "${prompt_tmp}" "${startup_tmp}"
+  rm -rf "${upload_tmp}"
 
   echo "Run started."
+  echo "  Provider: $(provider_label "${provider}")"
   echo "  Instance: ${instance}"
   echo "  IP: ${ip}"
+  echo "  Control plane: $(control_endpoint)"
+  if [[ -n "${boot_image}" ]]; then
+    echo "  Boot image: ${boot_image}"
+  else
+    echo "  Boot image family: ${boot_image_family}"
+  fi
+  if [[ -n "${toolbox_image_ref}" ]]; then
+    echo "  Toolbox image: ${toolbox_image_ref}"
+  else
+    echo "  Toolbox image: local archive ${local_image_archive}"
+  fi
   echo "  Attach: ${SCRIPT_DIR}/ctfvm attach --run-id ${run_id}"
   echo "  Logs:   ${SCRIPT_DIR}/ctfvm logs --run-id ${run_id}"
 }
@@ -776,15 +2291,37 @@ cmd_status() {
     exit 1
   fi
   resolve_target_required
-  local status ip
-  status="$(gcloud compute instances describe "${INSTANCE}" --zone "${ZONE}" --project "${PROJECT}" --format='get(status)' 2>/dev/null || true)"
-  ip="$(gcloud compute instances describe "${INSTANCE}" --zone "${ZONE}" --project "${PROJECT}" --format='get(networkInterfaces[0].accessConfigs[0].natIP)' 2>/dev/null || true)"
+  local status ip boot_image boot_image_family boot_image_project toolbox_image_ref toolbox_image_source control_host control_port control_scheme
+  status="$(instance_status_for "${PROVIDER}" "${INSTANCE}" "${ZONE}" "${PROJECT}")"
+  ip="$(instance_ip_for "${PROVIDER}" "${INSTANCE}" "${ZONE}" "${PROJECT}")"
+  boot_image="$(json_get_from_file boot_image "${SELECTED_STATE_FILE}" || true)"
+  boot_image_family="$(json_get_from_file boot_image_family "${SELECTED_STATE_FILE}" || true)"
+  boot_image_project="$(json_get_from_file boot_image_project "${SELECTED_STATE_FILE}" || true)"
+  toolbox_image_ref="$(json_get_from_file toolbox_image_ref "${SELECTED_STATE_FILE}" || true)"
+  toolbox_image_source="$(json_get_from_file toolbox_image_source "${SELECTED_STATE_FILE}" || true)"
+  control_scheme="$(json_get_from_file control_scheme "${SELECTED_STATE_FILE}" || true)"
+  control_host="$(json_get_from_file control_host "${SELECTED_STATE_FILE}" || true)"
+  control_port="$(json_get_from_file control_port "${SELECTED_STATE_FILE}" || true)"
 
+  echo "Provider: $(provider_label "${PROVIDER}")"
   echo "Instance: ${INSTANCE}"
-  echo "Project:  ${PROJECT}"
-  echo "Zone:     ${ZONE}"
+  echo "$(provider_scope_label "${PROVIDER}"):  ${PROJECT}"
+  echo "$(provider_location_label "${PROVIDER}"):     ${ZONE}"
   echo "Status:   ${status:-UNKNOWN}"
   echo "IP:       ${ip:-unknown}"
+  if [[ -n "${control_port}${ip}" ]]; then
+    echo "Control:  ${control_scheme:-http}://${control_host:-${ip}}:${control_port:-${DEFAULT_CONTROL_PORT}}"
+  fi
+  if [[ -n "${boot_image}" ]]; then
+    echo "Boot:     image ${boot_image}${boot_image_project:+ (project ${boot_image_project})}"
+  elif [[ -n "${boot_image_family}" ]]; then
+    echo "Boot:     family ${boot_image_family}${boot_image_project:+ (project ${boot_image_project})}"
+  fi
+  if [[ -n "${toolbox_image_ref}" ]]; then
+    echo "Toolbox:  ${toolbox_image_ref}"
+  elif [[ -n "${toolbox_image_source}" ]]; then
+    echo "Toolbox:  ${toolbox_image_source}"
+  fi
   echo "Run ID:   ${RUN_ID}"
   echo "State:    ${STATE_FILE}"
 }
@@ -796,8 +2333,8 @@ cmd_attach() {
     echo "Unknown argument: $1" >&2
     exit 1
   fi
-  resolve_target_required
-  gcloud compute ssh "${INSTANCE}" --zone "${ZONE}" --project "${PROJECT}" -- -t 'sudo -u ctf tmux select-window -t ctf:supervisor >/dev/null 2>&1 || true; sudo -u ctf tmux attach -t ctf || sudo -u ctf tmux ls'
+  resolve_interactive_ssh_target_required
+  vm_ssh_tty 'sudo -u ctf tmux select-window -t ctf:supervisor >/dev/null 2>&1 || true; sudo -u ctf tmux attach -t ctf || sudo -u ctf tmux ls'
 }
 
 cmd_chat() {
@@ -807,8 +2344,8 @@ cmd_chat() {
     echo "Unknown argument: $1" >&2
     exit 1
   fi
-  resolve_target_required
-  gcloud compute ssh "${INSTANCE}" --zone "${ZONE}" --project "${PROJECT}" -- -t 'sudo -u ctf tmux attach -t ctf:supervisor || sudo -u ctf tmux ls'
+  resolve_interactive_ssh_target_required
+  vm_ssh_tty 'sudo -u ctf tmux attach -t ctf:supervisor || sudo -u ctf tmux ls'
 }
 
 cmd_shell() {
@@ -818,8 +2355,8 @@ cmd_shell() {
     echo "Unknown argument: $1" >&2
     exit 1
   fi
-  resolve_target_required
-  gcloud compute ssh "${INSTANCE}" --zone "${ZONE}" --project "${PROJECT}" -- -t 'sudo -u ctf -i'
+  resolve_interactive_ssh_target_required
+  vm_ssh_tty 'sudo -u ctf -i'
 }
 
 cmd_logs() {
@@ -881,6 +2418,348 @@ cmd_ui() {
 
   require_cmd python3
   python3 "${REPO_ROOT}/scripts/ctfvm_ui.py" --host "${host}" --port "${port}"
+}
+
+cmd_mcp() {
+  parse_selector_args "$@"
+  set -- ${PARSED_SELECTOR_ARGS[@]+"${PARSED_SELECTOR_ARGS[@]}"}
+  local restart_supervisor="0"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --restart-supervisor)
+        restart_supervisor="1"; shift ;;
+      *)
+        break ;;
+    esac
+  done
+
+  if [[ $# -lt 1 ]]; then
+    echo "Usage: ctfvm mcp [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--zone <zone> --project <project>]] [--restart-supervisor] <list|get|add|remove|login|logout> [args...]" >&2
+    exit 1
+  fi
+
+  local subcmd="$1"
+  case "${subcmd}" in
+    list|get|add|remove|login|logout) ;;
+    *)
+      echo "Unknown mcp subcommand: ${subcmd}" >&2
+      echo "Supported subcommands: list, get, add, remove, login, logout" >&2
+      exit 1 ;;
+  esac
+
+  resolve_target_required
+  run_remote_codex_mcp "$@"
+
+  if [[ "${restart_supervisor}" == "1" ]]; then
+    case "${subcmd}" in
+      add|remove|login|logout)
+        echo "Restarting supervisor window so Codex picks up the updated MCP configuration."
+        launch_supervisor_tmux "${REMOTE_RUN_DIR}" "${REMOTE_RUN_DIR}/challenge_prompt.txt"
+        ;;
+    esac
+  else
+    case "${subcmd}" in
+      add|remove|login|logout)
+        echo "MCP config updated on the VM."
+        echo "If Codex is already running in tmux, rerun with --restart-supervisor to reload it."
+        ;;
+    esac
+  fi
+}
+
+cmd_bridge_up() {
+  local bridge_name="default"
+  local config_file=""
+  local state_file=""
+  local state_dir=""
+  local ssh_log=""
+  local ssh_pid=""
+  local docker_gateway_ip=""
+  local targets_file=""
+  local state_targets_file=""
+  local stage_dir=""
+  local remote_json=""
+  local remote_env=""
+  local local_json=""
+  local target_name=""
+  local internal_host=""
+  local internal_port=""
+  local vm_port=""
+  local remote_pid=""
+  local summary_line=""
+  local -a forwards=()
+  local -a started_remote_pids=()
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --name)
+        bridge_name="$2"; shift 2 ;;
+      --config)
+        config_file="$2"; shift 2 ;;
+      *)
+        echo "Unknown argument: $1" >&2
+        exit 1 ;;
+    esac
+  done
+
+  if [[ ! "${bridge_name}" =~ ^[A-Za-z][A-Za-z0-9_-]*$ ]]; then
+    echo "Invalid bridge name: ${bridge_name}" >&2
+    exit 1
+  fi
+  if [[ -z "${config_file}" ]]; then
+    echo "Missing required flag: --config <local-json>" >&2
+    exit 1
+  fi
+
+  resolve_target_required
+  ensure_state_dir
+  state_dir="$(bridge_state_dir)"
+  state_file="$(bridge_state_file "${bridge_name}")"
+  ssh_log="$(bridge_local_log_file "${bridge_name}")"
+  if [[ -f "${state_file}" ]]; then
+    echo "Bridge ${bridge_name} already exists for $(bridge_target_key)." >&2
+    exit 1
+  fi
+  mkdir -p "${state_dir}"
+
+  targets_file="$(mktemp)"
+  state_targets_file="$(mktemp)"
+  if ! bridge_write_normalized_targets "${config_file}" "${targets_file}"; then
+    rm -f "${targets_file}" "${state_targets_file}"
+    exit 1
+  fi
+
+  if ! bridge_container_host_ready >/dev/null 2>&1; then
+    rm -f "${targets_file}" "${state_targets_file}"
+    echo "ctf-toolbox is not exposing host.docker.internal on this VM. Recreate the VM with the updated ctfvm tooling and try again." >&2
+    exit 1
+  fi
+  if ! gcloud_ssh "command -v socat >/dev/null 2>&1"; then
+    rm -f "${targets_file}" "${state_targets_file}"
+    echo "Remote VM is missing socat. Recreate the VM with the updated startup script and try again." >&2
+    exit 1
+  fi
+  gcloud_ssh "sudo -u ctf bash -lc 'mkdir -p ${REMOTE_BRIDGE_DIR}'"
+  docker_gateway_ip="$(bridge_container_gateway_ip | tr -d '[:space:]')"
+  if [[ -z "${docker_gateway_ip}" ]]; then
+    rm -f "${targets_file}" "${state_targets_file}"
+    echo "Could not determine the VM host gateway IP from ctf-toolbox." >&2
+    exit 1
+  fi
+
+  while IFS=$'\t' read -r target_name internal_host internal_port vm_port || [[ -n "${target_name}${internal_host}${internal_port}${vm_port}" ]]; do
+    forwards+=("127.0.0.1:${vm_port}:${internal_host}:${internal_port}")
+  done < "${targets_file}"
+
+  if ! ssh_pid="$(bridge_start_local_tunnel "${ssh_log}" "${forwards[@]}")"; then
+    rm -f "${targets_file}" "${state_targets_file}"
+    rm -f "${ssh_log}"
+    rmdir "${state_dir}" >/dev/null 2>&1 || true
+    exit 1
+  fi
+
+  while IFS=$'\t' read -r target_name internal_host internal_port vm_port || [[ -n "${target_name}${internal_host}${internal_port}${vm_port}" ]]; do
+    if ! remote_pid="$(bridge_start_remote_socat "${docker_gateway_ip}" "${vm_port}" "${bridge_name}" "${target_name}")"; then
+      for remote_pid in "${started_remote_pids[@]}"; do
+        bridge_kill_remote_pid "${remote_pid}"
+      done
+      kill "${ssh_pid}" >/dev/null 2>&1 || true
+      rm -f "${targets_file}" "${state_targets_file}" "${ssh_log}"
+      rmdir "${state_dir}" >/dev/null 2>&1 || true
+      exit 1
+    fi
+    started_remote_pids+=("${remote_pid}")
+    printf '%s\t%s\t%s\t%s\t%s\n' "${target_name}" "${internal_host}" "${internal_port}" "${vm_port}" "${remote_pid}" >> "${state_targets_file}"
+  done < "${targets_file}"
+
+  local_json="$(bridge_state_file "${bridge_name}")"
+  bridge_write_local_state_json "${bridge_name}" "${state_targets_file}" "${ssh_pid}" "${ssh_log}" "${local_json}"
+  stage_dir="$(mktemp -d)"
+  remote_json="${stage_dir}/${bridge_name}.json"
+  remote_env="${stage_dir}/${bridge_name}.env"
+  bridge_write_remote_state_json "${bridge_name}" "${state_targets_file}" "${remote_json}"
+  bridge_write_env_file "${state_targets_file}" "${remote_env}"
+  if ! upload_dir_to_remote "${stage_dir}" "${REMOTE_BRIDGE_DIR}"; then
+    for remote_pid in "${started_remote_pids[@]}"; do
+      bridge_kill_remote_pid "${remote_pid}"
+    done
+    kill "${ssh_pid}" >/dev/null 2>&1 || true
+    rm -rf "${stage_dir}"
+    rm -f "${targets_file}" "${state_targets_file}"
+    bridge_remove_local_state_file "${local_json}"
+    exit 1
+  fi
+
+  rm -rf "${stage_dir}"
+  rm -f "${targets_file}" "${state_targets_file}"
+
+  echo "Bridge ${bridge_name} is up for ${INSTANCE}."
+  while IFS=$'\t' read -r target_name internal_host internal_port vm_port remote_pid || [[ -n "${target_name}${vm_port}" ]]; do
+    summary_line="${target_name}: ${internal_host}:${internal_port} -> host.docker.internal:${vm_port}"
+    echo "  ${summary_line}"
+  done < <(jq -r '.targets[] | [.name, .internal_host, (.internal_port | tostring), (.vm_port | tostring), (.remote_socat_pid | tostring)] | @tsv' "${local_json}")
+  echo "  Remote env: $(bridge_remote_env_file "${bridge_name}")"
+}
+
+cmd_bridge_status() {
+  local bridge_name="default"
+  local state_file=""
+  local ssh_pid=""
+  local ssh_status="down"
+  local remote_reachable="0"
+  local container_status="unavailable"
+  local target_name=""
+  local container_host=""
+  local vm_port=""
+  local internal_host=""
+  local internal_port=""
+  local remote_pid=""
+  local remote_status="unknown"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --name)
+        bridge_name="$2"; shift 2 ;;
+      *)
+        echo "Unknown argument: $1" >&2
+        exit 1 ;;
+    esac
+  done
+
+  resolve_target_required
+  require_cmd jq
+  state_file="$(bridge_state_file "${bridge_name}")"
+  if [[ ! -f "${state_file}" ]]; then
+    echo "Bridge state not found: ${state_file}" >&2
+    exit 1
+  fi
+
+  ssh_pid="$(jq -r '.ssh_pid' "${state_file}")"
+  if bridge_local_pid_alive "${ssh_pid}"; then
+    ssh_status="up"
+  fi
+  if bridge_container_host_ready >/dev/null 2>&1; then
+    remote_reachable="1"
+    container_status="ready"
+  fi
+
+  echo "Bridge ${bridge_name}"
+  echo "  Instance: ${INSTANCE} ($(provider_label "${PROVIDER}"))"
+  echo "  SSH tunnel: pid=${ssh_pid} status=${ssh_status}"
+  echo "  Container host mapping: ${container_status}"
+
+  while IFS=$'\t' read -r target_name container_host vm_port internal_host internal_port remote_pid || [[ -n "${target_name}${vm_port}${remote_pid}" ]]; do
+    remote_status="unknown"
+    if [[ "${remote_reachable}" == "1" ]]; then
+      if bridge_remote_pid_alive "${remote_pid}"; then
+        remote_status="up"
+      else
+        remote_status="down"
+      fi
+    fi
+    echo "  ${target_name}: ${container_host}:${vm_port} -> ${internal_host}:${internal_port} (socat pid=${remote_pid}, status=${remote_status})"
+  done < <(jq -r '.targets[] | [.name, .container_host, (.vm_port | tostring), .internal_host, (.internal_port | tostring), (.remote_socat_pid | tostring)] | @tsv' "${state_file}")
+}
+
+cmd_bridge_down() {
+  local bridge_name="default"
+  local state_file=""
+  local ssh_pid=""
+  local target_name=""
+  local remote_pid=""
+  local remote_cleanup_cmd=""
+  local state_dir=""
+  local remote_path=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --name)
+        bridge_name="$2"; shift 2 ;;
+      *)
+        echo "Unknown argument: $1" >&2
+        exit 1 ;;
+    esac
+  done
+
+  resolve_target_required
+  require_cmd jq
+  state_file="$(bridge_state_file "${bridge_name}")"
+  if [[ ! -f "${state_file}" ]]; then
+    echo "Bridge state not found: ${state_file}" >&2
+    exit 1
+  fi
+
+  while IFS=$'\t' read -r target_name remote_pid || [[ -n "${target_name}${remote_pid}" ]]; do
+    bridge_kill_remote_pid "${remote_pid}"
+  done < <(jq -r '.targets[] | [.name, (.remote_socat_pid | tostring)] | @tsv' "${state_file}")
+
+  ssh_pid="$(jq -r '.ssh_pid' "${state_file}")"
+  kill "${ssh_pid}" >/dev/null 2>&1 || true
+
+  printf -v remote_cleanup_cmd 'rm -f %q %q' "$(bridge_remote_json_file "${bridge_name}")" "$(bridge_remote_env_file "${bridge_name}")"
+  while IFS=$'\t' read -r target_name remote_pid || [[ -n "${target_name}" ]]; do
+    remote_path="$(bridge_remote_socat_log_file "${bridge_name}" "${target_name}")"
+    printf -v remote_cleanup_cmd '%s %q' "${remote_cleanup_cmd}" "${remote_path}"
+  done < <(jq -r '.targets[] | [.name, (.remote_socat_pid | tostring)] | @tsv' "${state_file}")
+  gcloud_ssh "sudo -u ctf bash -lc '${remote_cleanup_cmd}'" >/dev/null 2>&1 || true
+
+  bridge_remove_local_state_file "${state_file}"
+  state_dir="$(bridge_state_dir)"
+  rmdir "${state_dir}" >/dev/null 2>&1 || true
+  echo "Bridge ${bridge_name} removed."
+}
+
+cmd_bridge_list() {
+  local state_dir=""
+  local state_file=""
+
+  if [[ $# -gt 0 ]]; then
+    echo "Usage: ctfvm bridge [selector] list" >&2
+    exit 1
+  fi
+
+  resolve_target_required
+  require_cmd jq
+  state_dir="$(bridge_state_dir)"
+  if [[ ! -d "${state_dir}" ]]; then
+    echo "No bridge state found for $(bridge_target_key)."
+    exit 0
+  fi
+
+  for state_file in "${state_dir}"/*.json; do
+    [[ -e "${state_file}" ]] || continue
+    jq -r '"\(.name): \(.targets | length) target(s), updated \(.updated_at)"' "${state_file}"
+    jq -r '.targets[] | "  \(.name): \(.container_host):\(.vm_port) -> \(.internal_host):\(.internal_port)"' "${state_file}"
+  done
+}
+
+cmd_bridge() {
+  parse_selector_args "$@"
+  set -- ${PARSED_SELECTOR_ARGS[@]+"${PARSED_SELECTOR_ARGS[@]}"}
+
+  if [[ $# -lt 1 ]]; then
+    echo "Usage: ctfvm bridge [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--provider gcp|digitalocean --zone <zone-or-region> --project <project>]] <up|status|down|list> [args...]" >&2
+    exit 1
+  fi
+
+  local subcmd="$1"
+  shift
+
+  case "${subcmd}" in
+    up)
+      cmd_bridge_up "$@" ;;
+    status)
+      cmd_bridge_status "$@" ;;
+    down)
+      cmd_bridge_down "$@" ;;
+    list)
+      cmd_bridge_list "$@" ;;
+    *)
+      echo "Unknown bridge subcommand: ${subcmd}" >&2
+      echo "Supported subcommands: up, status, down, list" >&2
+      exit 1 ;;
+  esac
 }
 
 cmd_inject() {
@@ -1073,7 +2952,7 @@ cmd_sync_skill() {
     exit 1
   fi
 
-  local local_skill_dir remote_tmp
+  local local_skill_dir remote_tmp local_stage
   local_skill_dir="${REPO_ROOT}/skills/${skill_name}"
   if [[ ! -f "${local_skill_dir}/SKILL.md" ]]; then
     echo "Skill not found or invalid: ${local_skill_dir}" >&2
@@ -1081,9 +2960,12 @@ cmd_sync_skill() {
   fi
 
   remote_tmp="/tmp/ctfvm-skill-sync-${skill_name}-$$"
+  local_stage="$(mktemp -d)"
+  cp -R "${local_skill_dir}" "${local_stage}/"
   gcloud_ssh "mkdir -p ${remote_tmp}"
-  gcloud compute scp --recurse "${local_skill_dir}" "${INSTANCE}:${remote_tmp}/" --zone "${ZONE}" --project "${PROJECT}"
+  upload_dir_to_remote "${local_stage}" "${remote_tmp}"
   gcloud_ssh "sudo mkdir -p /home/ctf/run/.codex/skills && sudo rm -rf /home/ctf/run/.codex/skills/${skill_name} && sudo cp -R ${remote_tmp}/${skill_name} /home/ctf/run/.codex/skills/${skill_name} && sudo chown -R ctf:ctf /home/ctf/run/.codex/skills/${skill_name} && rm -rf ${remote_tmp}"
+  rm -rf "${local_stage}"
 
   echo "Synced skill ${skill_name} to /home/ctf/run/.codex/skills/${skill_name}"
 }
@@ -1160,7 +3042,12 @@ cmd_sync_down() {
 
   mkdir -p "${out_dir}"
   gcloud_ssh "sudo -u ctf bash -lc 'test -d \"${remote_path}\"'"
-  gcloud_ssh "sudo -u ctf bash -lc 'tar -C \"${remote_path}\" -cf - .'" | tar -C "${out_dir}" -xf -
+  local remote_tar="/tmp/ctfvm-sync-down-${RUN_ID:-manual}-$$.tar"
+  gcloud_ssh "sudo -u ctf bash -lc 'tmp=${remote_tar}; rm -f \"${tmp}\"; tar -C \"${remote_path}\" -cf \"${tmp}\" .'"
+  download_file_from_remote "${remote_tar}" "${out_dir}/.ctfvm-sync.tar"
+  tar -C "${out_dir}" -xf "${out_dir}/.ctfvm-sync.tar"
+  rm -f "${out_dir}/.ctfvm-sync.tar"
+  gcloud_ssh "rm -f \"${remote_tar}\"" >/dev/null 2>&1 || true
   echo "Synced remote ${remote_path} -> $(cd "${out_dir}" && pwd)"
 }
 
@@ -1193,7 +3080,7 @@ cmd_sync_up() {
     exit 1
   fi
 
-  tar -C "${src_dir}" -cf - . | gcloud_ssh "sudo -u ctf bash -lc 'mkdir -p \"${remote_path}\" && tar -C \"${remote_path}\" -xf -'"
+  upload_dir_to_remote "${src_dir}" "${remote_path}"
   echo "Synced $(cd "${src_dir}" && pwd) -> remote ${remote_path}"
 }
 
@@ -1201,7 +3088,6 @@ cmd_vscode() {
   parse_selector_args "$@"
   set -- ${PARSED_SELECTOR_ARGS[@]+"${PARSED_SELECTOR_ARGS[@]}"}
   resolve_target_required
-  require_cmd gcloud
   require_cmd code
 
   local remote_path="${REMOTE_RUN_DIR}/challenge"
@@ -1215,11 +3101,12 @@ cmd_vscode() {
     esac
   done
 
-  # Ensure gcloud-managed SSH host aliases exist for Remote-SSH.
-  gcloud compute config-ssh --project "${PROJECT}" --quiet >/dev/null
-
   local host_alias
-  host_alias="${INSTANCE}.${ZONE}.${PROJECT}"
+  if [[ -z "${IP:-}" ]]; then
+    refresh_instance_ip
+  fi
+  ctfvm_provider_call "${PROVIDER}" prepare_vscode_host "${INSTANCE}" "${ZONE}" "${PROJECT}" "${IP:-}" || true
+  host_alias="$(ctfvm_provider_call "${PROVIDER}" vscode_host_alias "${INSTANCE}" "${ZONE}" "${PROJECT}" "${IP:-}")"
   code --folder-uri "vscode-remote://ssh-remote+${host_alias}${remote_path}"
   echo "Opened VS Code Remote-SSH at ${host_alias}:${remote_path}"
 }
@@ -1249,14 +3136,14 @@ cmd_fetch() {
 
   local remote_tar="/tmp/ctfvm-${RUN_ID}.tar.gz"
   gcloud_ssh "sudo -u ctf bash -lc 'cd ${REMOTE_RUN_DIR} && tar -czf ${remote_tar} findings.md artifacts logs inject.queue challenge_prompt.txt 2>/dev/null || tar -czf ${remote_tar} artifacts logs challenge_prompt.txt'"
-  gcloud compute scp "${INSTANCE}:${remote_tar}" "${out_dir}/" --zone "${ZONE}" --project "${PROJECT}"
+  download_file_from_remote "${remote_tar}" "${out_dir}/ctfvm-${RUN_ID}.tar.gz"
+  gcloud_ssh "rm -f ${remote_tar}" >/dev/null 2>&1 || true
 
   tar -xzf "${out_dir}/ctfvm-${RUN_ID}.tar.gz" -C "${out_dir}"
   echo "Fetched artifacts into: $(cd "${out_dir}" && pwd)"
 }
 
 cmd_destroy() {
-  require_cmd gcloud
   local no_wipe="0"
   local destroy_all="0"
   local pick="0"
@@ -1266,6 +3153,7 @@ cmd_destroy() {
   local instance_override=""
   local zone_override=""
   local project_override=""
+  local provider_override=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -1281,6 +3169,8 @@ cmd_destroy() {
         zone_override="$2"; shift 2 ;;
       --project)
         project_override="$2"; shift 2 ;;
+      --provider)
+        provider_override="$(normalize_provider "$2")"; shift 2 ;;
       --no-wipe-auth)
         no_wipe="1"; shift ;;
       *)
@@ -1304,7 +3194,7 @@ cmd_destroy() {
       fi_inst="$(json_get_from_file instance "${f}" || true)"
       fi_zone="$(json_get_from_file zone "${f}" || true)"
       fi_proj="$(json_get_from_file project "${f}" || true)"
-      if [[ "${fi_inst}" == "${inst}" && "${fi_zone}" == "${zn}" && "${fi_proj}" == "${proj}" ]]; then
+      if [[ "${fi_inst}" == "${inst}" && ( -z "${fi_zone}" || -z "${zn}" || "${fi_zone}" == "${zn}" ) && ( -z "${fi_proj}" || -z "${proj}" || "${fi_proj}" == "${proj}" ) ]]; then
         rm -f "${f}"
       fi
     done
@@ -1312,73 +3202,93 @@ cmd_destroy() {
       fi_inst="$(json_get instance || true)"
       fi_zone="$(json_get zone || true)"
       fi_proj="$(json_get project || true)"
-      if [[ "${fi_inst}" == "${inst}" && "${fi_zone}" == "${zn}" && "${fi_proj}" == "${proj}" ]]; then
+      if [[ "${fi_inst}" == "${inst}" && ( -z "${fi_zone}" || -z "${zn}" || "${fi_zone}" == "${zn}" ) && ( -z "${fi_proj}" || -z "${proj}" || "${fi_proj}" == "${proj}" ) ]]; then
         rm -f "${STATE_FILE}"
       fi
     fi
   }
 
   destroy_one_instance() {
-    local inst="$1"
-    local zn="$2"
-    local proj="$3"
+    local provider="$1"
+    local inst="$2"
+    local zn="$3"
+    local proj="$4"
+    local inst_ip="${5:-}"
+    local prev_provider="${PROVIDER:-}"
+    local prev_instance="${INSTANCE:-}"
+    local prev_zone="${ZONE:-}"
+    local prev_project="${PROJECT:-}"
+    local prev_ip="${IP:-}"
+    PROVIDER="${provider}"
+    INSTANCE="${inst}"
+    ZONE="${zn}"
+    PROJECT="${proj}"
+    IP="${inst_ip}"
     if [[ "${no_wipe}" == "0" ]]; then
-      echo "Wiping VM Codex session material before deletion: ${inst} (${zn})"
-      gcloud compute ssh "${inst}" --zone "${zn}" --project "${proj}" --command "sudo -u ctf bash -lc '
+      echo "Wiping VM Codex session material before deletion: ${inst} (${zn}, $(provider_label "${provider}"))"
+      gcloud_ssh "sudo -u ctf bash -lc '
         if [ -d /home/ctf/run/.codex ]; then
           find /home/ctf/run/.codex -type f -exec shred -u {} + 2>/dev/null || rm -rf /home/ctf/run/.codex
         fi
         if [ -d /home/ctf/.codex ]; then
           find /home/ctf/.codex -type f -exec shred -u {} + 2>/dev/null || rm -rf /home/ctf/.codex
         fi
-      '" || true
+        if [ -d /home/ctf/.docker ]; then
+          find /home/ctf/.docker -type f -exec shred -u {} + 2>/dev/null || rm -rf /home/ctf/.docker
+        fi
+      '" </dev/null || true
     fi
     echo "Deleting instance ${inst}..."
-    if ! gcloud compute instances delete "${inst}" --zone "${zn}" --project "${proj}" --quiet; then
+    if ! ctfvm_provider_call "${provider}" delete_instance "${inst}" "${zn}" "${proj}" </dev/null; then
       echo "Instance deletion returned non-zero for ${inst} (possibly already deleted)." >&2
     fi
     cleanup_local_state_for_instance "${inst}" "${zn}" "${proj}"
+    PROVIDER="${prev_provider}"
+    INSTANCE="${prev_instance}"
+    ZONE="${prev_zone}"
+    PROJECT="${prev_project}"
+    IP="${prev_ip}"
   }
 
-  if [[ "${destroy_all}" == "1" && ( "${pick}" == "1" || -n "${run_id_selector}" || -n "${instance_override}" || -n "${zone_override}" || -n "${project_override}" ) ]]; then
+  if [[ "${destroy_all}" == "1" && ( "${pick}" == "1" || -n "${run_id_selector}" || -n "${instance_override}" || -n "${zone_override}" || -n "${project_override}" || -n "${provider_override}" ) ]]; then
     echo "Use --all by itself (optionally with --no-wipe-auth)." >&2
     exit 1
   fi
-  if [[ "${pick}" == "1" && ( -n "${run_id_selector}" || -n "${instance_override}" || -n "${zone_override}" || -n "${project_override}" ) ]]; then
-    echo "Use --pick by itself, or use explicit selectors (--run-id/--instance/--zone/--project)." >&2
+  if [[ "${pick}" == "1" && ( -n "${run_id_selector}" || -n "${instance_override}" || -n "${zone_override}" || -n "${project_override}" || -n "${provider_override}" ) ]]; then
+    echo "Use --pick by itself, or use explicit selectors (--run-id/--instance/--provider/--zone/--project)." >&2
     exit 1
   fi
   if [[ -n "${run_id_selector}" && -n "${instance_override}" ]]; then
     echo "Use either --run-id or --instance, not both." >&2
     exit 1
   fi
-  if [[ -n "${run_id_selector}" && ( -n "${zone_override}" || -n "${project_override}" ) ]]; then
-    echo "--run-id cannot be combined with --zone/--project." >&2
+  if [[ -n "${run_id_selector}" && ( -n "${zone_override}" || -n "${project_override}" || -n "${provider_override}" ) ]]; then
+    echo "--run-id cannot be combined with --provider/--zone/--project." >&2
     exit 1
   fi
 
   if [[ "${destroy_all}" == "1" ]]; then
-    local project_all rows_all line_all inst_all zone_all count_all
-    project_all="$(project_from_gcloud_config)"
-    if [[ -z "${project_all}" ]]; then
-      echo "No gcloud project configured. Set one with: gcloud config set project <project-id>" >&2
-      exit 1
-    fi
-    rows_all="$(gcloud compute instances list --project "${project_all}" --filter='name~^ctfvm- AND status=RUNNING' --format='value(name,zone,status)' 2>/dev/null || true)"
+    local rows_all line_all provider_all inst_all zone_all proj_all ip_all count_all rows_all_tmp
+    rows_all="$(ctfvm_provider_list_running_all)"
     if [[ -z "${rows_all//[[:space:]]/}" ]]; then
-      echo "No running ctfvm instances found in project ${project_all}."
+      echo "No running ctfvm instances found across configured providers."
       exit 0
     fi
+    rows_all_tmp="$(mktemp)"
+    printf '%s\n' "${rows_all}" > "${rows_all_tmp}"
     count_all=0
-    while IFS= read -r line_all; do
+    while IFS= read -r -u 9 line_all; do
       [[ -z "${line_all//[[:space:]]/}" ]] && continue
-      inst_all="$(awk '{print $1}' <<< "${line_all}")"
-      zone_all="$(awk '{print $2}' <<< "${line_all}")"
-      zone_all="${zone_all##*/}"
-      [[ -z "${inst_all}" || -z "${zone_all}" ]] && continue
-      destroy_one_instance "${inst_all}" "${zone_all}" "${project_all}"
+      provider_all="$(awk -F'\t' '{print $1}' <<< "${line_all}")"
+      inst_all="$(awk -F'\t' '{print $2}' <<< "${line_all}")"
+      zone_all="$(awk -F'\t' '{print $3}' <<< "${line_all}")"
+      proj_all="$(awk -F'\t' '{print $4}' <<< "${line_all}")"
+      ip_all="$(awk -F'\t' '{print $6}' <<< "${line_all}")"
+      [[ -n "${provider_all}${inst_all}${zone_all}" ]] || continue
+      destroy_one_instance "${provider_all}" "${inst_all}" "${zone_all}" "${proj_all}" "${ip_all}"
       count_all=$((count_all + 1))
-    done <<< "${rows_all}"
+    done 9< "${rows_all_tmp}"
+    rm -f "${rows_all_tmp}"
     echo "Destroyed ${count_all} ctfvm instance(s)."
     echo "Matching local state entries cleared."
     return 0
@@ -1396,19 +3306,24 @@ cmd_destroy() {
     load_state_required_for_selector "" "${instance_override}"
     local_selector_used="1"
   elif [[ -n "${instance_override}" ]]; then
+    PROVIDER="$(normalize_provider "${provider_override:-$(default_provider)}")"
     INSTANCE="${instance_override}"
     ZONE="${zone_override}"
     PROJECT="${project_override}"
     if [[ -z "${ZONE}" ]]; then
-      ZONE="$(gcloud config get-value compute/zone 2>/dev/null || true)"
+      ZONE="$(ctfvm_provider_call "${PROVIDER}" default_location)"
+      if [[ "${PROVIDER}" == "digitalocean" && -z "${ZONE}" ]] && command -v doctl >/dev/null 2>&1; then
+        ZONE="$(ctfvm_provider_call "${PROVIDER}" get_region "${INSTANCE}")"
+      fi
     fi
     if [[ -z "${PROJECT}" ]]; then
-      PROJECT="$(gcloud config get-value project 2>/dev/null || true)"
+      PROJECT="$(ctfvm_provider_call "${PROVIDER}" default_scope)"
     fi
     if [[ -z "${ZONE}" || -z "${PROJECT}" ]]; then
-      echo "When using --instance directly, set --zone/--project or configure gcloud defaults." >&2
+      echo "When using --instance directly, set --provider/--zone/--project or configure provider defaults." >&2
       exit 1
     fi
+    IP="$(instance_ip_for "${PROVIDER}" "${INSTANCE}" "${ZONE}" "${PROJECT}")"
     if [[ "${INSTANCE}" == ctfvm-* ]]; then
       RUN_ID="$(run_id_from_instance_name "${INSTANCE}")"
     else
@@ -1438,11 +3353,14 @@ cmd_destroy() {
       if [ -d /home/ctf/.codex ]; then
         find /home/ctf/.codex -type f -exec shred -u {} + 2>/dev/null || rm -rf /home/ctf/.codex
       fi
+      if [ -d /home/ctf/.docker ]; then
+        find /home/ctf/.docker -type f -exec shred -u {} + 2>/dev/null || rm -rf /home/ctf/.docker
+      fi
     '" || true
   fi
 
   echo "Deleting instance ${INSTANCE}..."
-  if ! gcloud compute instances delete "${INSTANCE}" --zone "${ZONE}" --project "${PROJECT}" --quiet; then
+  if ! ctfvm_provider_call "${PROVIDER}" delete_instance "${INSTANCE}" "${ZONE}" "${PROJECT}"; then
     echo "Instance deletion returned non-zero (possibly already deleted). Clearing local state anyway."
   fi
 
@@ -1456,7 +3374,6 @@ cmd_destroy() {
 }
 
 cmd_cleanup_state() {
-  require_cmd gcloud
   ensure_state_dir
 
   local dry_run="0"
@@ -1481,10 +3398,11 @@ cmd_cleanup_state() {
   cleanup_one_state_file() {
     local file="$1"
     local label="$2"
-    local inst zn proj status reason remove_now
+    local inst zn proj provider status reason remove_now
 
     [[ -f "${file}" ]] || return 0
 
+    provider="$(provider_from_state_file "${file}")"
     inst="$(json_get_from_file instance "${file}" || true)"
     zn="$(json_get_from_file zone "${file}" || true)"
     proj="$(json_get_from_file project "${file}" || true)"
@@ -1496,11 +3414,19 @@ cmd_cleanup_state() {
       remove_now="1"
       reason="incomplete metadata"
     else
-      status="$(gcloud compute instances describe "${inst}" --zone "${zn}" --project "${proj}" --format='get(status)' 2>/dev/null || true)"
-      if [[ -z "${status}" ]]; then
+      if [[ "${provider}" == "gcp" ]] && ! command -v gcloud >/dev/null 2>&1; then
+        status="CLI_MISSING"
+      elif [[ "${provider}" == "digitalocean" ]] && ! command -v doctl >/dev/null 2>&1; then
+        status="CLI_MISSING"
+      else
+        status="$(instance_status_for "${provider}" "${inst}" "${zn}" "${proj}")"
+      fi
+      if [[ "${status}" == "CLI_MISSING" ]]; then
+        reason="provider CLI unavailable"
+      elif [[ -z "${status}" ]]; then
         remove_now="1"
         reason="instance not found"
-      elif [[ "${prune_non_running}" == "1" && "${status}" != "RUNNING" ]]; then
+      elif [[ "${prune_non_running}" == "1" && "${status}" != "RUNNING" && "${status}" != "active" ]]; then
         remove_now="1"
         reason="instance status=${status}"
       fi
@@ -1550,26 +3476,30 @@ cmd_cleanup_state() {
 usage() {
   cat <<USAGE
 Usage:
-  ctfvm start --dir <challenge-folder> [--desc <text> | --desc-file <path>] [--ideas <text>] [--timeout-min 1440] [--machine-type e2-standard-4] [--zone <zone>] [--project <project>] [--no-auth-sync] [--local-image-archive <path>]
+  ctfvm start --provider gcp|digitalocean --dir <challenge-folder> [--desc <text> | --desc-file <path>] [--ideas <text>] [--timeout-min 1440] [--machine-type e2-standard-4 | --size-slug s-4vcpu-8gb] [--zone <zone-or-region>] [--project <project>] [--ssh-key <fingerprint>] [--toolbox-image <artifact-registry-ref> | --toolbox-location <region> --toolbox-repository <repo> --toolbox-image-name <name> --toolbox-tag <tag> | --use-local-image [--local-image-archive <path>]] [--toolbox-variant lean|full] [--boot-image <image> | --boot-image-family <family> [--boot-image-project <project>]] [--no-auth-sync]
   ctfvm image build-local [--archive <path>] [--platform linux/amd64] [--variant lean|full]
+  ctfvm image push-registry --provider gcp|digitalocean [--project <project>] [--location <region>] [--repository <repo>] [--image-name <name>] [--tag <tag>] [--registry-tier basic] [--platform linux/amd64] [--variant lean|full]
+  ctfvm image push-ar [--project <project>] [--location <region>] [--repository <repo>] [--image-name <name>] [--tag <tag>] [--platform linux/amd64] [--variant lean|full]
   ctfvm image status [--archive <path>]
-  ctfvm status [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--zone <zone> --project <project>]]
-  ctfvm attach [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--zone <zone> --project <project>]]
-  ctfvm chat [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--zone <zone> --project <project>]]
-  ctfvm shell [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--zone <zone> --project <project>]]
-  ctfvm logs [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--zone <zone> --project <project>]]
-  ctfvm monitor [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--zone <zone> --project <project>]]
+  ctfvm status [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--provider gcp|digitalocean --zone <zone-or-region> --project <project>]]
+  ctfvm attach [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--provider gcp|digitalocean --zone <zone-or-region> --project <project>] | --ip <public-ip> [--provider digitalocean]]
+  ctfvm chat [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--provider gcp|digitalocean --zone <zone-or-region> --project <project>] | --ip <public-ip> [--provider digitalocean]]
+  ctfvm shell [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--provider gcp|digitalocean --zone <zone-or-region> --project <project>] | --ip <public-ip> [--provider digitalocean]]
+  ctfvm logs [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--provider gcp|digitalocean --zone <zone-or-region> --project <project>]]
+  ctfvm monitor [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--provider gcp|digitalocean --zone <zone-or-region> --project <project>]]
   ctfvm ui [--host 127.0.0.1] [--port 8765]
-  ctfvm inject [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--zone <zone> --project <project>]] --msg <text>
-  ctfvm send [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--zone <zone> --project <project>]] --text <text> [--target <session>:<window-or-pane>] [--no-enter]
-  ctfvm key [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--zone <zone> --project <project>]] [--target <session>:<window-or-pane>] --key <tmux-key> [--key <tmux-key> ...]
-  ctfvm ideas [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--zone <zone> --project <project>]] (--ideas "idea1;idea2" | --ideas-file <local-file>) [--parallel <n>] [--model gpt-5.3-codex]
-  ctfvm sync-skill [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--zone <zone> --project <project>]] [--skill <skill-name>]
-  ctfvm sync-down [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--zone <zone> --project <project>]] [--out <local-dir>] [--remote-path </home/ctf/run/challenge>]
-  ctfvm sync-up [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--zone <zone> --project <project>]] --src <local-dir> [--remote-path </home/ctf/run/challenge>]
-  ctfvm vscode [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--zone <zone> --project <project>]] [--remote-path </home/ctf/run/challenge>]
-  ctfvm fetch [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--zone <zone> --project <project>]] [--out <local-dir>]
-  ctfvm destroy [--pick | --all | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...>] [--zone <zone> --project <project>] [--no-wipe-auth]
+  ctfvm bridge [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--provider gcp|digitalocean --zone <zone-or-region> --project <project>]] <up|status|down|list> [args...]
+  ctfvm mcp [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--provider gcp|digitalocean --zone <zone-or-region> --project <project>]] [--restart-supervisor] <list|get|add|remove|login|logout> [args...]
+  ctfvm inject [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--provider gcp|digitalocean --zone <zone-or-region> --project <project>]] --msg <text>
+  ctfvm send [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--provider gcp|digitalocean --zone <zone-or-region> --project <project>]] --text <text> [--target <session>:<window-or-pane>] [--no-enter]
+  ctfvm key [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--provider gcp|digitalocean --zone <zone-or-region> --project <project>]] [--target <session>:<window-or-pane>] --key <tmux-key> [--key <tmux-key> ...]
+  ctfvm ideas [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--provider gcp|digitalocean --zone <zone-or-region> --project <project>]] (--ideas "idea1;idea2" | --ideas-file <local-file>) [--parallel <n>] [--model gpt-5.3-codex]
+  ctfvm sync-skill [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--provider gcp|digitalocean --zone <zone-or-region> --project <project>]] [--skill <skill-name>]
+  ctfvm sync-down [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--provider gcp|digitalocean --zone <zone-or-region> --project <project>]] [--out <local-dir>] [--remote-path </home/ctf/run/challenge>]
+  ctfvm sync-up [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--provider gcp|digitalocean --zone <zone-or-region> --project <project>]] --src <local-dir> [--remote-path </home/ctf/run/challenge>]
+  ctfvm vscode [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--provider gcp|digitalocean --zone <zone-or-region> --project <project>]] [--remote-path </home/ctf/run/challenge>]
+  ctfvm fetch [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--provider gcp|digitalocean --zone <zone-or-region> --project <project>]] [--out <local-dir>]
+  ctfvm destroy [--pick | --all | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...>] [--provider gcp|digitalocean --zone <zone-or-region> --project <project>] [--no-wipe-auth]
   ctfvm cleanup-state [--dry-run] [--prune-non-running]
 USAGE
 }
@@ -1594,6 +3524,8 @@ main() {
     logs) cmd_logs "$@" ;;
     monitor) cmd_monitor "$@" ;;
     ui) cmd_ui "$@" ;;
+    bridge) cmd_bridge "$@" ;;
+    mcp) cmd_mcp "$@" ;;
     inject) cmd_inject "$@" ;;
     send) cmd_send "$@" ;;
     key) cmd_key "$@" ;;
@@ -1612,4 +3544,6 @@ main() {
   esac
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi

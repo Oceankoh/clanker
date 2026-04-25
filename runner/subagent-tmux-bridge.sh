@@ -15,7 +15,7 @@ Behavior:
   - Creates one tmux session per discovered child id:
       <session-prefix>-<agent_id>
   - Each spawned session runs:
-      docker exec -it ctf-toolbox bash -lc 'cd /workspace && codex resume <agent_id> --no-alt-screen'
+      docker exec -it ctf-toolbox bash -c 'cd /workspace && codex resume <agent_id> --no-alt-screen'
 USAGE
 }
 
@@ -62,12 +62,13 @@ STATE_DIR="${RUN_DIR}/.subagent-bridge"
 SESSIONS_DIR="${RUN_DIR}/.codex/sessions"
 MARKER_FILE="${STATE_DIR}/start.marker"
 SEEN_FILE="${STATE_DIR}/seen-agent-ids.txt"
+COMPLETED_FILE="${STATE_DIR}/completed-agent-ids.txt"
 MAP_FILE="${STATE_DIR}/session-map.tsv"
 LOG_DIR="${RUN_DIR}/logs"
 
 mkdir -p "${STATE_DIR}" "${LOG_DIR}"
 : > "${MARKER_FILE}"
-touch "${SEEN_FILE}" "${MAP_FILE}"
+touch "${SEEN_FILE}" "${COMPLETED_FILE}" "${MAP_FILE}"
 
 timestamp() {
   date -u +%Y-%m-%dT%H:%M:%SZ
@@ -85,9 +86,39 @@ mark_seen() {
   fi
 }
 
+already_completed() {
+  local agent_id="$1"
+  grep -qx "${agent_id}" "${COMPLETED_FILE}" 2>/dev/null
+}
+
+mark_completed() {
+  local agent_id="$1"
+  if ! already_completed "${agent_id}"; then
+    printf '%s\n' "${agent_id}" >> "${COMPLETED_FILE}"
+  fi
+}
+
 session_name_for() {
   local agent_id="$1"
   printf '%s-%s\n' "${SESSION_PREFIX}" "${agent_id}"
+}
+
+rollout_file_for_agent() {
+  local agent_id="$1"
+  find "${SESSIONS_DIR}" -type f -name "rollout-*-${agent_id}.jsonl" 2>/dev/null | head -n1
+}
+
+agent_task_completed() {
+  local agent_id="$1"
+  local rollout_file
+
+  rollout_file="$(rollout_file_for_agent "${agent_id}")"
+  if [[ -z "${rollout_file}" || ! -f "${rollout_file}" ]]; then
+    return 1
+  fi
+
+  grep -q '"type":"task_complete"' "${rollout_file}" 2>/dev/null \
+    || grep -q '"phase":"final_answer"' "${rollout_file}" 2>/dev/null
 }
 
 collect_agent_ids() {
@@ -128,10 +159,10 @@ cat > "${launcher}" <<SCRIPT
 #!/usr/bin/env bash
 set -euo pipefail
 echo "[\$(date -u +%Y-%m-%dT%H:%M:%SZ)] session ${session_name} starting for agent ${agent_id}" | tee -a "${log_file}"
-docker exec -it ctf-toolbox bash -lc 'cd /workspace && codex resume ${agent_id} --no-alt-screen'
+docker exec -it ctf-toolbox bash -c 'cd /workspace && codex resume ${agent_id} --no-alt-screen'
 rc=\$?
 echo "[\$(date -u +%Y-%m-%dT%H:%M:%SZ)] session ${session_name} exited rc=\${rc}" | tee -a "${log_file}"
-exec bash
+exit "\${rc}"
 SCRIPT
   chmod +x "${launcher}"
 
@@ -139,6 +170,27 @@ SCRIPT
   printf '%s\t%s\n' "${agent_id}" "${session_name}" >> "${MAP_FILE}"
   mark_seen "${agent_id}"
   echo "[$(timestamp)] spawned tmux session ${session_name} for ${agent_id}"
+}
+
+reap_completed_sessions() {
+  local agent_id session_name
+
+  while IFS=$'\t' read -r agent_id session_name; do
+    [[ -z "${agent_id}" || -z "${session_name}" ]] && continue
+    if already_completed "${agent_id}"; then
+      continue
+    fi
+    if ! agent_task_completed "${agent_id}"; then
+      continue
+    fi
+    mark_completed "${agent_id}"
+    if tmux has-session -t "${session_name}" 2>/dev/null; then
+      tmux kill-session -t "${session_name}" >/dev/null 2>&1 || true
+      echo "[$(timestamp)] auto-closed tmux session ${session_name} after task completion for ${agent_id}"
+    else
+      echo "[$(timestamp)] marked ${agent_id} completed; tmux session ${session_name} was already gone"
+    fi
+  done < "${MAP_FILE}"
 }
 
 echo "[$(timestamp)] subagent tmux bridge started (run_dir=${RUN_DIR}, poll_sec=${POLL_SEC}, session_prefix=${SESSION_PREFIX})"
@@ -156,6 +208,8 @@ while true; do
     fi
     spawn_session_for_agent "${agent_id}"
   done < <(collect_agent_ids || true)
+
+  reap_completed_sessions
 
   sleep "${POLL_SEC}"
 done

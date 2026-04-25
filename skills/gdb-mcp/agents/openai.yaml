@@ -1,0 +1,10 @@
+interface:
+  display_name: "GDB MCP"
+  short_description: "Use persistent GDB sessions for interactive debugging."
+  default_prompt: "Use $gdb-mcp to debug this target with the bundled persistent GDB MCP server."
+
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "gdb"
+      description: "Bundled local GDB MCP server available in CTFVM."

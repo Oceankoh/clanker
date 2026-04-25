@@ -1,0 +1,173 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=./ctfvm
+source "${SCRIPT_DIR}/ctfvm"
+
+KEEP_REMOTE_STAGE="0"
+REMOTE_STAGE_DIR=""
+REMOTE_ARCHIVE=""
+TMP_DIR=""
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  ctfvm-scp-session-logs [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--provider gcp|digitalocean --zone <zone-or-region> --project <project>]]
+                         [--session-date <YYYY/MM/DD> | --remote-path </home/ctf/run/.codex/sessions/...>]
+                         [--out <local-dir>]
+                         [--keep-remote-stage]
+
+Copies Codex session logs from the VM into a local directory.
+The script first stages the selected session tree under /root on the VM, then downloads
+an archive of that staged copy and extracts it locally.
+
+Examples:
+  ./scripts/ctfvm-scp-session-logs --out ./session-logs
+  ./scripts/ctfvm-scp-session-logs --session-date 2026/03/28 --out ./session-logs
+  ./scripts/ctfvm-scp-session-logs --run-id 20260328-020324 --remote-path /home/ctf/run/.codex/sessions/2026/03/28 --out ./session-logs
+USAGE
+}
+
+cleanup_remote_stage() {
+  if [[ -z "${REMOTE_STAGE_DIR}" && -z "${REMOTE_ARCHIVE}" ]]; then
+    return 0
+  fi
+
+  local stage_q archive_q remote_cmd remote_cmd_q
+  printf -v stage_q '%q' "${REMOTE_STAGE_DIR}"
+  printf -v archive_q '%q' "${REMOTE_ARCHIVE}"
+  remote_cmd="set -euo pipefail; stage=${stage_q}; archive=${archive_q}; rm -rf \"\${stage}\" \"\${archive}\""
+  printf -v remote_cmd_q '%q' "${remote_cmd}"
+  gcloud_ssh "sudo bash -lc ${remote_cmd_q}" >/dev/null 2>&1 || true
+}
+
+cleanup() {
+  local status=$?
+  if [[ -n "${TMP_DIR}" && -d "${TMP_DIR}" ]]; then
+    rm -rf "${TMP_DIR}"
+  fi
+  if [[ "${KEEP_REMOTE_STAGE}" != "1" ]]; then
+    cleanup_remote_stage
+  fi
+  trap - EXIT
+  exit "${status}"
+}
+
+stage_remote_logs() {
+  local remote_path="$1"
+  local stage_dir="$2"
+  local archive_path="$3"
+  local src_q stage_q archive_q remote_cmd remote_cmd_q
+
+  printf -v src_q '%q' "${remote_path}"
+  printf -v stage_q '%q' "${stage_dir}"
+  printf -v archive_q '%q' "${archive_path}"
+
+  remote_cmd="set -euo pipefail; src=${src_q}; stage=${stage_q}; archive=${archive_q}; test -d \"\${src}\"; rm -rf \"\${stage}\" \"\${archive}\"; mkdir -p \"\${stage}\"; cp -a \"\${src}/.\" \"\${stage}/\"; chown -R root:root \"\${stage}\"; tar -C \"\${stage}\" -czf \"\${archive}\" .; chmod 0644 \"\${archive}\""
+  printf -v remote_cmd_q '%q' "${remote_cmd}"
+  gcloud_ssh "sudo bash -lc ${remote_cmd_q}"
+}
+
+download_archive() {
+  local remote_archive="$1"
+  local local_archive="$2"
+
+  case "${PROVIDER}" in
+    gcp)
+      require_cmd gcloud
+      gcloud compute scp "${INSTANCE}:${remote_archive}" "${local_archive}" --zone "${ZONE}" --project "${PROJECT}"
+      ;;
+    digitalocean)
+      require_cmd scp
+      if [[ -z "${IP:-}" ]]; then
+        refresh_instance_ip
+      fi
+      if [[ -z "${IP:-}" ]]; then
+        echo "Could not determine public IP for DigitalOcean instance ${INSTANCE}." >&2
+        exit 1
+      fi
+      local -a scp_cmd=(scp)
+      local arg
+      while IFS= read -r arg; do
+        scp_cmd+=("${arg}")
+      done < <(ctfvm_provider_digitalocean_ssh_common_args "${INSTANCE}" "${IP}")
+      scp_cmd+=("root@${IP}:${remote_archive}" "${local_archive}")
+      "${scp_cmd[@]}"
+      ;;
+    *)
+      echo "Unsupported provider: ${PROVIDER}" >&2
+      exit 1
+      ;;
+  esac
+}
+
+main() {
+  parse_selector_args "$@"
+  set -- "${PARSED_SELECTOR_ARGS[@]}"
+
+  local session_date
+  local remote_path=""
+  local out_dir=""
+  local stamp=""
+  local out_suffix=""
+
+  session_date="$(date +%Y/%m/%d)"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --session-date)
+        session_date="$2"; shift 2 ;;
+      --remote-path)
+        remote_path="$2"; shift 2 ;;
+      --out)
+        out_dir="$2"; shift 2 ;;
+      --keep-remote-stage)
+        KEEP_REMOTE_STAGE="1"; shift ;;
+      -h|--help)
+        usage
+        return 0 ;;
+      *)
+        echo "Unknown argument: $1" >&2
+        usage >&2
+        exit 1 ;;
+    esac
+  done
+
+  if [[ -z "${remote_path}" ]]; then
+    if [[ ! "${session_date}" =~ ^[0-9]{4}/[0-9]{2}/[0-9]{2}$ ]]; then
+      echo "Invalid --session-date value: ${session_date}. Expected YYYY/MM/DD." >&2
+      exit 1
+    fi
+  fi
+
+  resolve_target_required
+
+  if [[ -z "${remote_path}" ]]; then
+    remote_path="${REMOTE_RUN_DIR}/.codex/sessions/${session_date}"
+    out_suffix="${session_date//\//-}"
+  else
+    out_suffix="manual"
+  fi
+
+  if [[ -z "${out_dir}" ]]; then
+    out_dir="./ctfvm-session-logs-${RUN_ID:-manual}-${out_suffix}"
+  fi
+
+  mkdir -p "${out_dir}"
+
+  stamp="$(date +%Y%m%d-%H%M%S)"
+  REMOTE_STAGE_DIR="/root/ctfvm-session-logs-${RUN_ID:-manual}-${stamp}"
+  REMOTE_ARCHIVE="/tmp/ctfvm-session-logs-${RUN_ID:-manual}-${stamp}.tar.gz"
+
+  TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ctfvm-session-logs.XXXXXX")"
+  trap cleanup EXIT
+
+  stage_remote_logs "${remote_path}" "${REMOTE_STAGE_DIR}" "${REMOTE_ARCHIVE}"
+  download_archive "${REMOTE_ARCHIVE}" "${TMP_DIR}/session-logs.tar.gz"
+  tar -xzf "${TMP_DIR}/session-logs.tar.gz" -C "${out_dir}"
+
+  echo "Copied ${remote_path} -> $(cd "${out_dir}" && pwd)"
+}
+
+main "$@"

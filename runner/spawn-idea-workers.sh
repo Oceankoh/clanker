@@ -185,7 +185,7 @@ fi
 if [[ -n "${MODEL}" ]]; then
   CODEX_ARGS+=(--model "${MODEL}")
 fi
-docker exec -it ctf-toolbox bash -lc 'cd /workspace && prompt="\$(cat "/workspace/worker-${worker_id}.prompt.txt")" && "\$@" "\$prompt"' _ "\${CODEX_ARGS[@]}" | tee -a "${log_file}"
+docker exec -it ctf-toolbox bash -c 'cd /workspace && prompt="\$(cat "/workspace/worker-${worker_id}.prompt.txt")" && "\$@" "\$prompt"' _ "\${CODEX_ARGS[@]}" | tee -a "${log_file}"
 rc=\${PIPESTATUS[0]}
 echo "[\$(date -u +%Y-%m-%dT%H:%M:%SZ)] ${window_name} exited rc=\${rc}" | tee -a "${log_file}"
 exit "\${rc}"

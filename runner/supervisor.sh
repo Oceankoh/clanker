@@ -88,7 +88,7 @@ if ! docker ps --format '{{.Names}}' | grep -q '^ctf-toolbox$'; then
   exec bash
 fi
 
-if ! docker exec ctf-toolbox bash -lc 'command -v codex >/dev/null 2>&1'; then
+if ! docker exec ctf-toolbox bash -c 'command -v codex >/dev/null 2>&1'; then
   echo "codex CLI not found in ctf-toolbox container." | tee -a "${RUN_DIR}/logs/supervisor.log"
   echo "Install it in the container and rerun supervisor." | tee -a "${RUN_DIR}/logs/supervisor.log"
   exec bash
@@ -109,8 +109,10 @@ echo "No worker windows are spawned by default." | tee -a "${RUN_DIR}/logs/super
 echo "Spawn subagents only if/when needed from inside this VM session." | tee -a "${RUN_DIR}/logs/supervisor.log"
 echo "Supervisor skill available: \$ctf-exploit-subagent" | tee -a "${RUN_DIR}/logs/supervisor.log"
 echo "Supervisor skill available: \$ctf-docs-subagent" | tee -a "${RUN_DIR}/logs/supervisor.log"
+echo "Supervisor skill available: \$gdb-mcp" | tee -a "${RUN_DIR}/logs/supervisor.log"
 echo "Subagent roles: exploit_tester, docs_researcher" | tee -a "${RUN_DIR}/logs/supervisor.log"
 echo "Supervisor skill available: \$webhook-site-callbacks" | tee -a "${RUN_DIR}/logs/supervisor.log"
+echo "Bundled MCP server available: gdb" | tee -a "${RUN_DIR}/logs/supervisor.log"
 echo "Codex multi-agent mode is enabled; spawn subagents from supervisor when needed." | tee -a "${RUN_DIR}/logs/supervisor.log"
 echo "Spawned subagents are auto-mirrored to tmux sessions by subagent-tmux-bridge." | tee -a "${RUN_DIR}/logs/supervisor.log"
 
@@ -129,7 +131,7 @@ start_subagent_bridge
 echo "Launching interactive Codex session..." | tee -a "${RUN_DIR}/logs/supervisor.log"
 set +e
 initial_prompt="$(cat "${PROMPT_FILE}")"
-docker exec -it ctf-toolbox bash -lc 'cd /workspace && "$@"' _ "${CODEX_ARGS[@]}" "${initial_prompt}"
+docker exec -it ctf-toolbox bash -c 'cd /workspace && "$@"' _ "${CODEX_ARGS[@]}" "${initial_prompt}"
 rc=$?
 set -e
 
@@ -138,6 +140,6 @@ trap - EXIT
 
 echo "Codex supervisor session exited with code ${rc} at $(date -u +%Y-%m-%dT%H:%M:%SZ)." | tee -a "${RUN_DIR}/logs/supervisor.log"
 echo "If this was unexpected (auth/session issue), run inside this shell:" | tee -a "${RUN_DIR}/logs/supervisor.log"
-echo "  docker exec -it ctf-toolbox bash -lc 'cd /workspace && codex'" | tee -a "${RUN_DIR}/logs/supervisor.log"
+echo "  docker exec -it ctf-toolbox bash -c 'cd /workspace && codex'" | tee -a "${RUN_DIR}/logs/supervisor.log"
 
 exec bash
