@@ -207,7 +207,9 @@ default_provider() {
 
 normalize_agent() {
   local agent="${1:-}"
-  case "${agent,,}" in
+  local lower
+  lower="$(printf '%s' "${agent}" | tr '[:upper:]' '[:lower:]')"
+  case "${lower}" in
     codex|"") printf '%s\n' "codex" ;;
     claude|claude-code|claudecode) printf '%s\n' "claude" ;;
     *)
