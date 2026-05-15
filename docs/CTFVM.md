@@ -86,6 +86,15 @@ Differences from the Codex backend (v1):
 - Managed Claude config lives at `images/ctf-toolbox/claude-config/` (`settings.json`, `agents/*.md`, `.mcp.json`). The exploit_tester and docs_researcher roles are ported to Claude subagent markdown.
 - `CLAUDE_CONFIG_DIR=/workspace/.claude` is set inside the container (alongside `CODEX_HOME=/workspace/.codex`).
 
+### Known caveats / first-run validation
+The Claude path has not yet been exercised against a real cloud VM. Likely surfaces if something breaks end-to-end:
+
+- **Auth file shape.** `sync_claude_auth` syncs `~/.claude/.credentials.json` and `~/.claude/settings.json` from the local machine to `/home/ctf/run/.claude/` on the VM. Verified on Claude Code 2.1.142; if your version uses a different layout (top-level `~/.claude.json`, or auth under `~/.claude/auth/`), the sync will skip silently and you'll see `claude login` errors on the VM. Re-run with `--no-auth-sync` and `claude login` inside the container, or extend the file list in `sync_claude_auth`.
+- **Initial prompt shape.** The supervisor invokes `claude --dangerously-skip-permissions "<prompt>"` passing the prompt as a trailing positional arg (mirroring Codex). If your `claude` version rejects positional prompts, edit `runner/supervisor.sh` to pipe via stdin or use `--print`.
+- **`ctfvm mcp` arg parity.** Both CLIs expose `<agent> mcp <list|get|add|remove|login|logout>`, but `claude mcp add NAME -- CMD ARGS` and `codex mcp add NAME [opts]` differ in detail. The wrapper passes args verbatim. Sanity-check the subcommand you need before relying on it.
+- **State-file backfill.** Old runs created before this change have no `agent` key in their state JSON; downstream commands treat those as `codex` (the historical behavior).
+- **Bash 3.2 compatibility.** The orchestrator script targets macOS's default `/bin/bash` (3.2.x). Do not introduce bash 4+ constructs (`${var,,}`, `mapfile`, `readarray`, associative arrays) without a portable fallback.
+
 ## Architecture Overview
 The system now has two planes:
 
