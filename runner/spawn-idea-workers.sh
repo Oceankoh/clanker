@@ -177,15 +177,26 @@ spawn_worker_window() {
 #!/usr/bin/env bash
 set -euo pipefail
 echo "[\$(date -u +%Y-%m-%dT%H:%M:%SZ)] starting ${window_name} (${worker_id})" | tee -a "${log_file}"
-CODEX_AUTO_ALLOW="\${CODEX_AUTO_ALLOW:-1}"
-CODEX_ARGS=(codex --no-alt-screen)
-if [[ "\${CODEX_AUTO_ALLOW}" == "1" ]]; then
-  CODEX_ARGS+=(--ask-for-approval never --sandbox danger-full-access)
+AGENT="\${CTFVM_AGENT:-codex}"
+AGENT_AUTO_ALLOW="\${CTFVM_AGENT_AUTO_ALLOW:-\${CODEX_AUTO_ALLOW:-1}}"
+if [[ "\${AGENT}" == "claude" ]]; then
+  AGENT_ARGS=(claude)
+  if [[ "\${AGENT_AUTO_ALLOW}" == "1" ]]; then
+    AGENT_ARGS+=(--dangerously-skip-permissions)
+  fi
+  if [[ -n "${MODEL}" ]]; then
+    AGENT_ARGS+=(--model "${MODEL}")
+  fi
+else
+  AGENT_ARGS=(codex --no-alt-screen)
+  if [[ "\${AGENT_AUTO_ALLOW}" == "1" ]]; then
+    AGENT_ARGS+=(--ask-for-approval never --sandbox danger-full-access)
+  fi
+  if [[ -n "${MODEL}" ]]; then
+    AGENT_ARGS+=(--model "${MODEL}")
+  fi
 fi
-if [[ -n "${MODEL}" ]]; then
-  CODEX_ARGS+=(--model "${MODEL}")
-fi
-docker exec -it ctf-toolbox bash -c 'cd /workspace && prompt="\$(cat "/workspace/worker-${worker_id}.prompt.txt")" && "\$@" "\$prompt"' _ "\${CODEX_ARGS[@]}" | tee -a "${log_file}"
+docker exec -it ctf-toolbox bash -c 'cd /workspace && prompt="\$(cat "/workspace/worker-${worker_id}.prompt.txt")" && "\$@" "\$prompt"' _ "\${AGENT_ARGS[@]}" | tee -a "${log_file}"
 rc=\${PIPESTATUS[0]}
 echo "[\$(date -u +%Y-%m-%dT%H:%M:%SZ)] ${window_name} exited rc=\${rc}" | tee -a "${log_file}"
 exit "\${rc}"

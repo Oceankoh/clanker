@@ -1,11 +1,13 @@
-# Disposable CTF VM with Codex CLI
+# Disposable CTF VM with Codex CLI or Claude Code
 
 ## Prerequisites
 - One cloud provider configured:
   - GCP: `gcloud` installed and authenticated (`gcloud auth login`)
   - DigitalOcean: `doctl` installed/authenticated
 - Default zone/project (GCP) or region (DigitalOcean) configured, or passed to `ctfvm start`
-- Local Codex login complete (`codex login`)
+- One agent CLI logged in locally (the orchestrator syncs the chosen agent's OAuth session into the VM):
+  - Codex (default): `codex login`
+  - Claude Code: `claude login` (or set `ANTHROPIC_API_KEY` if you prefer key auth)
 
 Optional break-glass access:
 - SSH access is still useful for `ctfvm attach`, `ctfvm shell`, and `ctfvm vscode`.
@@ -68,6 +70,22 @@ From repo root:
 ./scripts/ctfvm destroy
 ```
 
+## Selecting the agent
+By default each run launches the Codex CLI inside `ctf-toolbox`. Pass `--agent claude` to `ctfvm start` (or export `CTFVM_AGENT=claude` in your shell/.env) to launch Claude Code instead. Both CLIs are installed on every VM, so the choice is per-run.
+
+```bash
+./scripts/ctfvm start --agent claude --dir ./challenge --desc "..."
+./scripts/ctfvm start --agent codex  --dir ./challenge --desc "..."   # explicit default
+```
+
+The selected agent is stored in the run's state file and reused by downstream commands (`mcp`, supervisor restarts, etc.). Auth sync, managed config install, and the supervisor's CLI invocation all branch on this value.
+
+Differences from the Codex backend (v1):
+- Claude Code subagents run in-process via the Task tool. There are no per-session files on disk, so the `subagent-tmux-bridge.sh` mirror is disabled for Claude runs. Subagent activity is visible in the supervisor's main window only.
+- The auto-allow mode maps to `--dangerously-skip-permissions` for Claude (vs. `--ask-for-approval never --sandbox danger-full-access` for Codex). Override via `CTFVM_AGENT_AUTO_ALLOW=0` (or the existing `CODEX_AUTO_ALLOW=0`).
+- Managed Claude config lives at `images/ctf-toolbox/claude-config/` (`settings.json`, `agents/*.md`, `.mcp.json`). The exploit_tester and docs_researcher roles are ported to Claude subagent markdown.
+- `CLAUDE_CONFIG_DIR=/workspace/.claude` is set inside the container (alongside `CODEX_HOME=/workspace/.codex`).
+
 ## Architecture Overview
 The system now has two planes:
 
@@ -76,7 +94,7 @@ The system now has two planes:
    - the local CLI and local web UI talk to that service for remote exec, uploads, and downloads
 2. Work plane:
    - the VM runs `ctf-toolbox`
-   - the Codex supervisor and subagents live inside tmux sessions in that environment
+   - the chosen agent's supervisor (Codex or Claude Code) and subagents live inside tmux sessions in that environment
 
 Main components:
 - local orchestrator: `scripts/ctfvm`

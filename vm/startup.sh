@@ -79,7 +79,29 @@ install_codex_prefix() {
   fi
 }
 
+install_claude_prefix() {
+  local prefix="/opt/ctfvm/npm-global"
+  mkdir -p "${prefix}"
+  chmod 755 /opt /opt/ctfvm "${prefix}"
+
+  rm -f "${prefix}/bin/claude"
+  rm -rf "${prefix}/lib/node_modules/@anthropic-ai/claude-code"
+
+  if npm install -g --prefix "${prefix}" @anthropic-ai/claude-code; then
+    echo "Installed Claude Code into ${prefix} from @anthropic-ai/claude-code."
+  else
+    echo "Claude Code install failed." >&2
+    exit 1
+  fi
+
+  if [[ ! -x "${prefix}/bin/claude" ]]; then
+    echo "Claude Code install did not produce ${prefix}/bin/claude." >&2
+    exit 1
+  fi
+}
+
 install_codex_prefix
+install_claude_prefix
 
 systemctl enable --now docker
 usermod -aG docker ctf

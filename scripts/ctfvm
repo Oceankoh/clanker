@@ -35,6 +35,7 @@ DEFAULT_CONTROL_PORT="${CTFVM_CONTROL_PORT:-${DEFAULT_CONTROL_PORT}}"
 DEFAULT_VPN_PORT="${CTFVM_VPN_PORT:-${DEFAULT_VPN_PORT}}"
 DEFAULT_VPN_CIDRS="${CTFVM_VPN_CIDRS:-${DEFAULT_VPN_CIDRS}}"
 DEFAULT_PROVIDER="${CTFVM_PROVIDER:-gcp}"
+DEFAULT_AGENT="${CTFVM_AGENT:-codex}"
 
 env_first_set() {
   local name=""
@@ -202,6 +203,31 @@ normalize_provider() {
 
 default_provider() {
   ctfvm_provider_normalize "${DEFAULT_PROVIDER}"
+}
+
+normalize_agent() {
+  local agent="${1:-}"
+  case "${agent,,}" in
+    codex|"") printf '%s\n' "codex" ;;
+    claude|claude-code|claudecode) printf '%s\n' "claude" ;;
+    *)
+      echo "Unknown agent: ${agent} (expected codex or claude)" >&2
+      return 1 ;;
+  esac
+}
+
+default_agent() {
+  normalize_agent "${DEFAULT_AGENT}"
+}
+
+agent_from_state_file() {
+  local file="$1"
+  local agent
+  agent="$(json_get_from_file agent "${file}" 2>/dev/null || true)"
+  if [[ -z "${agent}" ]]; then
+    agent="codex"
+  fi
+  normalize_agent "${agent}"
 }
 
 provider_from_state_file() {
@@ -640,11 +666,13 @@ write_state() {
   local control_port="${20}"
   local control_user="${21}"
   local control_password="${22}"
+  local agent="${23:-codex}"
 
   ensure_state_dir
   cat > "${STATE_FILE}" <<JSON
 {
   "provider": "$(json_escape "${provider}")",
+  "agent": "$(json_escape "${agent}")",
   "instance": "$(json_escape "${instance}")",
   "zone": "$(json_escape "${zone}")",
   "project": "$(json_escape "${project}")",
@@ -793,6 +821,7 @@ load_state_required_for_selector() {
   fi
 
   PROVIDER="$(provider_from_state_file "${selected_file}")"
+  AGENT="$(agent_from_state_file "${selected_file}")"
   INSTANCE="$(json_get_from_file instance "${selected_file}")"
   ZONE="$(json_get_from_file zone "${selected_file}")"
   PROJECT="$(json_get_from_file project "${selected_file}")"
@@ -1231,13 +1260,14 @@ wait_for_remote_bootstrap() {
       && getent group docker >/dev/null 2>&1 \
       && command -v docker >/dev/null 2>&1 \
       && sudo -u ctf bash -lc 'id -nG | tr \" \" \"\\n\" | grep -qx docker && docker info >/dev/null 2>&1' \
-      && test -x /opt/ctfvm/npm-global/bin/codex"; then
+      && test -x /opt/ctfvm/npm-global/bin/codex \
+      && test -x /opt/ctfvm/npm-global/bin/claude"; then
       return 0
     fi
     sleep "${sleep_s}"
   done
 
-  echo "Timed out waiting for VM bootstrap to finish (/home/ctf/run, ctf user, docker, codex)." >&2
+  echo "Timed out waiting for VM bootstrap to finish (/home/ctf/run, ctf user, docker, codex, claude)." >&2
   echo "Check startup logs with:" >&2
   case "${PROVIDER}" in
     gcp)
@@ -1304,6 +1334,64 @@ fi"
   fi
 }
 
+sync_claude_auth() {
+  local claude_home
+  if [[ -n "${CLAUDE_CONFIG_DIR:-}" ]]; then
+    claude_home="${CLAUDE_CONFIG_DIR}"
+  else
+    claude_home="${HOME}/.claude"
+  fi
+
+  if [[ ! -d "${claude_home}" ]]; then
+    echo "Claude auth directory not found at ${claude_home}; skipping auth sync." >&2
+    return 0
+  fi
+
+  local -a auth_files=()
+  local rel
+  for rel in .credentials.json settings.json; do
+    if [[ -f "${claude_home}/${rel}" ]]; then
+      auth_files+=("${rel}")
+    fi
+  done
+
+  if [[ "${#auth_files[@]}" -eq 0 ]]; then
+    echo "No Claude auth session files found in ${claude_home}; skipping auth sync." >&2
+    return 0
+  fi
+
+  echo "Syncing Claude session data to VM (OAuth session only, no API keys)."
+  COPYFILE_DISABLE=1 tar --no-xattrs -C "${claude_home}" -cf - "${auth_files[@]}" 2>/dev/null | \
+    gcloud_ssh "sudo -u ctf bash -lc 'mkdir -p /home/ctf/run/.claude && tar -C /home/ctf/run/.claude -xf - && chmod -R go-rwx /home/ctf/run/.claude'"
+}
+
+install_managed_claude_config() {
+  local remote_upload_dir="$1"
+  local ida_mcp_url="${CTFVM_DEFAULT_IDA_MCP_URL:-}"
+  local remote_cmd remote_cmd_q
+  echo "Installing managed Claude agent/MCP config in /home/ctf/run/.claude."
+  remote_cmd="set -euo pipefail; mkdir -p /home/ctf/run/.claude /home/ctf/run/.claude/agents"
+  remote_cmd="${remote_cmd}; if [ -f ${remote_upload_dir}/claude-config/settings.json ] && [ ! -f /home/ctf/run/.claude/settings.json ]; then cp ${remote_upload_dir}/claude-config/settings.json /home/ctf/run/.claude/settings.json; fi"
+  remote_cmd="${remote_cmd}; if [ -f ${remote_upload_dir}/claude-config/.mcp.json ]; then cp ${remote_upload_dir}/claude-config/.mcp.json /home/ctf/run/.claude/.mcp.json; fi"
+  remote_cmd="${remote_cmd}; if [ -d ${remote_upload_dir}/claude-config/agents ]; then rm -rf /home/ctf/run/.claude/agents; mkdir -p /home/ctf/run/.claude/agents; cp -R ${remote_upload_dir}/claude-config/agents/. /home/ctf/run/.claude/agents/; fi"
+  if [[ -n "${ida_mcp_url}" ]]; then
+    remote_cmd="${remote_cmd}; if [ -f /home/ctf/run/.claude/.mcp.json ] && ! grep -q '\"ida\"' /home/ctf/run/.claude/.mcp.json; then python3 - <<'PY'
+import json, pathlib
+p = pathlib.Path('/home/ctf/run/.claude/.mcp.json')
+data = json.loads(p.read_text()) if p.exists() else {'mcpServers': {}}
+data.setdefault('mcpServers', {})['ida'] = {'type': 'http', 'url': '${ida_mcp_url}'}
+p.write_text(json.dumps(data, indent=2) + '\n')
+PY
+fi"
+  fi
+  remote_cmd="${remote_cmd}; chown -R ctf:ctf /home/ctf/run/.claude; chmod 700 /home/ctf/run/.claude; if [ -f /home/ctf/run/.claude/settings.json ]; then chmod 600 /home/ctf/run/.claude/settings.json; fi; if [ -f /home/ctf/run/.claude/.mcp.json ]; then chmod 600 /home/ctf/run/.claude/.mcp.json; fi; if [ -d /home/ctf/run/.claude/agents ]; then find /home/ctf/run/.claude/agents -type f -exec chmod 600 {} +; fi"
+  printf -v remote_cmd_q '%q' "${remote_cmd}"
+  gcloud_ssh "sudo bash -lc ${remote_cmd_q}"
+  if [[ -n "${ida_mcp_url}" ]]; then
+    echo "Managed Claude config includes default ida MCP server: ${ida_mcp_url}"
+  fi
+}
+
 build_remote_toolbox() {
   local variant="${1:-lean}"
   echo "Building toolbox image on VM (${variant} variant; first run may take several minutes)."
@@ -1324,8 +1412,9 @@ pull_remote_toolbox_image() {
 
 start_remote_toolbox_container() {
   local variant="${1:-lean}"
+  local agent="${2:-codex}"
   echo "Starting toolbox container."
-  gcloud_ssh "sudo -u ctf bash -lc 'uid=\"\$(id -u)\"; gid=\"\$(id -g)\"; mkdir -p /home/ctf/run/.codex; chmod 700 /home/ctf/run/.codex; docker rm -f ctf-toolbox >/dev/null 2>&1 || true; docker run -d --name ctf-toolbox --restart unless-stopped --add-host host.docker.internal:host-gateway --user \"\${uid}:\${gid}\" -v /home/ctf/run:/workspace -v /opt/ctfvm/npm-global:/opt/ctfvm/npm-global:ro -e HOME=/workspace -e CODEX_HOME=/workspace/.codex -e CTF_TOOLBOX_VARIANT=${variant} -e CTFVM_CODEX_PREFIX=/opt/ctfvm/npm-global -e VIRTUAL_ENV=/workspace/.venv -e PATH=/workspace/.venv/bin:/opt/ctfvm/npm-global/bin:/usr/local/bin:/usr/bin:/bin -w /workspace ctf-toolbox:latest sleep infinity'"
+  gcloud_ssh "sudo -u ctf bash -lc 'uid=\"\$(id -u)\"; gid=\"\$(id -g)\"; mkdir -p /home/ctf/run/.codex /home/ctf/run/.claude; chmod 700 /home/ctf/run/.codex /home/ctf/run/.claude; docker rm -f ctf-toolbox >/dev/null 2>&1 || true; docker run -d --name ctf-toolbox --restart unless-stopped --add-host host.docker.internal:host-gateway --user \"\${uid}:\${gid}\" -v /home/ctf/run:/workspace -v /opt/ctfvm/npm-global:/opt/ctfvm/npm-global:ro -e HOME=/workspace -e CODEX_HOME=/workspace/.codex -e CLAUDE_CONFIG_DIR=/workspace/.claude -e CTFVM_AGENT=${agent} -e CTF_TOOLBOX_VARIANT=${variant} -e CTFVM_CODEX_PREFIX=/opt/ctfvm/npm-global -e VIRTUAL_ENV=/workspace/.venv -e PATH=/workspace/.venv/bin:/opt/ctfvm/npm-global/bin:/usr/local/bin:/usr/bin:/bin -w /workspace ctf-toolbox:latest sleep infinity'"
   echo "Enabling passwordless sudo inside container for apt installs..."
   gcloud_ssh "sudo -u ctf bash -lc '
     runtime_uid=\"\$(docker exec ctf-toolbox id -u)\"
@@ -1351,7 +1440,8 @@ start_remote_toolbox_container() {
 launch_supervisor_tmux() {
   local run_dir="${1:-/home/ctf/run}"
   local prompt_file="${2:-/home/ctf/run/challenge_prompt.txt}"
-  local supervisor_cmd="${run_dir}/supervisor.sh --run-dir ${run_dir} --prompt-file ${prompt_file}"
+  local agent="${3:-codex}"
+  local supervisor_cmd="CTFVM_AGENT=${agent} ${run_dir}/supervisor.sh --run-dir ${run_dir} --prompt-file ${prompt_file}"
   local remote_cmd remote_cmd_q
 
   remote_cmd="mkdir -p ${run_dir}/logs ${run_dir}/artifacts; if tmux has-session -t ctf 2>/dev/null; then if tmux list-windows -t ctf -F \"#{window_name}\" | grep -qx supervisor; then tmux respawn-window -k -t ctf:supervisor \"${supervisor_cmd}\"; else tmux new-window -d -t ctf: -n supervisor \"${supervisor_cmd}\"; fi; else tmux new-session -d -s ctf -n supervisor \"${supervisor_cmd}\"; fi"
@@ -1368,6 +1458,25 @@ run_remote_codex_mcp() {
   remote_cmd="docker ps --format \"{{.Names}}\" | grep -qx ctf-toolbox || { echo \"ctf-toolbox container not running.\" >&2; exit 1; }; docker exec -i -w /workspace -e HOME=/workspace -e CODEX_HOME=/workspace/.codex ctf-toolbox codex mcp ${quoted_args}"
   printf -v remote_cmd_q '%q' "${remote_cmd}"
   gcloud_ssh "sudo -u ctf bash -lc ${remote_cmd_q}"
+}
+
+run_remote_claude_mcp() {
+  local quoted_args
+  local remote_cmd
+  local remote_cmd_q
+
+  quoted_args="$(shell_quote_args "$@")"
+  remote_cmd="docker ps --format \"{{.Names}}\" | grep -qx ctf-toolbox || { echo \"ctf-toolbox container not running.\" >&2; exit 1; }; docker exec -i -w /workspace -e HOME=/workspace -e CLAUDE_CONFIG_DIR=/workspace/.claude ctf-toolbox claude mcp ${quoted_args}"
+  printf -v remote_cmd_q '%q' "${remote_cmd}"
+  gcloud_ssh "sudo -u ctf bash -lc ${remote_cmd_q}"
+}
+
+run_remote_agent_mcp() {
+  local agent="${AGENT:-codex}"
+  case "${agent}" in
+    claude) run_remote_claude_mcp "$@" ;;
+    codex|*) run_remote_codex_mcp "$@" ;;
+  esac
 }
 
 vpn_target_key() {
@@ -2461,6 +2570,8 @@ cmd_start() {
 
   local provider
   provider="$(default_provider)"
+  local agent
+  agent="$(default_agent)"
   local challenge_dir=""
   local desc=""
   local desc_file=""
@@ -2501,6 +2612,8 @@ cmd_start() {
     case "$1" in
       --provider)
         provider="$(normalize_provider "$2")"; shift 2 ;;
+      --agent)
+        agent="$(normalize_agent "$2")"; shift 2 ;;
       --dir)
         challenge_dir="$2"; shift 2 ;;
       --desc)
@@ -2641,7 +2754,7 @@ cmd_start() {
     exit 1
   fi
 
-  if [[ ! -f "${REPO_ROOT}/vm/startup.sh" || ! -f "${REPO_ROOT}/vm/control_server.py" || ! -f "${REPO_ROOT}/runner/supervisor.sh" || ! -f "${REPO_ROOT}/runner/spawn-idea-workers.sh" || ! -f "${REPO_ROOT}/runner/subagent-tmux-bridge.sh" || ! -f "${REPO_ROOT}/runner/install-python-runtime.sh" || ! -d "${REPO_ROOT}/skills" || ! -f "${REPO_ROOT}/images/ctf-toolbox/codex-config/config.toml" ]]; then
+  if [[ ! -f "${REPO_ROOT}/vm/startup.sh" || ! -f "${REPO_ROOT}/vm/control_server.py" || ! -f "${REPO_ROOT}/runner/supervisor.sh" || ! -f "${REPO_ROOT}/runner/spawn-idea-workers.sh" || ! -f "${REPO_ROOT}/runner/subagent-tmux-bridge.sh" || ! -f "${REPO_ROOT}/runner/install-python-runtime.sh" || ! -d "${REPO_ROOT}/skills" || ! -f "${REPO_ROOT}/images/ctf-toolbox/codex-config/config.toml" || ! -f "${REPO_ROOT}/images/ctf-toolbox/claude-config/settings.json" ]]; then
     echo "Required implementation files are missing in repo." >&2
     exit 1
   fi
@@ -2844,6 +2957,7 @@ PROMPT
   fi
   cp -R "${REPO_ROOT}/skills" "${upload_tmp}/"
   cp -R "${REPO_ROOT}/images/ctf-toolbox/codex-config" "${upload_tmp}/"
+  cp -R "${REPO_ROOT}/images/ctf-toolbox/claude-config" "${upload_tmp}/"
 
   gcloud_ssh "mkdir -p ${remote_upload_dir} && rm -rf ${remote_upload_dir}/*"
 
@@ -2854,15 +2968,21 @@ PROMPT
     upload_file_to_remote "${local_image_archive}" "${remote_upload_dir}/ctf-toolbox.tar.gz"
   fi
 
-  gcloud_ssh "sudo mkdir -p /home/ctf/run /home/ctf/run/.codex/skills && sudo rm -rf /home/ctf/run/challenge /home/ctf/run/prompts /home/ctf/run/.codex/skills/* && sudo cp -R ${remote_upload_dir}/challenge /home/ctf/run/challenge && if [ -d ${remote_upload_dir}/prompts ]; then sudo cp -R ${remote_upload_dir}/prompts /home/ctf/run/prompts; fi && if [ -d ${remote_upload_dir}/skills ]; then sudo cp -R ${remote_upload_dir}/skills/. /home/ctf/run/.codex/skills/; fi && sudo cp ${remote_upload_dir}/challenge_prompt.txt /home/ctf/run/challenge_prompt.txt && sudo cp ${remote_upload_dir}/supervisor.sh ${remote_upload_dir}/spawn-idea-workers.sh ${remote_upload_dir}/subagent-tmux-bridge.sh ${remote_upload_dir}/install-python-runtime.sh /home/ctf/run/ && sudo chown -R ctf:ctf /home/ctf/run && sudo chmod 644 /home/ctf/run/challenge_prompt.txt && sudo -u ctf chmod +x /home/ctf/run/supervisor.sh /home/ctf/run/spawn-idea-workers.sh /home/ctf/run/subagent-tmux-bridge.sh /home/ctf/run/install-python-runtime.sh"
+  gcloud_ssh "sudo mkdir -p /home/ctf/run /home/ctf/run/.codex/skills /home/ctf/run/.claude/skills && sudo rm -rf /home/ctf/run/challenge /home/ctf/run/prompts /home/ctf/run/.codex/skills/* /home/ctf/run/.claude/skills/* && sudo cp -R ${remote_upload_dir}/challenge /home/ctf/run/challenge && if [ -d ${remote_upload_dir}/prompts ]; then sudo cp -R ${remote_upload_dir}/prompts /home/ctf/run/prompts; fi && if [ -d ${remote_upload_dir}/skills ]; then sudo cp -R ${remote_upload_dir}/skills/. /home/ctf/run/.codex/skills/; sudo cp -R ${remote_upload_dir}/skills/. /home/ctf/run/.claude/skills/; fi && sudo cp ${remote_upload_dir}/challenge_prompt.txt /home/ctf/run/challenge_prompt.txt && sudo cp ${remote_upload_dir}/supervisor.sh ${remote_upload_dir}/spawn-idea-workers.sh ${remote_upload_dir}/subagent-tmux-bridge.sh ${remote_upload_dir}/install-python-runtime.sh /home/ctf/run/ && sudo chown -R ctf:ctf /home/ctf/run && sudo chmod 644 /home/ctf/run/challenge_prompt.txt && sudo -u ctf chmod +x /home/ctf/run/supervisor.sh /home/ctf/run/spawn-idea-workers.sh /home/ctf/run/subagent-tmux-bridge.sh /home/ctf/run/install-python-runtime.sh"
 
   if [[ "${no_auth_sync}" == "0" ]]; then
-    sync_codex_auth
+    case "${agent}" in
+      claude) sync_claude_auth ;;
+      codex|*) sync_codex_auth ;;
+    esac
   else
     auth_sync="disabled"
   fi
 
-  install_managed_codex_config "${remote_upload_dir}"
+  case "${agent}" in
+    claude) install_managed_claude_config "${remote_upload_dir}" ;;
+    codex|*) install_managed_codex_config "${remote_upload_dir}" ;;
+  esac
 
   if [[ "${use_local_image}" == "1" ]]; then
     if ! gcloud_ssh "test -f ${remote_upload_dir}/ctf-toolbox.tar.gz"; then
@@ -2873,7 +2993,7 @@ PROMPT
   else
     pull_remote_toolbox_image "${toolbox_image_ref}"
   fi
-  start_remote_toolbox_container "${toolbox_variant}"
+  start_remote_toolbox_container "${toolbox_variant}" "${agent}"
   gcloud_ssh "rm -rf ${remote_upload_dir}"
 
   refresh_instance_ip
@@ -2885,7 +3005,7 @@ PROMPT
     fi
   fi
 
-  write_state "${provider}" "${instance}" "${ZONE}" "${project}" "${machine_type}" "${run_id}" "$(cd "${challenge_dir}" && pwd)" "${timeout_min}" "" "${auth_sync}" "${no_auth_sync}" "${ip}" "${boot_image}" "${boot_image_family}" "${boot_image_project}" "${toolbox_image_ref}" "${toolbox_image_source}" "${CONTROL_SCHEME}" "${CONTROL_HOST:-${ip}}" "${CONTROL_PORT}" "${CONTROL_USER}" "${CONTROL_PASSWORD}"
+  write_state "${provider}" "${instance}" "${ZONE}" "${project}" "${machine_type}" "${run_id}" "$(cd "${challenge_dir}" && pwd)" "${timeout_min}" "" "${auth_sync}" "${no_auth_sync}" "${ip}" "${boot_image}" "${boot_image_family}" "${boot_image_project}" "${toolbox_image_ref}" "${toolbox_image_source}" "${CONTROL_SCHEME}" "${CONTROL_HOST:-${ip}}" "${CONTROL_PORT}" "${CONTROL_USER}" "${CONTROL_PASSWORD}" "${agent}"
 
   if [[ "${auto_vpn}" == "1" ]]; then
     local vpn_cidrs_file vpn_name
@@ -2904,13 +3024,14 @@ PROMPT
 
   echo "Launching tmux supervisor..."
   gcloud_ssh "sudo -u ctf bash -lc 'tmux kill-session -t ctf >/dev/null 2>&1 || true'"
-  launch_supervisor_tmux "/home/ctf/run" "/home/ctf/run/challenge_prompt.txt"
+  launch_supervisor_tmux "/home/ctf/run" "/home/ctf/run/challenge_prompt.txt" "${agent}"
 
   rm -f "${prompt_tmp}" "${startup_tmp}"
   rm -rf "${upload_tmp}"
 
   echo "Run started."
   echo "  Provider: $(provider_label "${provider}")"
+  echo "  Agent: ${agent}"
   echo "  Instance: ${instance}"
   echo "  IP: ${ip}"
   echo "  Control plane: $(control_endpoint)"
@@ -3095,20 +3216,21 @@ cmd_mcp() {
   esac
 
   resolve_target_required
-  run_remote_codex_mcp "$@"
+  run_remote_agent_mcp "$@"
 
+  local agent_label="${AGENT:-codex}"
   if [[ "${restart_supervisor}" == "1" ]]; then
     case "${subcmd}" in
       add|remove|login|logout)
-        echo "Restarting supervisor window so Codex picks up the updated MCP configuration."
-        launch_supervisor_tmux "${REMOTE_RUN_DIR}" "${REMOTE_RUN_DIR}/challenge_prompt.txt"
+        echo "Restarting supervisor window so ${agent_label} picks up the updated MCP configuration."
+        launch_supervisor_tmux "${REMOTE_RUN_DIR}" "${REMOTE_RUN_DIR}/challenge_prompt.txt" "${agent_label}"
         ;;
     esac
   else
     case "${subcmd}" in
       add|remove|login|logout)
         echo "MCP config updated on the VM."
-        echo "If Codex is already running in tmux, rerun with --restart-supervisor to reload it."
+        echo "If ${agent_label} is already running in tmux, rerun with --restart-supervisor to reload it."
         ;;
     esac
   fi
@@ -3549,7 +3671,7 @@ cmd_ideas() {
 
   gcloud_ssh "sudo -u ctf bash -lc 'printf \"%s\" \"${payload_b64}\" | base64 -d > ${remote_ideas_file} && chmod 600 ${remote_ideas_file}'"
 
-  run_cmd="/home/ctf/run/spawn-idea-workers.sh --run-dir /home/ctf/run --ideas-file ${remote_ideas_file}"
+  run_cmd="CTFVM_AGENT=${AGENT:-codex} /home/ctf/run/spawn-idea-workers.sh --run-dir /home/ctf/run --ideas-file ${remote_ideas_file}"
   if [[ -n "${parallel}" ]]; then
     run_cmd="${run_cmd} --parallel ${parallel}"
   fi
@@ -3610,10 +3732,10 @@ cmd_sync_skill() {
   cp -R "${local_skill_dir}" "${local_stage}/"
   gcloud_ssh "mkdir -p ${remote_tmp}"
   upload_dir_to_remote "${local_stage}" "${remote_tmp}"
-  gcloud_ssh "sudo mkdir -p /home/ctf/run/.codex/skills && sudo rm -rf /home/ctf/run/.codex/skills/${skill_name} && sudo cp -R ${remote_tmp}/${skill_name} /home/ctf/run/.codex/skills/${skill_name} && sudo chown -R ctf:ctf /home/ctf/run/.codex/skills/${skill_name} && rm -rf ${remote_tmp}"
+  gcloud_ssh "sudo mkdir -p /home/ctf/run/.codex/skills /home/ctf/run/.claude/skills && sudo rm -rf /home/ctf/run/.codex/skills/${skill_name} /home/ctf/run/.claude/skills/${skill_name} && sudo cp -R ${remote_tmp}/${skill_name} /home/ctf/run/.codex/skills/${skill_name} && sudo cp -R ${remote_tmp}/${skill_name} /home/ctf/run/.claude/skills/${skill_name} && sudo chown -R ctf:ctf /home/ctf/run/.codex/skills/${skill_name} /home/ctf/run/.claude/skills/${skill_name} && rm -rf ${remote_tmp}"
   rm -rf "${local_stage}"
 
-  echo "Synced skill ${skill_name} to /home/ctf/run/.codex/skills/${skill_name}"
+  echo "Synced skill ${skill_name} to /home/ctf/run/.codex/skills/${skill_name} and /home/ctf/run/.claude/skills/${skill_name}"
 }
 
 cmd_key() {
@@ -3903,17 +4025,13 @@ cmd_destroy() {
     IP="${inst_ip}"
     cleanup_local_vpn_for_instance "${inst}" "${zn}" "${proj}"
     if [[ "${no_wipe}" == "0" ]]; then
-      echo "Wiping VM Codex session material before deletion: ${inst} (${zn}, $(provider_label "${provider}"))"
+      echo "Wiping VM agent session material before deletion: ${inst} (${zn}, $(provider_label "${provider}"))"
       gcloud_ssh "sudo -u ctf bash -lc '
-        if [ -d /home/ctf/run/.codex ]; then
-          find /home/ctf/run/.codex -type f -exec shred -u {} + 2>/dev/null || rm -rf /home/ctf/run/.codex
-        fi
-        if [ -d /home/ctf/.codex ]; then
-          find /home/ctf/.codex -type f -exec shred -u {} + 2>/dev/null || rm -rf /home/ctf/.codex
-        fi
-        if [ -d /home/ctf/.docker ]; then
-          find /home/ctf/.docker -type f -exec shred -u {} + 2>/dev/null || rm -rf /home/ctf/.docker
-        fi
+        for d in /home/ctf/run/.codex /home/ctf/.codex /home/ctf/run/.claude /home/ctf/.claude /home/ctf/.docker; do
+          if [ -d \"\${d}\" ]; then
+            find \"\${d}\" -type f -exec shred -u {} + 2>/dev/null || rm -rf \"\${d}\"
+          fi
+        done
       '" </dev/null || true
     fi
     echo "Deleting instance ${inst}..."
@@ -4025,17 +4143,13 @@ cmd_destroy() {
   cleanup_local_vpn_for_instance "${INSTANCE}" "${ZONE}" "${PROJECT}"
 
   if [[ "${no_wipe}" == "0" ]]; then
-    echo "Wiping VM Codex session material before deletion..."
+    echo "Wiping VM agent session material before deletion..."
     gcloud_ssh "sudo -u ctf bash -lc '
-      if [ -d /home/ctf/run/.codex ]; then
-        find /home/ctf/run/.codex -type f -exec shred -u {} + 2>/dev/null || rm -rf /home/ctf/run/.codex
-      fi
-      if [ -d /home/ctf/.codex ]; then
-        find /home/ctf/.codex -type f -exec shred -u {} + 2>/dev/null || rm -rf /home/ctf/.codex
-      fi
-      if [ -d /home/ctf/.docker ]; then
-        find /home/ctf/.docker -type f -exec shred -u {} + 2>/dev/null || rm -rf /home/ctf/.docker
-      fi
+      for d in /home/ctf/run/.codex /home/ctf/.codex /home/ctf/run/.claude /home/ctf/.claude /home/ctf/.docker; do
+        if [ -d \"\${d}\" ]; then
+          find \"\${d}\" -type f -exec shred -u {} + 2>/dev/null || rm -rf \"\${d}\"
+        fi
+      done
     '" || true
   fi
 
@@ -4156,7 +4270,7 @@ cmd_cleanup_state() {
 usage() {
   cat <<USAGE
 Usage:
-  ctfvm start --provider gcp|digitalocean --dir <challenge-folder> [--desc <text> | --desc-file <path>] [--ideas <text>] [--timeout-min 1440] [--machine-type e2-standard-4 | --size-slug s-4vcpu-8gb] [--zone <zone-or-region>] [--project <project>] [--ssh-key <fingerprint>] [--toolbox-image <artifact-registry-ref> | --toolbox-location <region> --toolbox-repository <repo> --toolbox-image-name <name> --toolbox-tag <tag> | --use-local-image [--local-image-archive <path>]] [--toolbox-variant lean|full] [--boot-image <image> | --boot-image-family <family> [--boot-image-project <project>]] [--vpn | --no-vpn] [--vpn-local-cidr <cidr> ... | --vpn-local-cidrs <csv>] [--vpn-port 51820] [--vpn-no-nat] [--no-auth-sync]
+  ctfvm start --provider gcp|digitalocean [--agent codex|claude] --dir <challenge-folder> [--desc <text> | --desc-file <path>] [--ideas <text>] [--timeout-min 1440] [--machine-type e2-standard-4 | --size-slug s-4vcpu-8gb] [--zone <zone-or-region>] [--project <project>] [--ssh-key <fingerprint>] [--toolbox-image <artifact-registry-ref> | --toolbox-location <region> --toolbox-repository <repo> --toolbox-image-name <name> --toolbox-tag <tag> | --use-local-image [--local-image-archive <path>]] [--toolbox-variant lean|full] [--boot-image <image> | --boot-image-family <family> [--boot-image-project <project>]] [--vpn | --no-vpn] [--vpn-local-cidr <cidr> ... | --vpn-local-cidrs <csv>] [--vpn-port 51820] [--vpn-no-nat] [--no-auth-sync]
   ctfvm image build-local [--archive <path>] [--platform linux/amd64] [--variant lean|full]
   ctfvm image push-registry --provider gcp|digitalocean [--project <project>] [--location <region>] [--repository <repo>] [--image-name <name>] [--tag <tag>] [--registry-tier basic] [--platform linux/amd64] [--variant lean|full]
   ctfvm image push-ar [--project <project>] [--location <region>] [--repository <repo>] [--image-name <name>] [--tag <tag>] [--platform linux/amd64] [--variant lean|full]

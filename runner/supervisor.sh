@@ -88,15 +88,23 @@ if ! docker ps --format '{{.Names}}' | grep -q '^ctf-toolbox$'; then
   exec bash
 fi
 
-if ! docker exec ctf-toolbox bash -c 'command -v codex >/dev/null 2>&1'; then
-  echo "codex CLI not found in ctf-toolbox container." | tee -a "${RUN_DIR}/logs/supervisor.log"
+CTFVM_AGENT="${CTFVM_AGENT:-codex}"
+case "${CTFVM_AGENT}" in
+  codex|claude) ;;
+  *)
+    echo "Unknown CTFVM_AGENT='${CTFVM_AGENT}' (expected codex|claude); defaulting to codex." | tee -a "${RUN_DIR}/logs/supervisor.log"
+    CTFVM_AGENT="codex" ;;
+esac
+
+if ! docker exec ctf-toolbox bash -c "command -v ${CTFVM_AGENT} >/dev/null 2>&1"; then
+  echo "${CTFVM_AGENT} CLI not found in ctf-toolbox container." | tee -a "${RUN_DIR}/logs/supervisor.log"
   echo "Install it in the container and rerun supervisor." | tee -a "${RUN_DIR}/logs/supervisor.log"
   exec bash
 fi
 
 cat <<BANNER | tee -a "${RUN_DIR}/logs/supervisor.log"
 ========================================================
-Codex supervisor launching in ctf-toolbox container.
+${CTFVM_AGENT} supervisor launching in ctf-toolbox container.
 Challenge dir: /workspace/challenge
 Artifacts dir: /workspace/artifacts
 Findings file: /workspace/findings.md
@@ -113,33 +121,48 @@ echo "Supervisor skill available: \$gdb-mcp" | tee -a "${RUN_DIR}/logs/superviso
 echo "Subagent roles: exploit_tester, docs_researcher" | tee -a "${RUN_DIR}/logs/supervisor.log"
 echo "Supervisor skill available: \$webhook-site-callbacks" | tee -a "${RUN_DIR}/logs/supervisor.log"
 echo "Bundled MCP server available: gdb" | tee -a "${RUN_DIR}/logs/supervisor.log"
-echo "Codex multi-agent mode is enabled; spawn subagents from supervisor when needed." | tee -a "${RUN_DIR}/logs/supervisor.log"
-echo "Spawned subagents are auto-mirrored to tmux sessions by subagent-tmux-bridge." | tee -a "${RUN_DIR}/logs/supervisor.log"
 
-CODEX_AUTO_ALLOW="${CODEX_AUTO_ALLOW:-1}"
-CODEX_ARGS=(codex --no-alt-screen --enable multi_agent)
-if [[ "${CODEX_AUTO_ALLOW}" == "1" ]]; then
-  # Avoid conflicting flags: do not combine --ask-for-approval with bypass mode.
-  CODEX_ARGS+=(--ask-for-approval never --sandbox danger-full-access)
-  echo "Codex auto-allow mode: enabled (--ask-for-approval never, --sandbox danger-full-access)." | tee -a "${RUN_DIR}/logs/supervisor.log"
+AGENT_AUTO_ALLOW="${CTFVM_AGENT_AUTO_ALLOW:-${CODEX_AUTO_ALLOW:-1}}"
+
+if [[ "${CTFVM_AGENT}" == "codex" ]]; then
+  echo "Codex multi-agent mode is enabled; spawn subagents from supervisor when needed." | tee -a "${RUN_DIR}/logs/supervisor.log"
+  echo "Spawned subagents are auto-mirrored to tmux sessions by subagent-tmux-bridge." | tee -a "${RUN_DIR}/logs/supervisor.log"
+
+  AGENT_ARGS=(codex --no-alt-screen --enable multi_agent)
+  if [[ "${AGENT_AUTO_ALLOW}" == "1" ]]; then
+    AGENT_ARGS+=(--ask-for-approval never --sandbox danger-full-access)
+    echo "Codex auto-allow mode: enabled (--ask-for-approval never, --sandbox danger-full-access)." | tee -a "${RUN_DIR}/logs/supervisor.log"
+  else
+    echo "Codex auto-allow mode: disabled (default Codex approval behavior)." | tee -a "${RUN_DIR}/logs/supervisor.log"
+  fi
+
+  start_subagent_bridge
 else
-  echo "Codex auto-allow mode: disabled (default Codex approval behavior)." | tee -a "${RUN_DIR}/logs/supervisor.log"
+  echo "Claude Code subagents run in-process via the Task tool; tmux per-subagent bridge is disabled for this run." | tee -a "${RUN_DIR}/logs/supervisor.log"
+
+  AGENT_ARGS=(claude)
+  if [[ "${AGENT_AUTO_ALLOW}" == "1" ]]; then
+    AGENT_ARGS+=(--dangerously-skip-permissions)
+    echo "Claude auto-allow mode: enabled (--dangerously-skip-permissions)." | tee -a "${RUN_DIR}/logs/supervisor.log"
+  else
+    echo "Claude auto-allow mode: disabled (default Claude approval behavior)." | tee -a "${RUN_DIR}/logs/supervisor.log"
+  fi
 fi
 
-start_subagent_bridge
-
-echo "Launching interactive Codex session..." | tee -a "${RUN_DIR}/logs/supervisor.log"
+echo "Launching interactive ${CTFVM_AGENT} session..." | tee -a "${RUN_DIR}/logs/supervisor.log"
 set +e
 initial_prompt="$(cat "${PROMPT_FILE}")"
-docker exec -it ctf-toolbox bash -c 'cd /workspace && "$@"' _ "${CODEX_ARGS[@]}" "${initial_prompt}"
+docker exec -it ctf-toolbox bash -c 'cd /workspace && "$@"' _ "${AGENT_ARGS[@]}" "${initial_prompt}"
 rc=$?
 set -e
 
-stop_subagent_bridge
+if [[ "${CTFVM_AGENT}" == "codex" ]]; then
+  stop_subagent_bridge
+fi
 trap - EXIT
 
-echo "Codex supervisor session exited with code ${rc} at $(date -u +%Y-%m-%dT%H:%M:%SZ)." | tee -a "${RUN_DIR}/logs/supervisor.log"
+echo "${CTFVM_AGENT} supervisor session exited with code ${rc} at $(date -u +%Y-%m-%dT%H:%M:%SZ)." | tee -a "${RUN_DIR}/logs/supervisor.log"
 echo "If this was unexpected (auth/session issue), run inside this shell:" | tee -a "${RUN_DIR}/logs/supervisor.log"
-echo "  docker exec -it ctf-toolbox bash -c 'cd /workspace && codex'" | tee -a "${RUN_DIR}/logs/supervisor.log"
+echo "  docker exec -it ctf-toolbox bash -c 'cd /workspace && ${CTFVM_AGENT}'" | tee -a "${RUN_DIR}/logs/supervisor.log"
 
 exec bash

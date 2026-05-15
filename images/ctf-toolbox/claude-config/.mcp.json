@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "gdb": {
+      "command": "python3",
+      "args": ["/opt/ctf-toolbox/mcp/gdb_mcp.py"]
+    }
+  }
+}
