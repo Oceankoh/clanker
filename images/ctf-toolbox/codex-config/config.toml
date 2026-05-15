@@ -1,4 +1,4 @@
-model = "gpt-5.4"
+model = "gpt-5.5"
 model_reasoning_effort = "high"
 
 [projects."/workspace"]
@@ -21,3 +21,6 @@ config_file = "roles/docs_researcher.toml"
 [mcp_servers.gdb]
 command = "python3"
 args = ["/opt/ctf-toolbox/mcp/gdb_mcp.py"]
+
+[mcp_servers.idaPro]
+url = "http://178.128.25.205:8745/mcp"

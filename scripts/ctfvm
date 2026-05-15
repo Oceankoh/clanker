@@ -8,11 +8,15 @@ STATE_FILE="${STATE_DIR}/current-run.json"
 RUNS_DIR="${STATE_DIR}/runs"
 CACHE_DIR="${STATE_DIR}/cache"
 BRIDGES_DIR="${STATE_DIR}/bridges"
+VPN_DIR="${STATE_DIR}/vpn"
 CONFIG_FILE="${STATE_DIR}/config.json"
 DEFAULT_IMAGE_ARCHIVE="${CACHE_DIR}/ctf-toolbox.tar.gz"
 DEFAULT_DO_PROJECT="digitalocean"
 DEFAULT_CONTROL_PORT="${CTFVM_CONTROL_PORT:-443}"
 REMOTE_BRIDGE_DIR="/home/ctf/run/bridge"
+REMOTE_VPN_DIR="/home/ctf/run/vpn"
+DEFAULT_VPN_PORT="${CTFVM_VPN_PORT:-51820}"
+DEFAULT_VPN_CIDRS="${CTFVM_VPN_CIDRS:-10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}"
 
 load_repo_env() {
   local env_file="${CTFVM_ENV_FILE:-${REPO_ROOT}/.env}"
@@ -27,6 +31,9 @@ load_repo_env() {
 
 load_repo_env
 
+DEFAULT_CONTROL_PORT="${CTFVM_CONTROL_PORT:-${DEFAULT_CONTROL_PORT}}"
+DEFAULT_VPN_PORT="${CTFVM_VPN_PORT:-${DEFAULT_VPN_PORT}}"
+DEFAULT_VPN_CIDRS="${CTFVM_VPN_CIDRS:-${DEFAULT_VPN_CIDRS}}"
 DEFAULT_PROVIDER="${CTFVM_PROVIDER:-gcp}"
 
 env_first_set() {
@@ -286,6 +293,7 @@ ensure_state_dir() {
   mkdir -p "${STATE_DIR}"
   mkdir -p "${RUNS_DIR}"
   mkdir -p "${BRIDGES_DIR}"
+  mkdir -p "${VPN_DIR}"
 }
 
 write_config() {
@@ -973,6 +981,12 @@ list_running_do_instances() {
 choose_running_instance_interactive() {
   local -a providers names zones projects statuses ips
   local line provider name zone project status ip
+  providers=()
+  names=()
+  zones=()
+  projects=()
+  statuses=()
+  ips=()
   while IFS= read -r line; do
     [[ -z "${line//[[:space:]]/}" ]] && continue
     provider="$(awk -F'\t' '{print $1}' <<< "${line}")"
@@ -1250,13 +1264,22 @@ sync_codex_auth() {
     return 0
   fi
 
-  local base parent
-  base="$(basename "${codex_home}")"
-  parent="$(dirname "${codex_home}")"
+  local -a auth_files=()
+  local rel
+  for rel in auth.json installation_id; do
+    if [[ -f "${codex_home}/${rel}" ]]; then
+      auth_files+=("${rel}")
+    fi
+  done
+
+  if [[ "${#auth_files[@]}" -eq 0 ]]; then
+    echo "No Codex auth session files found in ${codex_home}; skipping auth sync." >&2
+    return 0
+  fi
 
   echo "Syncing Codex session data to VM (OAuth session only, no API keys)."
-  COPYFILE_DISABLE=1 tar --no-xattrs -C "${parent}" -cf - "${base}" 2>/dev/null | \
-    gcloud_ssh "sudo -u ctf bash -lc 'mkdir -p /home/ctf/run && tar -C /home/ctf/run -xf - && chmod -R go-rwx /home/ctf/run/.codex'"
+  COPYFILE_DISABLE=1 tar --no-xattrs -C "${codex_home}" -cf - "${auth_files[@]}" 2>/dev/null | \
+    gcloud_ssh "sudo -u ctf bash -lc 'mkdir -p /home/ctf/run/.codex && tar -C /home/ctf/run/.codex -xf - && chmod -R go-rwx /home/ctf/run/.codex'"
 }
 
 install_managed_codex_config() {
@@ -1345,6 +1368,579 @@ run_remote_codex_mcp() {
   remote_cmd="docker ps --format \"{{.Names}}\" | grep -qx ctf-toolbox || { echo \"ctf-toolbox container not running.\" >&2; exit 1; }; docker exec -i -w /workspace -e HOME=/workspace -e CODEX_HOME=/workspace/.codex ctf-toolbox codex mcp ${quoted_args}"
   printf -v remote_cmd_q '%q' "${remote_cmd}"
   gcloud_ssh "sudo -u ctf bash -lc ${remote_cmd_q}"
+}
+
+vpn_target_key() {
+  bridge_target_key
+}
+
+vpn_state_dir() {
+  printf '%s\n' "${VPN_DIR}/$(vpn_target_key)"
+}
+
+vpn_state_file() {
+  local vpn_name="$1"
+  printf '%s\n' "$(vpn_state_dir)/${vpn_name}.json"
+}
+
+vpn_default_name() {
+  local key checksum
+  key="$(vpn_target_key)"
+  checksum="$(printf '%s' "${key}" | cksum | awk '{printf "%08x", $1}')"
+  printf '%s\n' "ctfvm${checksum:0:8}"
+}
+
+vpn_subnet_octet() {
+  local key checksum octet
+  key="$(vpn_target_key)"
+  checksum="$(printf '%s' "${key}" | cksum | awk '{print $1}')"
+  octet=$(( (checksum % 200) + 1 ))
+  printf '%s\n' "${octet}"
+}
+
+vpn_split_cidrs() {
+  local raw="$1"
+  local out_file="$2"
+  local item trimmed ip prefix octet
+  local -a _vpn_cidr_items=()
+  local -a octets=()
+  : > "${out_file}"
+  raw="${raw//;/,}"
+  IFS=',' read -r -a _vpn_cidr_items <<< "${raw}"
+  for item in "${_vpn_cidr_items[@]}"; do
+    trimmed="$(printf '%s' "${item}" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+    [[ -n "${trimmed}" ]] || continue
+    if [[ ! "${trimmed}" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}/[0-9]{1,2}$ ]]; then
+      echo "Invalid VPN CIDR: ${trimmed}" >&2
+      return 1
+    fi
+    ip="${trimmed%/*}"
+    prefix="${trimmed#*/}"
+    if (( prefix < 0 || prefix > 32 )); then
+      echo "Invalid VPN CIDR prefix: ${trimmed}" >&2
+      return 1
+    fi
+    IFS='.' read -r -a octets <<< "${ip}"
+    for octet in "${octets[@]}"; do
+      if (( octet < 0 || octet > 255 )); then
+        echo "Invalid VPN CIDR octet: ${trimmed}" >&2
+        return 1
+      fi
+    done
+    printf '%s\n' "${trimmed}" >> "${out_file}"
+  done
+  if [[ ! -s "${out_file}" ]]; then
+    echo "At least one VPN local CIDR is required." >&2
+    return 1
+  fi
+}
+
+vpn_require_local_prereqs() {
+  local cmd missing=0
+  for cmd in wg wg-quick sudo jq base64; do
+    if ! command -v "${cmd}" >/dev/null 2>&1; then
+      echo "Missing required command: ${cmd}" >&2
+      missing=1
+    fi
+  done
+  [[ "${missing}" == "0" ]]
+}
+
+vpn_sudo_prefix() {
+  if [[ -t 0 && -t 1 ]]; then
+    printf '%s\n' "sudo"
+  else
+    printf '%s\n' "sudo -n"
+  fi
+}
+
+vpn_write_local_nat_script() {
+  local script_file="$1"
+  local cidrs_csv="$2"
+  local vpn_cidr="$3"
+  local cidrs_q vpn_cidr_q
+  printf -v cidrs_q '%q' "${cidrs_csv}"
+  printf -v vpn_cidr_q '%q' "${vpn_cidr}"
+  cat > "${script_file}" <<SCRIPT
+#!/usr/bin/env bash
+set -euo pipefail
+
+ACTION="\${1:-up}"
+WG_IF="\${2:-}"
+LOCAL_CIDRS_CSV=${cidrs_q}
+VPN_CIDR=${vpn_cidr_q}
+
+IFS=',' read -r -a LOCAL_CIDRS <<< "\${LOCAL_CIDRS_CSV}"
+
+default_egress_if() {
+  case "\$(uname -s)" in
+    Darwin)
+      route -n get default 2>/dev/null | awk '/interface:/{print \$2; exit}' ;;
+    Linux)
+      ip route show default 2>/dev/null | awk 'NR==1 {print \$5; exit}' ;;
+    *)
+      return 1 ;;
+  esac
+}
+
+EGRESS_IF="\${CTFVM_VPN_EGRESS_IF:-}"
+if [[ -z "\${EGRESS_IF}" ]]; then
+  EGRESS_IF="\$(default_egress_if || true)"
+fi
+if [[ -z "\${EGRESS_IF}" ]]; then
+  echo "Could not determine local egress interface. Set CTFVM_VPN_EGRESS_IF." >&2
+  exit 1
+fi
+
+case "\$(uname -s)" in
+  Darwin)
+    ANCHOR="com.apple/ctfvm-\${WG_IF}"
+    RULE_FILE="\${TMPDIR:-/tmp}/ctfvm-\${WG_IF}.pf"
+    if [[ "\${ACTION}" == "up" ]]; then
+      sysctl -w net.inet.ip.forwarding=1 >/dev/null
+      {
+        for cidr in "\${LOCAL_CIDRS[@]}"; do
+          printf 'nat on %s from %s to %s -> (%s)\\n' "\${EGRESS_IF}" "\${VPN_CIDR}" "\${cidr}" "\${EGRESS_IF}"
+        done
+        printf 'pass quick on %s from %s keep state\\n' "\${WG_IF}" "\${VPN_CIDR}"
+        printf 'pass quick on %s to %s keep state\\n' "\${EGRESS_IF}" "\${VPN_CIDR}"
+      } > "\${RULE_FILE}"
+      pfctl -a "\${ANCHOR}" -f "\${RULE_FILE}"
+      pfctl -E >/dev/null 2>&1 || true
+    else
+      pfctl -a "\${ANCHOR}" -F all >/dev/null 2>&1 || true
+      rm -f "\${RULE_FILE}"
+    fi
+    ;;
+  Linux)
+    if ! command -v iptables >/dev/null 2>&1; then
+      echo "iptables is required for local VPN NAT on Linux." >&2
+      exit 1
+    fi
+    if [[ "\${ACTION}" == "up" ]]; then
+      sysctl -w net.ipv4.ip_forward=1 >/dev/null
+      for cidr in "\${LOCAL_CIDRS[@]}"; do
+        iptables -t nat -C POSTROUTING -s "\${VPN_CIDR}" -d "\${cidr}" -o "\${EGRESS_IF}" -j MASQUERADE >/dev/null 2>&1 || \\
+          iptables -t nat -A POSTROUTING -s "\${VPN_CIDR}" -d "\${cidr}" -o "\${EGRESS_IF}" -j MASQUERADE
+        iptables -C FORWARD -i "\${WG_IF}" -o "\${EGRESS_IF}" -s "\${VPN_CIDR}" -d "\${cidr}" -j ACCEPT >/dev/null 2>&1 || \\
+          iptables -A FORWARD -i "\${WG_IF}" -o "\${EGRESS_IF}" -s "\${VPN_CIDR}" -d "\${cidr}" -j ACCEPT
+      done
+      iptables -C FORWARD -i "\${EGRESS_IF}" -o "\${WG_IF}" -d "\${VPN_CIDR}" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT >/dev/null 2>&1 || \\
+        iptables -A FORWARD -i "\${EGRESS_IF}" -o "\${WG_IF}" -d "\${VPN_CIDR}" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+    else
+      for cidr in "\${LOCAL_CIDRS[@]}"; do
+        iptables -t nat -D POSTROUTING -s "\${VPN_CIDR}" -d "\${cidr}" -o "\${EGRESS_IF}" -j MASQUERADE >/dev/null 2>&1 || true
+        iptables -D FORWARD -i "\${WG_IF}" -o "\${EGRESS_IF}" -s "\${VPN_CIDR}" -d "\${cidr}" -j ACCEPT >/dev/null 2>&1 || true
+      done
+      iptables -D FORWARD -i "\${EGRESS_IF}" -o "\${WG_IF}" -d "\${VPN_CIDR}" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT >/dev/null 2>&1 || true
+    fi
+    ;;
+  *)
+    echo "Unsupported local OS for automated VPN NAT: \$(uname -s)" >&2
+    exit 1
+    ;;
+esac
+SCRIPT
+  chmod 700 "${script_file}"
+}
+
+vpn_write_remote_env_file() {
+  local out_file="$1"
+  local local_ip="$2"
+  local remote_ip="$3"
+  local cidrs_csv="$4"
+  {
+    echo "# Generated by ctfvm vpn"
+    printf 'CTF_VPN_LOCAL_GATEWAY=%s\n' "${local_ip}"
+    printf 'CTF_VPN_REMOTE_IP=%s\n' "${remote_ip}"
+    printf 'CTF_VPN_LOCAL_CIDRS=%s\n' "${cidrs_csv}"
+  } > "${out_file}"
+}
+
+vpn_write_state_json() {
+  local vpn_name="$1"
+  local local_interface="$2"
+  local remote_interface="$3"
+  local local_config="$4"
+  local local_nat_script="$5"
+  local port="$6"
+  local vpn_cidr="$7"
+  local local_ip="$8"
+  local remote_ip="$9"
+  local cidrs_file="${10}"
+  local nat_enabled="${11}"
+  local out_file="${12}"
+  local cidrs_json
+  cidrs_json="$(jq -R . "${cidrs_file}" | jq -s .)"
+  jq -n \
+    --arg name "${vpn_name}" \
+    --arg provider "${PROVIDER}" \
+    --arg instance "${INSTANCE}" \
+    --arg zone "${ZONE}" \
+    --arg project "${PROJECT}" \
+    --arg run_id "${RUN_ID:-}" \
+    --arg remote_run_dir "${REMOTE_RUN_DIR:-/home/ctf/run}" \
+    --arg remote_vpn_dir "${REMOTE_VPN_DIR}" \
+    --arg local_interface "${local_interface}" \
+    --arg remote_interface "${remote_interface}" \
+    --arg local_config "${local_config}" \
+    --arg local_nat_script "${local_nat_script}" \
+    --arg port "${port}" \
+    --arg vpn_cidr "${vpn_cidr}" \
+    --arg local_ip "${local_ip}" \
+    --arg remote_ip "${remote_ip}" \
+    --arg nat_enabled "${nat_enabled}" \
+    --arg updated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --argjson local_cidrs "${cidrs_json}" \
+    '{
+      name: $name,
+      provider: $provider,
+      instance: $instance,
+      zone: $zone,
+      project: $project,
+      run_id: $run_id,
+      remote_run_dir: $remote_run_dir,
+      remote_vpn_dir: $remote_vpn_dir,
+      local_interface: $local_interface,
+      remote_interface: $remote_interface,
+      local_config: $local_config,
+      local_nat_script: $local_nat_script,
+      port: ($port | tonumber),
+      vpn_cidr: $vpn_cidr,
+      local_ip: $local_ip,
+      remote_ip: $remote_ip,
+      local_cidrs: $local_cidrs,
+      nat_enabled: ($nat_enabled == "1"),
+      updated_at: $updated_at
+    }' > "${out_file}"
+}
+
+vpn_install_remote() {
+  local remote_interface="$1"
+  local remote_config="$2"
+  local remote_env="$3"
+  local remote_json="$4"
+  local remote_config_b64 remote_env_b64 remote_json_b64 remote_cmd remote_cmd_q
+
+  remote_config_b64="$(base64 < "${remote_config}" | tr -d '\n')"
+  remote_env_b64="$(base64 < "${remote_env}" | tr -d '\n')"
+  remote_json_b64="$(base64 < "${remote_json}" | tr -d '\n')"
+  remote_cmd="set -euo pipefail; export DEBIAN_FRONTEND=noninteractive; if ! command -v wg >/dev/null 2>&1 || ! command -v wg-quick >/dev/null 2>&1; then apt-get update && apt-get install -y wireguard-tools; fi; install -d -m 700 /etc/wireguard ${REMOTE_VPN_DIR}; systemctl stop wg-quick@${remote_interface}.service >/dev/null 2>&1 || true; printf '%s' '${remote_config_b64}' | base64 -d > /etc/wireguard/${remote_interface}.conf; chmod 600 /etc/wireguard/${remote_interface}.conf; printf '%s' '${remote_env_b64}' | base64 -d > ${REMOTE_VPN_DIR}/${remote_interface}.env; printf '%s' '${remote_json_b64}' | base64 -d > ${REMOTE_VPN_DIR}/${remote_interface}.json; chown -R ctf:ctf ${REMOTE_VPN_DIR}; systemctl enable --now wg-quick@${remote_interface}.service"
+  printf -v remote_cmd_q '%q' "${remote_cmd}"
+  gcloud_ssh "sudo bash -lc ${remote_cmd_q}"
+}
+
+vpn_up_loaded() {
+  local vpn_name="$1"
+  local port="$2"
+  local cidrs_file="$3"
+  local nat_enabled="$4"
+  local state_dir state_file octet vpn_cidr local_ip remote_ip
+  local local_private local_public remote_private remote_public
+  local local_interface remote_interface local_config remote_config nat_script
+  local stage_dir remote_env remote_json cidrs_csv cidr nat_script_q
+  local sudo_cmd
+
+  if ! vpn_require_local_prereqs; then
+    return 1
+  fi
+  refresh_instance_ip
+  if [[ -z "${IP:-}" ]]; then
+    echo "Could not determine VM public IP for WireGuard endpoint." >&2
+    return 1
+  fi
+
+  state_dir="$(vpn_state_dir)"
+  state_file="$(vpn_state_file "${vpn_name}")"
+  if [[ -f "${state_file}" ]]; then
+    echo "VPN ${vpn_name} already exists for $(vpn_target_key)." >&2
+    return 1
+  fi
+  mkdir -p "${state_dir}"
+
+  octet="$(vpn_subnet_octet)"
+  vpn_cidr="10.88.${octet}.0/24"
+  local_ip="10.88.${octet}.1"
+  remote_ip="10.88.${octet}.2"
+  local_interface="${vpn_name}"
+  remote_interface="${vpn_name}"
+  local_config="${state_dir}/${vpn_name}.conf"
+  remote_config="${state_dir}/${vpn_name}.remote.conf"
+  nat_script="${state_dir}/${vpn_name}-nat.sh"
+  stage_dir="$(mktemp -d)"
+  remote_env="${stage_dir}/${remote_interface}.env"
+  remote_json="${stage_dir}/${remote_interface}.json"
+
+  local_private="$(wg genkey)"
+  local_public="$(printf '%s' "${local_private}" | wg pubkey)"
+  remote_private="$(wg genkey)"
+  remote_public="$(printf '%s' "${remote_private}" | wg pubkey)"
+  cidrs_csv="$(paste -sd, "${cidrs_file}")"
+
+  vpn_write_local_nat_script "${nat_script}" "${cidrs_csv}" "${vpn_cidr}"
+  printf -v nat_script_q '%q' "${nat_script}"
+  sudo_cmd="$(vpn_sudo_prefix)"
+
+  {
+    echo "[Interface]"
+    printf 'Address = %s/32\n' "${local_ip}"
+    printf 'PrivateKey = %s\n' "${local_private}"
+    if [[ "${nat_enabled}" == "1" ]]; then
+      printf 'PostUp = %s up %%i\n' "${nat_script_q}"
+      printf 'PostDown = %s down %%i\n' "${nat_script_q}"
+    fi
+    echo
+    echo "[Peer]"
+    printf 'PublicKey = %s\n' "${remote_public}"
+    printf 'AllowedIPs = %s/32\n' "${remote_ip}"
+    printf 'Endpoint = %s:%s\n' "${IP}" "${port}"
+    echo "PersistentKeepalive = 25"
+  } > "${local_config}"
+  chmod 600 "${local_config}"
+
+  {
+    echo "[Interface]"
+    printf 'Address = %s/32\n' "${remote_ip}"
+    printf 'ListenPort = %s\n' "${port}"
+    printf 'PrivateKey = %s\n' "${remote_private}"
+    echo "Table = off"
+    echo "PostUp = sysctl -w net.ipv4.ip_forward=1 >/dev/null"
+    while IFS= read -r cidr || [[ -n "${cidr}" ]]; do
+      printf 'PostUp = ip route replace %s dev %%i\n' "${cidr}"
+      printf 'PostDown = ip route del %s dev %%i 2>/dev/null || true\n' "${cidr}"
+    done < "${cidrs_file}"
+    echo
+    echo "[Peer]"
+    printf 'PublicKey = %s\n' "${local_public}"
+    printf 'AllowedIPs = %s/32' "${local_ip}"
+    while IFS= read -r cidr || [[ -n "${cidr}" ]]; do
+      printf ', %s' "${cidr}"
+    done < "${cidrs_file}"
+    echo
+  } > "${remote_config}"
+  chmod 600 "${remote_config}"
+
+  echo "Preparing WireGuard ingress on $(provider_label "${PROVIDER}")..."
+  ctfvm_provider_call "${PROVIDER}" prepare_vpn_ingress "${INSTANCE}" "${ZONE}" "${PROJECT}" "${port}" || {
+    rm -rf "${stage_dir}"
+    return 1
+  }
+
+  vpn_write_state_json "${vpn_name}" "${local_interface}" "${remote_interface}" "${local_config}" "${nat_script}" "${port}" "${vpn_cidr}" "${local_ip}" "${remote_ip}" "${cidrs_file}" "${nat_enabled}" "${remote_json}"
+  vpn_write_remote_env_file "${remote_env}" "${local_ip}" "${remote_ip}" "${cidrs_csv}"
+
+  echo "Installing WireGuard config on VM..."
+  if ! vpn_install_remote "${remote_interface}" "${remote_config}" "${remote_env}" "${remote_json}"; then
+    rm -rf "${stage_dir}"
+    return 1
+  fi
+
+  echo "Starting local WireGuard interface ${local_interface}..."
+  if ! ${sudo_cmd} wg-quick up "${local_config}"; then
+    gcloud_ssh "sudo bash -lc 'systemctl disable --now wg-quick@${remote_interface}.service >/dev/null 2>&1 || true; rm -f /etc/wireguard/${remote_interface}.conf ${REMOTE_VPN_DIR}/${remote_interface}.env ${REMOTE_VPN_DIR}/${remote_interface}.json'" >/dev/null 2>&1 || true
+    rm -rf "${stage_dir}"
+    return 1
+  fi
+
+  cp "${remote_json}" "${state_file}"
+  jq --arg local_config "${local_config}" --arg local_nat_script "${nat_script}" '.local_config = $local_config | .local_nat_script = $local_nat_script' "${state_file}" > "${state_file}.tmp"
+  mv "${state_file}.tmp" "${state_file}"
+  rm -rf "${stage_dir}"
+
+  echo "VPN ${vpn_name} is up for ${INSTANCE}."
+  echo "  VM WireGuard IP: ${remote_ip}"
+  echo "  Local gateway: ${local_ip}"
+  echo "  Routed local CIDRs: ${cidrs_csv}"
+  echo "  Remote env: ${REMOTE_VPN_DIR}/${remote_interface}.env"
+}
+
+cmd_vpn_up() {
+  local vpn_name=""
+  local port="${DEFAULT_VPN_PORT}"
+  local cidrs_raw="${DEFAULT_VPN_CIDRS}"
+  local cidrs_file=""
+  local nat_enabled="1"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --name)
+        vpn_name="$2"; shift 2 ;;
+      --listen-port|--port)
+        port="$2"; shift 2 ;;
+      --local-cidr)
+        if [[ "${cidrs_raw}" == "${DEFAULT_VPN_CIDRS}" ]]; then
+          cidrs_raw="$2"
+        else
+          cidrs_raw="${cidrs_raw},$2"
+        fi
+        shift 2 ;;
+      --local-cidrs)
+        cidrs_raw="$2"; shift 2 ;;
+      --no-nat)
+        nat_enabled="0"; shift ;;
+      *)
+        echo "Unknown argument: $1" >&2
+        exit 1 ;;
+    esac
+  done
+
+  resolve_target_required
+  if [[ -z "${vpn_name}" ]]; then
+    vpn_name="$(vpn_default_name)"
+  fi
+  if [[ ! "${vpn_name}" =~ ^[A-Za-z][A-Za-z0-9_-]{0,14}$ ]]; then
+    echo "Invalid VPN name/interface: ${vpn_name}. Use 1-15 letters, digits, hyphens, or underscores, starting with a letter." >&2
+    exit 1
+  fi
+  if ! bridge_port_valid "${port}"; then
+    echo "Invalid VPN listen port: ${port}" >&2
+    exit 1
+  fi
+  cidrs_file="$(mktemp)"
+  if ! vpn_split_cidrs "${cidrs_raw}" "${cidrs_file}"; then
+    rm -f "${cidrs_file}"
+    exit 1
+  fi
+  if ! vpn_up_loaded "${vpn_name}" "${port}" "${cidrs_file}" "${nat_enabled}"; then
+    rm -f "${cidrs_file}"
+    exit 1
+  fi
+  rm -f "${cidrs_file}"
+}
+
+cmd_vpn_status() {
+  local vpn_name=""
+  local state_file=""
+  local local_interface remote_interface local_status remote_status
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --name)
+        vpn_name="$2"; shift 2 ;;
+      *)
+        echo "Unknown argument: $1" >&2
+        exit 1 ;;
+    esac
+  done
+
+  resolve_target_required
+  require_cmd jq
+  if [[ -z "${vpn_name}" ]]; then
+    vpn_name="$(vpn_default_name)"
+  fi
+  state_file="$(vpn_state_file "${vpn_name}")"
+  if [[ ! -f "${state_file}" ]]; then
+    echo "VPN state not found: ${state_file}" >&2
+    exit 1
+  fi
+  local_interface="$(jq -r '.local_interface' "${state_file}")"
+  remote_interface="$(jq -r '.remote_interface' "${state_file}")"
+  local_status="down"
+  remote_status="unknown"
+  if command -v wg >/dev/null 2>&1 && sudo -n wg show "${local_interface}" >/dev/null 2>&1; then
+    local_status="up"
+  fi
+  if gcloud_ssh "sudo wg show ${remote_interface} >/dev/null 2>&1"; then
+    remote_status="up"
+  else
+    remote_status="down"
+  fi
+  echo "VPN ${vpn_name}"
+  echo "  Instance: ${INSTANCE} ($(provider_label "${PROVIDER}"))"
+  echo "  Local interface: ${local_interface} status=${local_status}"
+  echo "  Remote interface: ${remote_interface} status=${remote_status}"
+  jq -r '"  Route: VM \(.remote_ip) -> local gateway \(.local_ip) for \(.local_cidrs | join(", "))"' "${state_file}"
+}
+
+cmd_vpn_down() {
+  local vpn_name=""
+  local state_file=""
+  local local_config local_interface remote_interface local_nat_script
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --name)
+        vpn_name="$2"; shift 2 ;;
+      *)
+        echo "Unknown argument: $1" >&2
+        exit 1 ;;
+    esac
+  done
+
+  resolve_target_required
+  require_cmd jq
+  if [[ -z "${vpn_name}" ]]; then
+    vpn_name="$(vpn_default_name)"
+  fi
+  state_file="$(vpn_state_file "${vpn_name}")"
+  if [[ ! -f "${state_file}" ]]; then
+    echo "VPN state not found: ${state_file}" >&2
+    exit 1
+  fi
+  local_config="$(jq -r '.local_config' "${state_file}")"
+  local_interface="$(jq -r '.local_interface' "${state_file}")"
+  remote_interface="$(jq -r '.remote_interface' "${state_file}")"
+  local_nat_script="$(jq -r '.local_nat_script' "${state_file}")"
+
+  if [[ -f "${local_config}" ]]; then
+    sudo wg-quick down "${local_config}" >/dev/null 2>&1 || true
+  elif [[ -n "${local_interface}" ]]; then
+    sudo wg-quick down "${local_interface}" >/dev/null 2>&1 || true
+  fi
+  if [[ -x "${local_nat_script}" ]]; then
+    sudo "${local_nat_script}" down "${local_interface}" >/dev/null 2>&1 || true
+  fi
+
+  gcloud_ssh "sudo bash -lc 'systemctl disable --now wg-quick@${remote_interface}.service >/dev/null 2>&1 || true; rm -f /etc/wireguard/${remote_interface}.conf ${REMOTE_VPN_DIR}/${remote_interface}.env ${REMOTE_VPN_DIR}/${remote_interface}.json'" >/dev/null 2>&1 || true
+  rm -f "${local_config}" "${local_nat_script}" "${state_file}"
+  rmdir "$(dirname "${state_file}")" >/dev/null 2>&1 || true
+  echo "VPN ${vpn_name} removed."
+}
+
+cmd_vpn_list() {
+  local state_dir state_file
+  if [[ $# -gt 0 ]]; then
+    echo "Usage: ctfvm vpn [selector] list" >&2
+    exit 1
+  fi
+  resolve_target_required
+  require_cmd jq
+  state_dir="$(vpn_state_dir)"
+  if [[ ! -d "${state_dir}" ]]; then
+    echo "No VPN state found for $(vpn_target_key)."
+    exit 0
+  fi
+  for state_file in "${state_dir}"/*.json; do
+    [[ -e "${state_file}" ]] || continue
+    jq -r '"\(.name): \(.remote_ip) routes \(.local_cidrs | join(", ")), updated \(.updated_at)"' "${state_file}"
+  done
+}
+
+cmd_vpn() {
+  parse_selector_args "$@"
+  set -- ${PARSED_SELECTOR_ARGS[@]+"${PARSED_SELECTOR_ARGS[@]}"}
+
+  if [[ $# -lt 1 ]]; then
+    echo "Usage: ctfvm vpn [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--provider gcp|digitalocean --zone <zone-or-region> --project <project>]] <up|status|down|list> [args...]" >&2
+    exit 1
+  fi
+
+  local subcmd="$1"
+  shift
+  case "${subcmd}" in
+    up)
+      cmd_vpn_up "$@" ;;
+    status)
+      cmd_vpn_status "$@" ;;
+    down)
+      cmd_vpn_down "$@" ;;
+    list)
+      cmd_vpn_list "$@" ;;
+    *)
+      echo "Unknown vpn subcommand: ${subcmd}" >&2
+      echo "Supported subcommands: up, status, down, list" >&2
+      exit 1 ;;
+  esac
 }
 
 bridge_target_key() {
@@ -1887,6 +2483,10 @@ cmd_start() {
   local boot_image=""
   local boot_image_family=""
   local boot_image_project=""
+  local auto_vpn="${CTFVM_VPN:-1}"
+  local vpn_port="${DEFAULT_VPN_PORT}"
+  local vpn_cidrs_raw="${DEFAULT_VPN_CIDRS}"
+  local vpn_nat="1"
   local env_do_ssh_keys=""
   local -a do_ssh_keys=()
   local -a create_args=()
@@ -1947,6 +2547,23 @@ cmd_start() {
         local_image_archive="$2"; shift 2 ;;
       --toolbox-variant)
         toolbox_variant="$2"; shift 2 ;;
+      --vpn)
+        auto_vpn="1"; shift ;;
+      --no-vpn)
+        auto_vpn="0"; shift ;;
+      --vpn-port)
+        vpn_port="$2"; shift 2 ;;
+      --vpn-local-cidr)
+        if [[ "${vpn_cidrs_raw}" == "${DEFAULT_VPN_CIDRS}" ]]; then
+          vpn_cidrs_raw="$2"
+        else
+          vpn_cidrs_raw="${vpn_cidrs_raw},$2"
+        fi
+        shift 2 ;;
+      --vpn-local-cidrs)
+        vpn_cidrs_raw="$2"; shift 2 ;;
+      --vpn-no-nat)
+        vpn_nat="0"; shift ;;
       *)
         echo "Unknown argument: $1" >&2
         exit 1 ;;
@@ -1955,6 +2572,14 @@ cmd_start() {
 
   if [[ "${toolbox_variant}" != "lean" && "${toolbox_variant}" != "full" ]]; then
     echo "Invalid toolbox variant: ${toolbox_variant}. Use lean or full." >&2
+    exit 1
+  fi
+  if [[ "${auto_vpn}" != "0" && "${auto_vpn}" != "1" ]]; then
+    echo "Invalid CTFVM_VPN value: ${auto_vpn}. Use 0 or 1." >&2
+    exit 1
+  fi
+  if ! bridge_port_valid "${vpn_port}"; then
+    echo "Invalid VPN port: ${vpn_port}" >&2
     exit 1
   fi
 
@@ -2050,6 +2675,7 @@ cmd_start() {
 
   local run_id instance challenge_slug prompt_tmp startup_tmp upload_tmp ip auth_sync toolbox_image_source ssh_keys_csv
   local control_port control_user control_password
+  local vpn_status="disabled"
   local remote_upload_dir="/tmp/ctfvm-upload"
   run_id="$(date +%Y%m%d-%H%M%S)"
   challenge_slug="$(instance_slug_from_challenge_dir "${challenge_dir}")"
@@ -2145,6 +2771,8 @@ Objectives:
 - Keep a concise running summary in /workspace/findings.md.
 - Environment facts:
 - The working tree is /workspace and the challenge is in /workspace/challenge.
+- Local-network challenge services are expected to be reachable over the managed CTFVM VPN at their original LAN/VPN IPs when the run was started with VPN enabled.
+- VPN connection details, when present, are in /workspace/vpn/*.env and /workspace/vpn/*.json.
 - Python tooling is preinitialized in /workspace/.venv and `python`, `pip`, and `uv` should be on PATH.
 - Prefer `uv` for Python work: use `uv run`, `uv pip install`, or `/workspace/.venv/bin/python` explicitly when useful.
 - Do not assume Python or a package manager is missing without checking `command -v python python3 pip uv`.
@@ -2188,6 +2816,8 @@ PROMPT
   INSTANCE="${instance}"
   ZONE="${zone}"
   PROJECT="${project}"
+  RUN_ID="${run_id}"
+  REMOTE_RUN_DIR="/home/ctf/run"
   IP=""
   CONTROL_SCHEME="http"
   CONTROL_HOST=""
@@ -2246,10 +2876,6 @@ PROMPT
   start_remote_toolbox_container "${toolbox_variant}"
   gcloud_ssh "rm -rf ${remote_upload_dir}"
 
-  echo "Launching tmux supervisor..."
-  gcloud_ssh "sudo -u ctf bash -lc 'tmux kill-session -t ctf >/dev/null 2>&1 || true'"
-  launch_supervisor_tmux "/home/ctf/run" "/home/ctf/run/challenge_prompt.txt"
-
   refresh_instance_ip
   ip="${IP:-}"
   if [[ "${provider}" == "digitalocean" && -z "${ZONE}" ]]; then
@@ -2260,6 +2886,25 @@ PROMPT
   fi
 
   write_state "${provider}" "${instance}" "${ZONE}" "${project}" "${machine_type}" "${run_id}" "$(cd "${challenge_dir}" && pwd)" "${timeout_min}" "" "${auth_sync}" "${no_auth_sync}" "${ip}" "${boot_image}" "${boot_image_family}" "${boot_image_project}" "${toolbox_image_ref}" "${toolbox_image_source}" "${CONTROL_SCHEME}" "${CONTROL_HOST:-${ip}}" "${CONTROL_PORT}" "${CONTROL_USER}" "${CONTROL_PASSWORD}"
+
+  if [[ "${auto_vpn}" == "1" ]]; then
+    local vpn_cidrs_file vpn_name
+    vpn_status="failed"
+    vpn_cidrs_file="$(mktemp)"
+    vpn_name="$(vpn_default_name)"
+    echo "Starting automated local-network VPN (${vpn_name})..."
+    if vpn_split_cidrs "${vpn_cidrs_raw}" "${vpn_cidrs_file}" && vpn_up_loaded "${vpn_name}" "${vpn_port}" "${vpn_cidrs_file}" "${vpn_nat}"; then
+      vpn_status="enabled"
+    else
+      echo "VPN setup failed. The VM is running, but agents may not reach local-network challenges until you fix the issue and run:" >&2
+      echo "  ${SCRIPT_DIR}/ctfvm vpn --run-id ${run_id} up" >&2
+    fi
+    rm -f "${vpn_cidrs_file}"
+  fi
+
+  echo "Launching tmux supervisor..."
+  gcloud_ssh "sudo -u ctf bash -lc 'tmux kill-session -t ctf >/dev/null 2>&1 || true'"
+  launch_supervisor_tmux "/home/ctf/run" "/home/ctf/run/challenge_prompt.txt"
 
   rm -f "${prompt_tmp}" "${startup_tmp}"
   rm -rf "${upload_tmp}"
@@ -2279,6 +2924,7 @@ PROMPT
   else
     echo "  Toolbox image: local archive ${local_image_archive}"
   fi
+  echo "  VPN: ${vpn_status}"
   echo "  Attach: ${SCRIPT_DIR}/ctfvm attach --run-id ${run_id}"
   echo "  Logs:   ${SCRIPT_DIR}/ctfvm logs --run-id ${run_id}"
 }
@@ -3208,6 +3854,37 @@ cmd_destroy() {
     fi
   }
 
+  cleanup_local_vpn_for_instance() {
+    local inst="$1"
+    local zn="$2"
+    local proj="$3"
+    local f fi_inst fi_zone fi_proj local_config local_interface local_nat_script
+    [[ -d "${VPN_DIR}" ]] || return 0
+    for f in "${VPN_DIR}"/*/*.json; do
+      [[ -e "${f}" ]] || continue
+      fi_inst="$(json_get_from_file instance "${f}" || true)"
+      fi_zone="$(json_get_from_file zone "${f}" || true)"
+      fi_proj="$(json_get_from_file project "${f}" || true)"
+      if [[ "${fi_inst}" == "${inst}" && ( -z "${fi_zone}" || -z "${zn}" || "${fi_zone}" == "${zn}" ) && ( -z "${fi_proj}" || -z "${proj}" || "${fi_proj}" == "${proj}" ) ]]; then
+        local_config="$(json_get_from_file local_config "${f}" || true)"
+        local_interface="$(json_get_from_file local_interface "${f}" || true)"
+        local_nat_script="$(json_get_from_file local_nat_script "${f}" || true)"
+        if command -v sudo >/dev/null 2>&1; then
+          if [[ -f "${local_config}" ]]; then
+            sudo wg-quick down "${local_config}" >/dev/null 2>&1 || true
+          elif [[ -n "${local_interface}" ]]; then
+            sudo wg-quick down "${local_interface}" >/dev/null 2>&1 || true
+          fi
+          if [[ -x "${local_nat_script}" ]]; then
+            sudo "${local_nat_script}" down "${local_interface}" >/dev/null 2>&1 || true
+          fi
+        fi
+        rm -f "${local_config}" "${local_nat_script}" "${f}"
+        rmdir "$(dirname "${f}")" >/dev/null 2>&1 || true
+      fi
+    done
+  }
+
   destroy_one_instance() {
     local provider="$1"
     local inst="$2"
@@ -3224,6 +3901,7 @@ cmd_destroy() {
     ZONE="${zn}"
     PROJECT="${proj}"
     IP="${inst_ip}"
+    cleanup_local_vpn_for_instance "${inst}" "${zn}" "${proj}"
     if [[ "${no_wipe}" == "0" ]]; then
       echo "Wiping VM Codex session material before deletion: ${inst} (${zn}, $(provider_label "${provider}"))"
       gcloud_ssh "sudo -u ctf bash -lc '
@@ -3300,10 +3978,10 @@ cmd_destroy() {
       exit 1
     fi
   elif [[ -n "${run_id_selector}" ]]; then
-    load_state_required_for_selector "${run_id_selector}" ""
+    load_state_required_for_selector "${run_id_selector}" "" ""
     local_selector_used="1"
   elif [[ -n "${instance_override}" && -z "${zone_override}" && -z "${project_override}" ]]; then
-    load_state_required_for_selector "" "${instance_override}"
+    load_state_required_for_selector "" "${instance_override}" ""
     local_selector_used="1"
   elif [[ -n "${instance_override}" ]]; then
     PROVIDER="$(normalize_provider "${provider_override:-$(default_provider)}")"
@@ -3343,6 +4021,8 @@ cmd_destroy() {
       clear_state="1"
     fi
   fi
+
+  cleanup_local_vpn_for_instance "${INSTANCE}" "${ZONE}" "${PROJECT}"
 
   if [[ "${no_wipe}" == "0" ]]; then
     echo "Wiping VM Codex session material before deletion..."
@@ -3476,7 +4156,7 @@ cmd_cleanup_state() {
 usage() {
   cat <<USAGE
 Usage:
-  ctfvm start --provider gcp|digitalocean --dir <challenge-folder> [--desc <text> | --desc-file <path>] [--ideas <text>] [--timeout-min 1440] [--machine-type e2-standard-4 | --size-slug s-4vcpu-8gb] [--zone <zone-or-region>] [--project <project>] [--ssh-key <fingerprint>] [--toolbox-image <artifact-registry-ref> | --toolbox-location <region> --toolbox-repository <repo> --toolbox-image-name <name> --toolbox-tag <tag> | --use-local-image [--local-image-archive <path>]] [--toolbox-variant lean|full] [--boot-image <image> | --boot-image-family <family> [--boot-image-project <project>]] [--no-auth-sync]
+  ctfvm start --provider gcp|digitalocean --dir <challenge-folder> [--desc <text> | --desc-file <path>] [--ideas <text>] [--timeout-min 1440] [--machine-type e2-standard-4 | --size-slug s-4vcpu-8gb] [--zone <zone-or-region>] [--project <project>] [--ssh-key <fingerprint>] [--toolbox-image <artifact-registry-ref> | --toolbox-location <region> --toolbox-repository <repo> --toolbox-image-name <name> --toolbox-tag <tag> | --use-local-image [--local-image-archive <path>]] [--toolbox-variant lean|full] [--boot-image <image> | --boot-image-family <family> [--boot-image-project <project>]] [--vpn | --no-vpn] [--vpn-local-cidr <cidr> ... | --vpn-local-cidrs <csv>] [--vpn-port 51820] [--vpn-no-nat] [--no-auth-sync]
   ctfvm image build-local [--archive <path>] [--platform linux/amd64] [--variant lean|full]
   ctfvm image push-registry --provider gcp|digitalocean [--project <project>] [--location <region>] [--repository <repo>] [--image-name <name>] [--tag <tag>] [--registry-tier basic] [--platform linux/amd64] [--variant lean|full]
   ctfvm image push-ar [--project <project>] [--location <region>] [--repository <repo>] [--image-name <name>] [--tag <tag>] [--platform linux/amd64] [--variant lean|full]
@@ -3488,6 +4168,7 @@ Usage:
   ctfvm logs [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--provider gcp|digitalocean --zone <zone-or-region> --project <project>]]
   ctfvm monitor [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--provider gcp|digitalocean --zone <zone-or-region> --project <project>]]
   ctfvm ui [--host 127.0.0.1] [--port 8765]
+  ctfvm vpn [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--provider gcp|digitalocean --zone <zone-or-region> --project <project>]] <up|status|down|list> [args...]
   ctfvm bridge [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--provider gcp|digitalocean --zone <zone-or-region> --project <project>]] <up|status|down|list> [args...]
   ctfvm mcp [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--provider gcp|digitalocean --zone <zone-or-region> --project <project>]] [--restart-supervisor] <list|get|add|remove|login|logout> [args...]
   ctfvm inject [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--provider gcp|digitalocean --zone <zone-or-region> --project <project>]] --msg <text>
@@ -3524,6 +4205,7 @@ main() {
     logs) cmd_logs "$@" ;;
     monitor) cmd_monitor "$@" ;;
     ui) cmd_ui "$@" ;;
+    vpn) cmd_vpn "$@" ;;
     bridge) cmd_bridge "$@" ;;
     mcp) cmd_mcp "$@" ;;
     inject) cmd_inject "$@" ;;

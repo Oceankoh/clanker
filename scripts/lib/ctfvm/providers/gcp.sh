@@ -133,6 +133,39 @@ ctfvm_provider_gcp_create_instance() {
   gcloud "${create_args[@]}"
 }
 
+ctfvm_provider_gcp_prepare_vpn_ingress() {
+  local instance="$1"
+  local zone="$2"
+  local project="$3"
+  local port="$4"
+  local network_url network rule tags
+
+  network_url="$(gcloud compute instances describe "${instance}" --zone "${zone}" --project "${project}" --format='get(networkInterfaces[0].network)' 2>/dev/null || true)"
+  network="${network_url##*/}"
+  if [[ -z "${network}" ]]; then
+    network="${CTFVM_GCP_NETWORK:-default}"
+  fi
+
+  tags="$(gcloud compute instances describe "${instance}" --zone "${zone}" --project "${project}" --format='value(tags.items)' 2>/dev/null | tr ';' ',' | tr '\t' ',' | sed -E 's/,+/,/g; s/^,+//; s/,+$//' || true)"
+  rule="ctfvm-wireguard-udp-${port}"
+  if gcloud compute firewall-rules describe "${rule}" --project "${project}" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  local -a args=(
+    compute firewall-rules create "${rule}"
+    --project "${project}"
+    --network "${network}"
+    --allow "udp:${port}"
+    --source-ranges "0.0.0.0/0"
+    --description "CTFVM WireGuard ingress for remote agents"
+  )
+  if [[ -n "${tags}" ]]; then
+    args+=(--target-tags "${tags}")
+  fi
+  gcloud "${args[@]}" >/dev/null
+}
+
 ctfvm_provider_gcp_delete_instance() {
   local instance="$1"
   local zone="$2"

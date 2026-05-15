@@ -5,6 +5,8 @@ Objectives:
 - Keep a concise running summary in /workspace/findings.md.
 - Environment facts:
 - The working tree is /workspace and the challenge is in /workspace/challenge.
+- Local-network challenge services are expected to be reachable over the managed CTFVM VPN at their original LAN/VPN IPs when the run was started with VPN enabled.
+- VPN connection details, when present, are in /workspace/vpn/*.env and /workspace/vpn/*.json.
 - Python tooling is preinitialized in /workspace/.venv and `python`, `pip`, and `uv` should be on PATH.
 - Prefer `uv` for Python work: use `uv run`, `uv pip install`, or `/workspace/.venv/bin/python` explicitly when useful.
 - Do not assume Python or a package manager is missing without checking `command -v python python3 pip uv`.

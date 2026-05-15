@@ -216,6 +216,17 @@ ctfvm_provider_digitalocean_create_instance() {
   ctfvm_doctl "${args[@]}" >/dev/null
 }
 
+ctfvm_provider_digitalocean_prepare_vpn_ingress() {
+  local _instance="$1"
+  local _zone="$2"
+  local _project="$3"
+  local _port="$4"
+  # DigitalOcean droplets are reachable on their public interface unless the
+  # user attaches a separate cloud firewall. In that case, allow this UDP port
+  # on the user's managed firewall/tag policy.
+  return 0
+}
+
 ctfvm_provider_digitalocean_delete_instance() {
   local instance="$1"
   ctfvm_doctl compute droplet delete "${instance}" --force

@@ -52,9 +52,9 @@ From repo root:
 ./scripts/ctfvm shell
 ./scripts/ctfvm vscode
 ./scripts/ctfvm monitor
-./scripts/ctfvm bridge up --config ./bridge.json
-./scripts/ctfvm bridge status
-./scripts/ctfvm bridge down
+./scripts/ctfvm vpn status
+./scripts/ctfvm vpn up --local-cidr 192.168.56.0/24
+./scripts/ctfvm vpn down
 ./scripts/ctfvm mcp add ida --url http://10.1.1.8:8080/mcp
 ./scripts/ctfvm ui
 ./scripts/ctfvm inject --msg "Try the heap unlink path"
@@ -236,7 +236,8 @@ Notes:
    - optional default `ida` MCP server when `CTFVM_DEFAULT_IDA_MCP_URL` is set
 6. Pulls the configured `ctf-toolbox` image from the configured remote registry by default, or loads a local archive when `--use-local-image` is set.
 7. Launches `ctf-toolbox` container.
-8. Starts `tmux` session `ctf` with:
+8. Starts the managed WireGuard VPN by default so the VM and container can reach local-network challenge services at their original LAN/VPN IPs.
+9. Starts `tmux` session `ctf` with:
 - `supervisor` window only (interactive Codex)
 - no extra windows by default
 
@@ -382,11 +383,55 @@ If the supervisor session is already running and you want it to pick up the new 
 
 Important:
 - The MCP URL is resolved from inside the VM/container, not from your laptop.
-- If `10.1.1.8` is only reachable on your local LAN or VPN, the VM will not be able to use it unless you expose or tunnel it to something the VM can reach.
+- If `10.1.1.8` is only reachable on your local LAN or VPN, keep the managed CTFVM VPN enabled so the VM can route to it.
 - `ctfvm mcp` is a thin wrapper around `codex mcp`, so standard Codex flags like `--url` and `--bearer-token-env-var` still work.
 
-## Internal-network bridges
-For TCP-only challenge services that are reachable from your laptop but not from the cloud VM, `ctfvm bridge` can build an outbound-only relay path through your laptop.
+## Local-network VPN
+CTFVM starts a WireGuard VPN automatically by default. The VM routes RFC1918 local-network ranges through your laptop, and the laptop enables forwarding plus NAT so challenge services can reply without custom routes on your LAN.
+
+Default routed CIDRs:
+- `10.0.0.0/8`
+- `172.16.0.0/12`
+- `192.168.0.0/16`
+
+Start with defaults:
+
+```bash
+./scripts/ctfvm start --dir ./challenge --desc "..."
+```
+
+Customize or disable:
+
+```bash
+./scripts/ctfvm start --dir ./challenge --vpn-local-cidr 192.168.56.0/24
+./scripts/ctfvm start --dir ./challenge --vpn-local-cidrs "10.10.0.0/16,192.168.1.0/24"
+./scripts/ctfvm start --dir ./challenge --no-vpn
+```
+
+Manage an existing run:
+
+```bash
+./scripts/ctfvm vpn status
+./scripts/ctfvm vpn up --local-cidr 192.168.56.0/24
+./scripts/ctfvm vpn down
+```
+
+Generated files:
+- Local VPN state and configs: `.ctfvm/vpn/<run-id>/`
+- Remote VPN env file: `/home/ctf/run/vpn/<interface>.env`
+- Remote VPN state: `/home/ctf/run/vpn/<interface>.json`
+
+Operational notes:
+- Local prerequisites are `wg`, `wg-quick`, `sudo`, `jq`, and `base64`; Linux NAT additionally needs `iptables`.
+- `ctfvm start` may ask for local sudo so `wg-quick` can create the interface and NAT rules. When launched from the web UI, run `sudo -v` in a terminal first or start with `--no-vpn`, because background UI jobs cannot show a password prompt.
+- GCP runs create a UDP firewall rule for the WireGuard port, default `51820`.
+- DigitalOcean droplets are assumed publicly reachable unless you attach your own cloud firewall; if you do, allow the WireGuard UDP port.
+- Set `CTFVM_VPN=0` or pass `--no-vpn` to skip automatic VPN startup.
+- Set `CTFVM_VPN_CIDRS` or pass `--vpn-local-cidrs` to change the default routes.
+- Set `CTFVM_VPN_EGRESS_IF` if automatic local egress-interface detection picks the wrong interface.
+
+## Legacy TCP bridges
+`ctfvm bridge` remains available for older TCP-only workflows, but the preferred path is the managed VPN above.
 
 Example config:
 

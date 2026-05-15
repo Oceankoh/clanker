@@ -52,6 +52,7 @@ apt-get install -y \
   python3 \
   socat \
   tmux \
+  wireguard-tools \
   docker.io
 
 install_codex_prefix() {
