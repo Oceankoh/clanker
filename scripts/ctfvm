@@ -10,7 +10,8 @@ CACHE_DIR="${STATE_DIR}/cache"
 BRIDGES_DIR="${STATE_DIR}/bridges"
 VPN_DIR="${STATE_DIR}/vpn"
 CONFIG_FILE="${STATE_DIR}/config.json"
-DEFAULT_IMAGE_ARCHIVE="${CACHE_DIR}/ctf-toolbox.tar.gz"
+LEGACY_IMAGE_ARCHIVE="${CACHE_DIR}/ctf-toolbox.tar.gz"
+DEFAULT_IMAGE_ARCHIVE="${CACHE_DIR}/ctf-toolbox-lean.tar.gz"
 DEFAULT_DO_PROJECT="digitalocean"
 DEFAULT_CONTROL_PORT="${CTFVM_CONTROL_PORT:-443}"
 REMOTE_BRIDGE_DIR="/home/ctf/run/bridge"
@@ -36,6 +37,40 @@ DEFAULT_VPN_PORT="${CTFVM_VPN_PORT:-${DEFAULT_VPN_PORT}}"
 DEFAULT_VPN_CIDRS="${CTFVM_VPN_CIDRS:-${DEFAULT_VPN_CIDRS}}"
 DEFAULT_PROVIDER="${CTFVM_PROVIDER:-gcp}"
 DEFAULT_AGENT="${CTFVM_AGENT:-codex}"
+
+default_image_archive_for_variant() {
+  local variant="${1:-lean}"
+  case "${variant}" in
+    lean|full) ;;
+    *) variant="lean" ;;
+  esac
+  printf '%s\n' "${CACHE_DIR}/ctf-toolbox-${variant}.tar.gz"
+}
+
+# Pick the archive path to use given the user's variant choice. Precedence:
+#   1. CTFVM_LOCAL_IMAGE_ARCHIVE env (explicit override)
+#   2. Variant-specific cache file if it exists
+#   3. Legacy ${CACHE_DIR}/ctf-toolbox.tar.gz if it exists (back-compat)
+#   4. Variant-specific path (even if missing — so callers can build to it)
+resolve_local_image_archive() {
+  local variant="${1:-lean}"
+  if [[ -n "${CTFVM_LOCAL_IMAGE_ARCHIVE:-}" ]]; then
+    printf '%s\n' "${CTFVM_LOCAL_IMAGE_ARCHIVE}"
+    return 0
+  fi
+  local variant_path legacy_path
+  variant_path="$(default_image_archive_for_variant "${variant}")"
+  legacy_path="${LEGACY_IMAGE_ARCHIVE}"
+  if [[ -f "${variant_path}" ]]; then
+    printf '%s\n' "${variant_path}"
+    return 0
+  fi
+  if [[ -f "${legacy_path}" ]]; then
+    printf '%s\n' "${legacy_path}"
+    return 0
+  fi
+  printf '%s\n' "${variant_path}"
+}
 
 env_first_set() {
   local name=""
@@ -2401,8 +2436,8 @@ cmd_image() {
 
   local provider
   provider="$(default_provider)"
-  local archive_path
-  archive_path="$(resolve_repo_path "${CTFVM_LOCAL_IMAGE_ARCHIVE:-${DEFAULT_IMAGE_ARCHIVE}}")"
+  local archive_path=""
+  local archive_explicit="0"
   local platform="linux/amd64"
   local variant="${CTFVM_TOOLBOX_VARIANT:-lean}"
   local project=""
@@ -2417,7 +2452,7 @@ cmd_image() {
       --provider)
         provider="$(normalize_provider "$2")"; shift 2 ;;
       --archive)
-        archive_path="$2"; shift 2 ;;
+        archive_path="$2"; archive_explicit="1"; shift 2 ;;
       --platform)
         platform="$2"; shift 2 ;;
       --variant)
@@ -2447,6 +2482,16 @@ cmd_image() {
     exit 1
   fi
 
+  if [[ "${archive_explicit}" == "0" ]]; then
+    case "${subcmd}" in
+      build-local)
+        archive_path="$(default_image_archive_for_variant "${variant}")" ;;
+      status)
+        archive_path="$(resolve_local_image_archive "${variant}")" ;;
+      *)
+        archive_path="$(resolve_local_image_archive "${variant}")" ;;
+    esac
+  fi
   archive_path="$(resolve_repo_path "${archive_path}")"
 
   case "${subcmd}" in
@@ -2512,10 +2557,28 @@ cmd_image() {
       echo "Saved as default ${provider} ${variant} toolbox image in ${CONFIG_FILE}"
       ;;
     status)
-      if [[ -f "${archive_path}" ]]; then
-        ls -lh "${archive_path}"
+      if [[ "${archive_explicit}" == "1" ]]; then
+        if [[ -f "${archive_path}" ]]; then
+          ls -lh "${archive_path}"
+        else
+          echo "No local image archive at ${archive_path}"
+        fi
       else
-        echo "No local image archive at ${archive_path}"
+        local v vpath
+        echo "Local image archives:"
+        for v in lean full; do
+          vpath="$(default_image_archive_for_variant "${v}")"
+          if [[ -f "${vpath}" ]]; then
+            printf '  %-5s ' "${v}"
+            ls -lh "${vpath}" | awk '{printf "%s  %s\n", $5, $NF}'
+          else
+            printf '  %-5s (not built — %s)\n' "${v}" "${vpath}"
+          fi
+        done
+        if [[ -f "${LEGACY_IMAGE_ARCHIVE}" ]]; then
+          printf '  %-5s ' "legacy"
+          ls -lh "${LEGACY_IMAGE_ARCHIVE}" | awk '{printf "%s  %s\n", $5, $NF}'
+        fi
       fi
       if [[ -f "${CONFIG_FILE}" ]]; then
         local p configured_ref configured_ref_lean configured_ref_full configured_project configured_location configured_repository configured_image_name configured_tag_lean configured_tag_full
@@ -2586,7 +2649,8 @@ cmd_start() {
   local no_auth_sync="0"
   local force_remote_build="0"
   local use_local_image="0"
-  local local_image_archive
+  local local_image_archive=""
+  local local_image_archive_explicit="0"
   local toolbox_variant="${CTFVM_TOOLBOX_VARIANT:-lean}"
   local toolbox_image_ref=""
   local toolbox_location=""
@@ -2604,7 +2668,6 @@ cmd_start() {
   local -a do_ssh_keys=()
   local -a create_args=()
 
-  local_image_archive="$(resolve_repo_path "${CTFVM_LOCAL_IMAGE_ARCHIVE:-${DEFAULT_IMAGE_ARCHIVE}}")"
   env_do_ssh_keys="$(env_first_set CTFVM_DO_SSH_KEYS CTFVM_DO_SSH_KEY)"
   if [[ -n "${env_do_ssh_keys}" ]]; then
     IFS=',' read -r -a do_ssh_keys <<< "${env_do_ssh_keys}"
@@ -2659,7 +2722,7 @@ cmd_start() {
       --use-local-image)
         use_local_image="1"; shift ;;
       --local-image-archive)
-        local_image_archive="$2"; shift 2 ;;
+        local_image_archive="$2"; local_image_archive_explicit="1"; shift 2 ;;
       --toolbox-variant)
         toolbox_variant="$2"; shift 2 ;;
       --vpn)
@@ -2698,6 +2761,9 @@ cmd_start() {
     exit 1
   fi
 
+  if [[ "${local_image_archive_explicit}" == "0" ]]; then
+    local_image_archive="$(resolve_local_image_archive "${toolbox_variant}")"
+  fi
   local_image_archive="$(resolve_repo_path "${local_image_archive}")"
 
   if [[ "${use_local_image}" == "1" && -n "${toolbox_image_ref}" ]]; then
@@ -2814,11 +2880,11 @@ cmd_start() {
   if [[ "${use_local_image}" == "1" ]]; then
     toolbox_image_source="local-archive"
     if [[ ! -f "${local_image_archive}" ]]; then
-      echo "Local image archive not found: ${local_image_archive}" >&2
-      echo "Build it with: ${SCRIPT_DIR}/ctfvm image build-local [--archive <path>] [--variant ${toolbox_variant}]" >&2
+      echo "Local image archive not found for variant ${toolbox_variant}: ${local_image_archive}" >&2
+      echo "Build it with: ${SCRIPT_DIR}/ctfvm image build-local --variant ${toolbox_variant}" >&2
       exit 1
     fi
-    echo "Using local toolbox image archive: ${local_image_archive}"
+    echo "Using local toolbox image archive (${toolbox_variant}): ${local_image_archive}"
   else
     case "${provider}" in
       gcp)

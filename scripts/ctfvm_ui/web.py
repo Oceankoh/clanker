@@ -202,6 +202,7 @@ button.ghost, .button-link.ghost {
 .status-text { font-size: 12px; color: var(--muted); min-height: 16px; }
 .status-text.ok { color: var(--green); }
 .status-text.warn { color: var(--red); }
+.hint.warn, .mono-muted.warn { color: var(--red); }
 .pill {
   display: inline-flex;
   align-items: center;
@@ -549,10 +550,11 @@ def render_overview_page() -> str:
           </div>
           <div class="field">
             <label for="spawnVariant">Toolbox Variant</label>
-            <select id="spawnVariant">
+            <select id="spawnVariant" onchange="updateLocalArchiveHint()">
               <option value="lean">lean</option>
               <option value="full">full</option>
             </select>
+            <div id="spawnVariantHint" class="hint mono-muted"></div>
           </div>
           <div class="field">
             <label for="spawnBatchMode">Spawn Mode</label>
@@ -603,11 +605,12 @@ def render_overview_page() -> str:
         </div>
         <div id="spawnBatchHint" class="hint" style="display:none;">Batch mode reads each immediate child directory under the root path as one challenge. It loads `description.txt` and `ideas.txt` from each child automatically and applies the shared flag format to all of them.</div>
         <div class="toggle-row">
-          <input type="checkbox" id="spawnUseLocalImage" />
+          <input type="checkbox" id="spawnUseLocalImage" onchange="updateLocalArchiveHint()" />
           <label for="spawnUseLocalImage">Use cached local toolbox archive</label>
           <input type="checkbox" id="spawnNoAuthSync" />
           <label for="spawnNoAuthSync">Skip agent auth sync</label>
         </div>
+        <div id="spawnLocalArchiveStatus" class="hint mono-muted"></div>
         <div class="action-row">
           <button class="primary" onclick="spawnRun()">Start VM</button>
           <span id="spawnStatus" class="status-text"></span>
@@ -682,6 +685,8 @@ def render_overview_page() -> str:
       return 'unknown';
     }
 
+    let latestLocalArchives = null;
+
     function applySpawnDefaults(defaults, options={}) {
       const force = !!options.force;
       const source = options.source || 'network';
@@ -697,10 +702,68 @@ def render_overview_page() -> str:
       document.getElementById('spawnZone').value = provider === 'gcp' ? (defaults.gcp_zone || '') : (defaults.do_region || '');
       document.getElementById('spawnMachineType').value = defaults.gcp_machine_type || '';
       document.getElementById('spawnSizeSlug').value = defaults.do_size_slug || '';
+      latestLocalArchives = defaults.local_archives || null;
       applyCachedAgent(defaults.agent || 'codex');
       applyCachedFlagFormat();
       syncSpawnProviderFields();
       syncSpawnModeFields();
+      updateLocalArchiveHint();
+    }
+
+    function formatBytes(n) {
+      if (!n || n <= 0) return '';
+      const units = ['B', 'KB', 'MB', 'GB'];
+      let i = 0; let v = n;
+      while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+      return v.toFixed(v < 10 ? 1 : 0) + ' ' + units[i];
+    }
+
+    function archiveEntry(variant) {
+      if (!latestLocalArchives) return null;
+      return latestLocalArchives[variant] || null;
+    }
+
+    function updateLocalArchiveHint() {
+      const variantSel = document.getElementById('spawnVariant');
+      const variantHint = document.getElementById('spawnVariantHint');
+      const statusEl = document.getElementById('spawnLocalArchiveStatus');
+      const useLocal = document.getElementById('spawnUseLocalImage');
+      if (!variantSel || !variantHint || !statusEl) return;
+      const variant = variantSel.value || 'lean';
+      const entry = archiveEntry(variant);
+      const legacy = archiveEntry('legacy');
+      if (entry && entry.present) {
+        const size = formatBytes(entry.size);
+        variantHint.textContent = 'cached locally' + (size ? ' (' + size + ')' : '');
+      } else if (legacy && legacy.present) {
+        variantHint.textContent = 'using legacy archive as fallback — rebuild with `scripts/ctfvm image build-local --variant ' + variant + '`';
+      } else if (latestLocalArchives) {
+        variantHint.textContent = 'not built locally — `scripts/ctfvm image build-local --variant ' + variant + '`';
+      } else {
+        variantHint.textContent = '';
+      }
+      if (!latestLocalArchives) {
+        statusEl.textContent = '';
+        return;
+      }
+      const parts = [];
+      for (const v of ['lean', 'full']) {
+        const e = archiveEntry(v);
+        if (e && e.present) {
+          parts.push(v + ' ✓' + (e.size ? ' ' + formatBytes(e.size) : ''));
+        } else {
+          parts.push(v + ' ✗');
+        }
+      }
+      const legacy = archiveEntry('legacy');
+      if (legacy && legacy.present) {
+        parts.push('legacy ✓ (fallback)');
+      }
+      const useChecked = !!(useLocal && useLocal.checked);
+      const hasFallback = legacy && legacy.present;
+      const missing = useChecked && !(entry && entry.present) && !hasFallback;
+      statusEl.textContent = 'Local archives: ' + parts.join(' • ');
+      statusEl.classList.toggle('warn', missing);
     }
 
     function applyCachedFlagFormat() {
@@ -1048,6 +1111,10 @@ def render_overview_page() -> str:
         const d = await r.json();
         applySpawnDefaults(d.spawn_defaults || {}, { force: defaultsHydratedFromCache, source: 'network' });
         defaultsHydratedFromCache = false;
+        if (d.spawn_defaults && d.spawn_defaults.local_archives) {
+          latestLocalArchives = d.spawn_defaults.local_archives;
+          updateLocalArchiveHint();
+        }
         const runsSignature = buildRunsSignature(d.runs || [], d.current_run_id || '');
         if (runsSignature !== lastRunsSignature) {
           renderRuns(d.runs || [], d.current_run_id || '');

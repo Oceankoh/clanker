@@ -17,6 +17,7 @@ from .common import (
     MAX_PANE_TAIL_BYTES,
     ROOT,
     RUNS_DIR,
+    STATE_DIR,
     STATE_FILE,
     load_json,
     state_valid,
@@ -292,7 +293,37 @@ class CTFVMUIService:
             "gcp_machine_type": str(os.environ.get("CTFVM_GCP_MACHINE_TYPE") or "e2-standard-4"),
             "do_region": str(os.environ.get("CTFVM_DO_REGION") or "sgp1"),
             "do_size_slug": str(os.environ.get("CTFVM_DO_SIZE_SLUG") or "s-4vcpu-8gb"),
+            "local_archives": self._local_archive_status(),
         }
+
+    def _local_archive_status(self):
+        cache_dir = STATE_DIR / "cache"
+        override = os.environ.get("CTFVM_LOCAL_IMAGE_ARCHIVE")
+        result = {}
+        for variant in ("lean", "full"):
+            path = Path(override) if override else (cache_dir / f"ctf-toolbox-{variant}.tar.gz")
+            entry = {"path": str(path), "present": False, "size": 0, "mtime": None}
+            try:
+                stat = path.stat()
+                entry["present"] = True
+                entry["size"] = int(stat.st_size)
+                entry["mtime"] = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
+            result[variant] = entry
+        legacy_path = cache_dir / "ctf-toolbox.tar.gz"
+        legacy_entry = {"path": str(legacy_path), "present": False, "size": 0, "mtime": None}
+        try:
+            stat = legacy_path.stat()
+            legacy_entry["present"] = True
+            legacy_entry["size"] = int(stat.st_size)
+            legacy_entry["mtime"] = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
+        except (FileNotFoundError, OSError):
+            pass
+        result["legacy"] = legacy_entry
+        return result
 
     def choose_local_directory(self, current_path="", batch_mode=False):
         if os.uname().sysname.lower() != "darwin":
