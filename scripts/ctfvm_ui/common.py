@@ -28,6 +28,8 @@ def run_cmd(cmd, timeout=20):
         return proc.returncode, proc.stdout, proc.stderr
     except subprocess.TimeoutExpired:
         return 124, "", "command timed out"
+    except FileNotFoundError as exc:
+        return 127, "", f"{exc.filename or (cmd[0] if cmd else 'command')}: not found"
 
 
 def load_json(path):
