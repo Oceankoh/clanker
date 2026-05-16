@@ -2784,6 +2784,7 @@ cmd_start() {
         echo "Missing DigitalOcean region. Pass --zone <region> or set CTFVM_DO_REGION." >&2
         exit 1
       fi
+      zone="$(printf '%s' "${zone}" | tr '[:upper:]' '[:lower:]')"
       project="$(ctfvm_provider_call "${provider}" default_scope)"
       ;;
   esac

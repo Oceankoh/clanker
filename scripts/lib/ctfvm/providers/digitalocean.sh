@@ -137,9 +137,19 @@ ctfvm_provider_digitalocean_resolve_ssh_keys() {
     return 0
   fi
 
-  ctfvm_doctl compute ssh-key list --format FingerPrint --no-header 2>/dev/null \
-    | awk 'NF { print $1 }' \
-    | paste -sd, -
+  local list_output rc=0
+  list_output="$(ctfvm_doctl compute ssh-key list --format FingerPrint --no-header 2>&1)" || rc=$?
+  if [[ ${rc} -ne 0 ]]; then
+    {
+      echo "Warning: could not list DigitalOcean SSH keys via doctl (rc=${rc}). Continuing without keys."
+      if [[ -n "${list_output}" ]]; then
+        printf '  doctl: %s\n' "${list_output}"
+      fi
+      echo "  Hint: token may lack the 'ssh_key:read' scope. Pass --ssh-key <fingerprint> or set CTFVM_DO_SSH_KEYS=<csv> to skip the lookup."
+    } >&2
+    return 0
+  fi
+  printf '%s\n' "${list_output}" | awk 'NF { print $1 }' | paste -sd, -
 }
 
 ctfvm_provider_digitalocean_ssh_exec() {
