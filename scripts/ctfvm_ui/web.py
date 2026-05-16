@@ -537,6 +537,13 @@ def render_overview_page() -> str:
             </select>
           </div>
           <div class="field">
+            <label for="spawnAgent">Agent</label>
+            <select id="spawnAgent" onchange="persistAgent()">
+              <option value="codex">codex</option>
+              <option value="claude">claude</option>
+            </select>
+          </div>
+          <div class="field">
             <label for="spawnTimeout">Timeout (min)</label>
             <input id="spawnTimeout" placeholder="1440" />
           </div>
@@ -599,7 +606,7 @@ def render_overview_page() -> str:
           <input type="checkbox" id="spawnUseLocalImage" />
           <label for="spawnUseLocalImage">Use cached local toolbox archive</label>
           <input type="checkbox" id="spawnNoAuthSync" />
-          <label for="spawnNoAuthSync">Skip Codex auth sync</label>
+          <label for="spawnNoAuthSync">Skip agent auth sync</label>
         </div>
         <div class="action-row">
           <button class="primary" onclick="spawnRun()">Start VM</button>
@@ -642,8 +649,10 @@ def render_overview_page() -> str:
     let lastRunsSignature = '';
     let lastJobsSignature = '';
     const FLAG_FORMAT_STORAGE_KEY = 'ctfvm.spawn.flag_format';
+    const AGENT_STORAGE_KEY = 'ctfvm.spawn.agent';
     const OVERVIEW_CACHE_STORAGE_KEY = 'ctfvm.overview.cache.v1';
     const MAX_OVERVIEW_JOB_OUTPUT_CHARS = 12000;
+    const SUPPORTED_AGENTS = ['codex', 'claude'];
 
     function escapeHtml(value) {
       return String(value ?? '')
@@ -688,6 +697,7 @@ def render_overview_page() -> str:
       document.getElementById('spawnZone').value = provider === 'gcp' ? (defaults.gcp_zone || '') : (defaults.do_region || '');
       document.getElementById('spawnMachineType').value = defaults.gcp_machine_type || '';
       document.getElementById('spawnSizeSlug').value = defaults.do_size_slug || '';
+      applyCachedAgent(defaults.agent || 'codex');
       applyCachedFlagFormat();
       syncSpawnProviderFields();
       syncSpawnModeFields();
@@ -708,6 +718,23 @@ def render_overview_page() -> str:
       const value = input.value.trim();
       if (value) window.localStorage.setItem(FLAG_FORMAT_STORAGE_KEY, value);
       else window.localStorage.removeItem(FLAG_FORMAT_STORAGE_KEY);
+    }
+
+    function applyCachedAgent(fallback) {
+      const select = document.getElementById('spawnAgent');
+      if (!select) return;
+      const cached = window.localStorage.getItem(AGENT_STORAGE_KEY) || '';
+      const desired = SUPPORTED_AGENTS.includes(cached)
+        ? cached
+        : (SUPPORTED_AGENTS.includes(fallback) ? fallback : 'codex');
+      select.value = desired;
+    }
+
+    function persistAgent() {
+      const select = document.getElementById('spawnAgent');
+      if (!select) return;
+      const value = SUPPORTED_AGENTS.includes(select.value) ? select.value : 'codex';
+      window.localStorage.setItem(AGENT_STORAGE_KEY, value);
     }
 
     function syncSpawnProviderFields() {
@@ -742,8 +769,11 @@ def render_overview_page() -> str:
     function collectSpawnPayload() {
       const provider = document.getElementById('spawnProvider').value || 'gcp';
       const batchMode = (document.getElementById('spawnBatchMode').value || 'single') === 'batch';
+      const agentRaw = (document.getElementById('spawnAgent').value || 'codex').toLowerCase();
+      const agent = SUPPORTED_AGENTS.includes(agentRaw) ? agentRaw : 'codex';
       return {
         provider,
+        agent,
         batch_mode: batchMode,
         challenge_dir: document.getElementById('spawnChallengeDir').value.trim(),
         flag_format: document.getElementById('spawnFlagFormat').value.trim(),
@@ -835,6 +865,7 @@ def render_overview_page() -> str:
         const summaryBits = [];
         if (job.summary && job.summary.challenge_name) summaryBits.push(job.summary.challenge_name);
         if (job.summary && job.summary.provider) summaryBits.push(job.summary.provider);
+        if (job.summary && job.summary.agent) summaryBits.push(job.summary.agent);
         if (job.summary && job.summary.zone) summaryBits.push(job.summary.zone);
         if (job.instance) summaryBits.push(job.instance);
         if (job.summary && job.summary.challenge_dir) summaryBits.push(job.summary.challenge_dir);
@@ -926,6 +957,7 @@ def render_overview_page() -> str:
         summary: {
           challenge_name: (job.summary && job.summary.challenge_name) || '',
           provider: (job.summary && job.summary.provider) || '',
+          agent: (job.summary && job.summary.agent) || '',
           zone: (job.summary && job.summary.zone) || '',
           challenge_dir: (job.summary && job.summary.challenge_dir) || '',
         },

@@ -44,8 +44,20 @@ HALTED_PATTERNS = [
     re.compile(r"session exited with code", re.IGNORECASE),
     re.compile(r"dropping to shell", re.IGNORECASE),
     re.compile(r"container not running", re.IGNORECASE),
-    re.compile(r"codex cli not found", re.IGNORECASE),
+    re.compile(r"(codex|claude)\s+cli not found", re.IGNORECASE),
 ]
+
+
+SUPPORTED_AGENTS = {"codex", "claude"}
+
+
+def normalize_agent(value):
+    raw = str(value or "").strip().lower()
+    if raw in {"", "codex"}:
+        return "codex"
+    if raw in {"claude", "claude-code", "claudecode"}:
+        return "claude"
+    return ""
 
 
 def _utc_now():
@@ -269,8 +281,10 @@ class CTFVMUIService:
 
     def get_spawn_defaults(self):
         provider = normalize_provider(os.environ.get("CTFVM_PROVIDER") or "gcp")
+        agent = normalize_agent(os.environ.get("CTFVM_AGENT")) or "codex"
         return {
             "provider": provider,
+            "agent": agent,
             "timeout_min": str(os.environ.get("CTFVM_TIMEOUT_MIN") or "1440"),
             "toolbox_variant": str(os.environ.get("CTFVM_TOOLBOX_VARIANT") or "lean"),
             "gcp_project": str(os.environ.get("CTFVM_GCP_PROJECT") or project_from_gcloud_config() or ""),
@@ -1240,6 +1254,14 @@ printf "artifact_count=%s\\n" "${artifact_count:-0}"
         if err:
             return None, err, None
 
+        agent_raw = payload.get("agent")
+        if agent_raw is None or str(agent_raw).strip() == "":
+            agent = self.get_spawn_defaults().get("agent") or "codex"
+        else:
+            agent = normalize_agent(agent_raw)
+            if not agent:
+                return None, f"Unknown agent: {agent_raw} (expected codex or claude)", None
+
         desc_text = str(desc or payload.get("desc", "") or "").strip()
         ideas_text = str(ideas or payload.get("ideas", "") or "").strip()
         desc = self._compose_spawn_description(desc_text, payload.get("flag_format"))
@@ -1252,7 +1274,7 @@ printf "artifact_count=%s\\n" "${artifact_count:-0}"
         use_local_image = bool(payload.get("use_local_image"))
         no_auth_sync = bool(payload.get("no_auth_sync"))
 
-        cmd = [str(ROOT / "scripts" / "ctfvm"), "start", "--provider", provider, "--dir", str(challenge_dir_path)]
+        cmd = [str(ROOT / "scripts" / "ctfvm"), "start", "--provider", provider, "--agent", agent, "--dir", str(challenge_dir_path)]
         if desc:
             cmd += ["--desc", desc]
         if ideas_text:
@@ -1276,6 +1298,7 @@ printf "artifact_count=%s\\n" "${artifact_count:-0}"
 
         summary = {
             "provider": provider,
+            "agent": agent,
             "challenge_dir": str(challenge_dir_path),
             "challenge_name": challenge_dir_path.name,
             "zone": zone,
