@@ -152,7 +152,21 @@ fi
 echo "Launching interactive ${CTFVM_AGENT} session..." | tee -a "${RUN_DIR}/logs/supervisor.log"
 set +e
 initial_prompt="$(cat "${PROMPT_FILE}")"
-docker exec -it ctf-toolbox bash -c 'cd /workspace && "$@"' _ "${AGENT_ARGS[@]}" "${initial_prompt}"
+
+DOCKER_EXEC_EXTRA=()
+if [[ "${CTFVM_AGENT}" == "claude" ]]; then
+  token_file="${RUN_DIR}/.claude/.token"
+  if [[ -r "${token_file}" ]]; then
+    CLAUDE_CODE_OAUTH_TOKEN="$(cat "${token_file}")"
+    export CLAUDE_CODE_OAUTH_TOKEN
+    DOCKER_EXEC_EXTRA+=(-e CLAUDE_CODE_OAUTH_TOKEN)
+    echo "Loaded Claude setup-token from ${token_file}." | tee -a "${RUN_DIR}/logs/supervisor.log"
+  else
+    echo "No Claude setup-token at ${token_file}; claude may prompt for login." | tee -a "${RUN_DIR}/logs/supervisor.log"
+  fi
+fi
+
+docker exec -it ${DOCKER_EXEC_EXTRA[@]+"${DOCKER_EXEC_EXTRA[@]}"} ctf-toolbox bash -c 'cd /workspace && "$@"' _ "${AGENT_ARGS[@]}" "${initial_prompt}"
 rc=$?
 set -e
 

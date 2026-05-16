@@ -1372,34 +1372,18 @@ fi"
 }
 
 sync_claude_auth() {
-  local claude_home
-  if [[ -n "${CLAUDE_CONFIG_DIR:-}" ]]; then
-    claude_home="${CLAUDE_CONFIG_DIR}"
-  else
-    claude_home="${HOME}/.claude"
+  local token="${CLAUDE_CODE_OAUTH_TOKEN:-}"
+
+  if [[ -z "${token}" ]]; then
+    echo "Claude auth sync requires a long-lived setup-token." >&2
+    echo "Run 'claude setup-token' locally (claude.ai subscription required), then export the resulting" >&2
+    echo "token as CLAUDE_CODE_OAUTH_TOKEN before launching --agent claude (or pass --no-auth-sync to skip)." >&2
+    return 1
   fi
 
-  if [[ ! -d "${claude_home}" ]]; then
-    echo "Claude auth directory not found at ${claude_home}; skipping auth sync." >&2
-    return 0
-  fi
-
-  local -a auth_files=()
-  local rel
-  for rel in .credentials.json settings.json; do
-    if [[ -f "${claude_home}/${rel}" ]]; then
-      auth_files+=("${rel}")
-    fi
-  done
-
-  if [[ "${#auth_files[@]}" -eq 0 ]]; then
-    echo "No Claude auth session files found in ${claude_home}; skipping auth sync." >&2
-    return 0
-  fi
-
-  echo "Syncing Claude session data to VM (OAuth session only, no API keys)."
-  COPYFILE_DISABLE=1 tar --no-xattrs -C "${claude_home}" -cf - "${auth_files[@]}" 2>/dev/null | \
-    gcloud_ssh "sudo -u ctf bash -lc 'mkdir -p /home/ctf/run/.claude && tar -C /home/ctf/run/.claude -xf - && chmod -R go-rwx /home/ctf/run/.claude'"
+  echo "Syncing Claude long-lived setup-token to VM (.claude/.token, mode 600)."
+  printf '%s' "${token}" | \
+    gcloud_ssh "sudo -u ctf bash -lc 'umask 077; mkdir -p /home/ctf/run/.claude && cat > /home/ctf/run/.claude/.token && chmod 600 /home/ctf/run/.claude/.token && chmod 700 /home/ctf/run/.claude'"
 }
 
 install_managed_claude_config() {

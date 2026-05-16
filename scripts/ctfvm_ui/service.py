@@ -333,17 +333,22 @@ class CTFVMUIService:
 
         prompt = "Select challenges root directory" if batch_mode else "Select challenge directory"
         current = str(current_path or "").strip()
-        script_lines = [
-            "on run argv",
-            'set promptText to item 1 of argv',
-            'set selectedFolder to choose folder with prompt promptText',
-            'return POSIX path of selectedFolder',
-            "end run",
-        ]
-        cmd = ["osascript"]
-        for line in script_lines:
-            cmd += ["-e", line]
-        cmd.append(prompt)
+        escaped_prompt = prompt.replace("\\", "\\\\").replace('"', '\\"')
+        default_clause = ""
+        if current:
+            try:
+                current_resolved = Path(current).expanduser().resolve()
+                if current_resolved.is_dir():
+                    escaped_default = str(current_resolved).replace("\\", "\\\\").replace('"', '\\"')
+                    default_clause = f' default location (POSIX file "{escaped_default}")'
+            except Exception:
+                default_clause = ""
+        script = (
+            'tell application "System Events" to activate\n'
+            f'set selectedFolder to choose folder with prompt "{escaped_prompt}"{default_clause}\n'
+            "return POSIX path of selectedFolder\n"
+        )
+        cmd = ["osascript", "-e", script]
 
         try:
             proc = subprocess.run(

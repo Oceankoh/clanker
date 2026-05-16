@@ -5,9 +5,9 @@
   - GCP: `gcloud` installed and authenticated (`gcloud auth login`)
   - DigitalOcean: `doctl` installed/authenticated
 - Default zone/project (GCP) or region (DigitalOcean) configured, or passed to `ctfvm start`
-- One agent CLI logged in locally (the orchestrator syncs the chosen agent's OAuth session into the VM):
-  - Codex (default): `codex login`
-  - Claude Code: `claude login` (or set `ANTHROPIC_API_KEY` if you prefer key auth)
+- One agent CLI logged in locally (the orchestrator syncs the chosen agent's credentials into the VM):
+  - Codex (default): `codex login` — OAuth session under `~/.codex` is synced.
+  - Claude Code: run `claude setup-token` once (claude.ai subscription required), then export the resulting long-lived token as `CLAUDE_CODE_OAUTH_TOKEN` in the shell that runs `ctfvm`. OAuth session sync is no longer used because Claude Code's short-lived OAuth refresh path does not survive in the headless VM.
 
 Optional break-glass access:
 - SSH access is still useful for `ctfvm attach`, `ctfvm shell`, and `ctfvm vscode`.
@@ -115,7 +115,7 @@ Differences from the Codex backend (v1):
 ### Known caveats / first-run validation
 The Claude path has not yet been exercised against a real cloud VM. Likely surfaces if something breaks end-to-end:
 
-- **Auth file shape.** `sync_claude_auth` syncs `~/.claude/.credentials.json` and `~/.claude/settings.json` from the local machine to `/home/ctf/run/.claude/` on the VM. Verified on Claude Code 2.1.142; if your version uses a different layout (top-level `~/.claude.json`, or auth under `~/.claude/auth/`), the sync will skip silently and you'll see `claude login` errors on the VM. Re-run with `--no-auth-sync` and `claude login` inside the container, or extend the file list in `sync_claude_auth`.
+- **Auth via setup-token.** `sync_claude_auth` writes the `CLAUDE_CODE_OAUTH_TOKEN` env var to `/home/ctf/run/.claude/.token` (mode 600). The supervisor reads that file and passes the token through to `docker exec ... -e CLAUDE_CODE_OAUTH_TOKEN` when launching `claude`. If the env var is unset locally, `sync_claude_auth` errors out and tells you to run `claude setup-token`. Use `--no-auth-sync` to skip the sync and authenticate inside the container manually instead.
 - **Initial prompt shape.** The supervisor invokes `claude --dangerously-skip-permissions "<prompt>"` passing the prompt as a trailing positional arg (mirroring Codex). If your `claude` version rejects positional prompts, edit `runner/supervisor.sh` to pipe via stdin or use `--print`.
 - **`ctfvm mcp` arg parity.** Both CLIs expose `<agent> mcp <list|get|add|remove|login|logout>`, but `claude mcp add NAME -- CMD ARGS` and `codex mcp add NAME [opts]` differ in detail. The wrapper passes args verbatim. Sanity-check the subcommand you need before relying on it.
 - **State-file backfill.** Old runs created before this change have no `agent` key in their state JSON; downstream commands treat those as `codex` (the historical behavior).
