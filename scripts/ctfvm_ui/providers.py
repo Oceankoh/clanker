@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import json
 import re
+import sys
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -216,7 +217,7 @@ class GcpProviderBackend(ProviderBackend):
         if not project:
             return []
 
-        rc, out, _ = run_cmd(
+        rc, out, err = run_cmd(
             [
                 "gcloud",
                 "compute",
@@ -230,6 +231,7 @@ class GcpProviderBackend(ProviderBackend):
             timeout=12,
         )
         if rc != 0:
+            self._warn_discovery_failure(rc, err or out)
             return []
 
         try:
@@ -262,11 +264,23 @@ class GcpProviderBackend(ProviderBackend):
             )
         return discovered
 
+    _warned_discovery_failure = False
+
+    @classmethod
+    def _warn_discovery_failure(cls, rc, message):
+        if cls._warned_discovery_failure:
+            return
+        cls._warned_discovery_failure = True
+        msg = str(message or "").strip()
+        print(
+            f"[ctfvm ui] GCP discovery failed (gcloud rc={rc}): {msg or 'no error message'}",
+            file=sys.stderr,
+        )
+
     def ssh_cmd(self, state: dict[str, Any], remote_cmd: str, timeout: int = 20):
         if _control_plane_enabled(state):
             return _control_plane_exec_text(state, remote_cmd, timeout=timeout)
         cmd = [
-            "gcloud",
             "compute",
             "ssh",
             state["instance"],
@@ -306,7 +320,7 @@ class DigitalOceanProviderBackend(ProviderBackend):
         return "digitalocean"
 
     def discover_runs(self) -> list[RunRecord]:
-        rc, out, _ = run_cmd(
+        rc, out, err = run_cmd(
             [
                 "doctl",
                 "compute",
@@ -321,6 +335,7 @@ class DigitalOceanProviderBackend(ProviderBackend):
             timeout=12,
         )
         if rc != 0:
+            self._warn_discovery_failure(rc, err or out)
             return []
 
         discovered = []
@@ -329,7 +344,9 @@ class DigitalOceanProviderBackend(ProviderBackend):
             if len(parts) < 4:
                 continue
             name, region, status, ip = parts[0], parts[1], parts[2], parts[3]
-            if not name.startswith("ctfvm-") or status != "active":
+            if not name.startswith("ctfvm-"):
+                continue
+            if status not in {"active", "new"}:
                 continue
             run_id = run_id_from_instance_name(name)
             discovered.append(
@@ -344,6 +361,23 @@ class DigitalOceanProviderBackend(ProviderBackend):
                 )
             )
         return discovered
+
+    _warned_discovery_failure = False
+
+    @classmethod
+    def _warn_discovery_failure(cls, rc, message):
+        if cls._warned_discovery_failure:
+            return
+        cls._warned_discovery_failure = True
+        msg = str(message or "").strip()
+        print(
+            f"[ctfvm ui] DigitalOcean discovery failed (doctl rc={rc}): {msg or 'no error message'}",
+            file=sys.stderr,
+        )
+        print(
+            "[ctfvm ui] Hint: token may lack 'droplet:read' or 'tag:read' scope; runs from .ctfvm/current-run.json will still show.",
+            file=sys.stderr,
+        )
 
     def ssh_cmd(self, state: dict[str, Any], remote_cmd: str, timeout: int = 20):
         if _control_plane_enabled(state):

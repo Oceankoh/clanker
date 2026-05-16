@@ -290,7 +290,7 @@ class CTFVMUIService:
             "gcp_project": str(os.environ.get("CTFVM_GCP_PROJECT") or project_from_gcloud_config() or ""),
             "gcp_zone": str(os.environ.get("CTFVM_GCP_ZONE") or ""),
             "gcp_machine_type": str(os.environ.get("CTFVM_GCP_MACHINE_TYPE") or "e2-standard-4"),
-            "do_region": str(os.environ.get("CTFVM_DO_REGION") or ""),
+            "do_region": str(os.environ.get("CTFVM_DO_REGION") or "sgp1"),
             "do_size_slug": str(os.environ.get("CTFVM_DO_SIZE_SLUG") or "s-4vcpu-8gb"),
         }
 
@@ -464,7 +464,16 @@ class CTFVMUIService:
             for run in runs:
                 source = str(run.get("__source", "") or "")
                 runtime_status = str(run.get("runtime_status", "") or "").strip()
-                if source == "discovered" or run.get("is_runtime_active"):
+                # Keep entries we have any reason to believe are alive:
+                #  - 'discovered'     → cloud listing confirmed it
+                #  - 'current'        → matches .ctfvm/current-run.json (user just started it)
+                #  - is_runtime_active → cloud get_status returned active/running
+                #  - 'UNKNOWN'        → status probe failed (perms, network); don't hide silently
+                if (
+                    source in {"discovered", "current"}
+                    or run.get("is_runtime_active")
+                    or runtime_status.upper() == "UNKNOWN"
+                ):
                     live_runs.append(run)
                     continue
                 if runtime_status == "":
