@@ -755,7 +755,6 @@ def render_overview_page() -> str:
           parts.push(v + ' ✗');
         }
       }
-      const legacy = archiveEntry('legacy');
       if (legacy && legacy.present) {
         parts.push('legacy ✓ (fallback)');
       }
