@@ -139,6 +139,8 @@ def _do_known_hosts_file() -> Path:
 def _do_ssh_common_args(state: dict[str, Any]) -> list[str]:
     return [
         "-o",
+        "BatchMode=yes",
+        "-o",
         "StrictHostKeyChecking=accept-new",
         "-o",
         f"UserKnownHostsFile={_do_known_hosts_file()}",
