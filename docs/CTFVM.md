@@ -13,6 +13,32 @@ Optional break-glass access:
 - SSH access is still useful for `ctfvm attach`, `ctfvm shell`, and `ctfvm vscode`.
 - On DigitalOcean that means uploading at least one SSH key, but it is no longer required for the normal HTTP control-plane flow.
 
+### DigitalOcean API token scopes
+`ctfvm` and the local web UI shell out to `doctl`, which uses your DO Personal Access Token. If you use a fine-grained token, grant all of the following scopes — missing one shows up as a `403 You are not authorized to perform this operation` on the underlying API call.
+
+| Capability | doctl operations that use it | Required scope |
+| --- | --- | --- |
+| List/inspect droplets (fleet view, status, IP) | `compute droplet list --tag-name ctfvm`, `compute droplet get` | `droplet:read` |
+| Create a droplet (`ctfvm start`) | `compute droplet create ... --tag-names ... --ssh-keys ...` | `droplet:create` |
+| Destroy a droplet (`ctfvm destroy`, VM self-delete) | `compute droplet delete` | `droplet:delete` |
+| Tag the droplet (`ctfvm` tag, `ctfvm-control`) | tag side-effects of `droplet create --tag-names` and tag-filtered list | `tag:create`, `tag:read` |
+| Discover registered SSH keys when `--ssh-key`/`CTFVM_DO_SSH_KEYS` is not set | `compute ssh-key list` | `ssh_key:read` |
+| Look up the default registry (`registry_image_ref` resolution) | `registries get`, `registry get <name>` | `registry:read` |
+| Create a new DOCR registry on first `image push-registry` | `registry create` | `registry:create` |
+| Mint a short-lived docker-config for the VM to pull the toolbox image | `registry login`, `registry docker-config` | `registry:read` |
+| Push a new toolbox image to DOCR (`ctfvm image push-registry`) | `docker push` using credentials from `registry login` | `registry:write` |
+
+A safe one-line description when creating a fine-grained token: `droplet:read droplet:create droplet:delete tag:read tag:create ssh_key:read registry:read registry:create registry:write`. Full-access (legacy) PATs cover all of these implicitly.
+
+Sanity-check the token after creating it:
+
+```bash
+doctl auth init -t <token>
+doctl compute droplet list --tag-name ctfvm  # droplet:read + tag:read
+doctl compute ssh-key list                   # ssh_key:read
+doctl registry docker-config <registry>      # registry:read (the call that 403s most often)
+```
+
 ## Repo `.env` Defaults
 `./scripts/ctfvm` now auto-loads a repo-local `.env` file before it resolves defaults.
 
