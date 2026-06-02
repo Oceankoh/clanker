@@ -156,6 +156,24 @@ class ServerTest(unittest.TestCase):
         st, body, hdr = self._get("/api/v1/runs/20250101-000000/bundle")
         self.assertEqual(body, b"BUNDLE")
 
+    def test_spawn_bad_batch_is_400(self):
+        st, j = self._req("POST", "/api/v1/runs", {"batch": "not-a-list"})
+        self.assertEqual(st, 400)
+        self.assertEqual(j["code"], "BAD_REQUEST")
+        st, j = self._req("POST", "/api/v1/runs", {})  # missing challenge_dir
+        self.assertEqual(st, 400)
+
+    def test_malformed_content_length_does_not_crash(self):
+        # send a bad Content-Length and assert the server still responds
+        import http.client
+        conn = http.client.HTTPConnection("127.0.0.1", self.port)
+        conn.putrequest("GET", "/health", skip_host=False, skip_accept_encoding=True)
+        conn.putheader("Content-Length", "abc")
+        conn.endheaders()
+        resp = conn.getresponse()
+        self.assertEqual(resp.status, 200)
+        conn.close()
+
     def test_not_found_for_removed_routes(self):
         for path in ("/overview", "/api/snapshot", "/api/v1/bogus", "/api/select-directory"):
             st, j = self._req("GET", path)

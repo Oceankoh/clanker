@@ -156,9 +156,14 @@ class UiService:
 
     # --- spawn / jobs ------------------------------------------------------
     def spawn(self, payload: dict) -> list[str]:
-        specs = payload.get("batch") or [payload]
+        batch = payload.get("batch")
+        if batch is not None and not isinstance(batch, list):
+            raise ApiError("BAD_REQUEST", "batch must be a list", 400)
+        specs = batch or [payload]
         job_ids: list[str] = []
         for spec in specs:
+            if not isinstance(spec, dict):
+                raise ApiError("BAD_REQUEST", "each spawn spec must be an object", 400)
             cmd = self._build_start_cmd(spec)
             try:
                 job = self.jobs.submit(cmd)

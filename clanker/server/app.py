@@ -39,6 +39,13 @@ def err(code, message, status=400) -> Response:
     return _json({"ok": False, "error": message, "code": code}, status)
 
 
+def _safe_filename(name: str) -> str:
+    """Strip CR/LF and quotes so a (potentially agent-created) filename can't
+    inject or break the Content-Disposition header."""
+    cleaned = "".join(c for c in (name or "") if c not in '\r\n"\\').strip()
+    return cleaned or "download"
+
+
 def _bool(query: dict, key: str, default=False) -> bool:
     v = query.get(key, [""])[0].strip().lower()
     if v in ("1", "true", "yes"):
@@ -166,12 +173,12 @@ class App:
         relpath = urllib.parse.unquote(m.group(2))
         dl = self.s.artifact_download(m.group(1), relpath)
         return Response(200, dl.content, dl.mime,
-                        headers={"Content-Disposition": f'attachment; filename="{dl.filename}"'})
+                        headers={"Content-Disposition": f'attachment; filename="{_safe_filename(dl.filename)}"'})
 
     def _bundle(self, m, _q, _b):
         dl = self.s.bundle(m.group(1))
         return Response(200, dl.content, dl.mime,
-                        headers={"Content-Disposition": f'attachment; filename="{dl.filename}"'})
+                        headers={"Content-Disposition": f'attachment; filename="{_safe_filename(dl.filename)}"'})
 
     def _jobs_list(self, *_):
         return ok({"jobs": [serialize.job(j) for j in self.s.jobs_list()]})
@@ -190,8 +197,11 @@ def make_handler(app: App):
         def _dispatch(self, method: str):
             parsed = urllib.parse.urlsplit(self.path)
             query = urllib.parse.parse_qs(parsed.query)
-            length = int(self.headers.get("Content-Length", 0) or 0)
-            body = self.rfile.read(length) if length else b""
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except (TypeError, ValueError):
+                length = 0
+            body = self.rfile.read(length) if length > 0 else b""
             resp = app.handle(method, parsed.path, query, body)
             self.send_response(resp.status)
             self.send_header("Content-Type", resp.content_type)
