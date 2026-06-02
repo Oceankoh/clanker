@@ -42,27 +42,37 @@ class CodexBackend(AgentBackend):
     # --- auth --------------------------------------------------------------
     def materialize_auth(self, settings) -> AuthMaterial:  # noqa: ANN001
         wipe = ["/home/ctf/run/.codex", "/home/ctf/.codex"]
+        base_env = {"CODEX_HOME": "/workspace/.codex"}
+        no_sync = str(settings.get("no_auth_sync", default="") or "").strip() in ("1", "true", "True")
+
+        # Prefer the local Codex session unless the operator opted out with
+        # no_auth_sync. We deliberately do NOT switch to API-key mode merely
+        # because OPENAI_API_KEY happens to be exported in the operator's shell
+        # (that would silently skip the session sync the bash path always did).
+        if not no_sync:
+            codex_home = Path(str(settings.get("codex_home", default=str(Path.home() / ".codex"))))
+            local_files: list[LocalAuthFile] = []
+            for rel in ("auth.json", "installation_id"):
+                src = codex_home / rel
+                if src.exists():
+                    local_files.append(
+                        LocalAuthFile(local_path=str(src), remote_relpath=f".codex/{rel}", mode="600")
+                    )
+            if local_files:
+                return AuthMaterial(container_env=base_env, local_files=local_files, wipe_remote_paths=wipe)
 
         api_key = settings.get("openai_api_key", env_var="OPENAI_API_KEY", default="")
-        no_sync = str(settings.get("no_auth_sync", default="") or "").strip() in ("1", "true", "True")
-        if no_sync or api_key:
-            env = {"CODEX_HOME": "/workspace/.codex"}
-            if api_key:
-                env["OPENAI_API_KEY"] = str(api_key)
-            return AuthMaterial(container_env=env, wipe_remote_paths=wipe,
-                                note="Codex API-key mode (no session sync).")
-
-        codex_home = Path(str(settings.get("codex_home", default=str(Path.home() / ".codex"))))
-        local_files: list[LocalAuthFile] = []
-        for rel in ("auth.json", "installation_id"):
-            src = codex_home / rel
-            if src.exists():
-                local_files.append(LocalAuthFile(local_path=str(src), remote_relpath=f".codex/{rel}", mode="600"))
+        if api_key:
+            return AuthMaterial(
+                container_env={**base_env, "OPENAI_API_KEY": str(api_key)},
+                wipe_remote_paths=wipe,
+                note="Codex API-key mode (no session sync).",
+            )
         return AuthMaterial(
-            container_env={"CODEX_HOME": "/workspace/.codex"},
-            local_files=local_files,
+            container_env=base_env,
             wipe_remote_paths=wipe,
-            note="" if local_files else "No local ~/.codex session found; run `codex login` first.",
+            authenticated=False,
+            note="No Codex credentials. Run `codex login`, or set OPENAI_API_KEY.",
         )
 
     # --- config ------------------------------------------------------------
@@ -101,7 +111,9 @@ class CodexBackend(AgentBackend):
                 role_lines.append(f'sandbox_mode = "{_toml_basic(role.sandbox)}"')
             role_lines.append("")
             role_lines.append("developer_instructions = \"\"\"")
-            role_lines.append(role.instructions.rstrip("\n"))
+            # Escape so no embedded `"""` or trailing backslash can break the
+            # triple-quoted TOML string (multiline basic strings honor escapes).
+            role_lines.append(_toml_basic(role.instructions.rstrip("\n")))
             role_lines.append('"""')
             staged.append(
                 StagedFile(

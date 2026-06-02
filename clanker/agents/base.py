@@ -88,11 +88,14 @@ class AuthMaterial:
 
     ``container_env`` is injected into the toolbox container; ``local_files`` are
     copied from the operator's machine; ``wipe_remote_paths`` are shredded on
-    ``destroy``."""
+    ``destroy``. ``authenticated`` says whether real credentials were found —
+    callers must check this rather than inferring it from ``container_env``
+    (which always carries placeholders like ``CODEX_HOME``)."""
 
     container_env: dict[str, str] = field(default_factory=dict)
     local_files: list[LocalAuthFile] = field(default_factory=list)
     wipe_remote_paths: list[str] = field(default_factory=list)
+    authenticated: bool = True
     note: str = ""  # human-facing note (e.g. "run `clanker auth claude` first")
 
 

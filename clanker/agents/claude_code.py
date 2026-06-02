@@ -54,6 +54,7 @@ class ClaudeCodeBackend(AgentBackend):
         return AuthMaterial(
             container_env={},
             wipe_remote_paths=wipe,
+            authenticated=False,
             note="No Claude credentials. Run `clanker auth claude` (runs `claude setup-token`).",
         )
 
@@ -88,7 +89,9 @@ class ClaudeCodeBackend(AgentBackend):
             frontmatter = [
                 "---",
                 f"name: {_kebab(role.name)}",
-                f"description: {role.description}",
+                # json.dumps -> a double-quoted, escaped scalar that is valid YAML
+                # even when the description contains ':', newlines, or '---'.
+                f"description: {json.dumps(role.description)}",
             ]
             if role.read_only:
                 frontmatter.append("tools: Read, Grep, Glob, Bash")

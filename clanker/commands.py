@@ -79,7 +79,9 @@ def _write_staged(staging: Path, relpath: str, content: str, mode: str = "") -> 
 def _extract_setup_token(stdout: str) -> str:
     """Pull the OAuth token out of `claude setup-token` output (best effort)."""
     for line in reversed([l.strip() for l in stdout.splitlines() if l.strip()]):
-        if line.startswith("sk-ant-") or line.startswith("oauth") or len(line) > 40 and " " not in line:
+        if line.startswith("sk-ant-") or line.startswith("oauth"):
+            return line
+        if len(line) > 40 and " " not in line and not line.lower().startswith("http"):
             return line
     return ""
 
@@ -170,7 +172,7 @@ def cmd_stage_agent(
     _write_staged(staging, "agent/container.env", env_lines, mode="600")
     _write_staged(staging, "agent/wipe-paths.txt", "".join(p + "\n" for p in auth.wipe_remote_paths))
 
-    if not auth.container_env and not auth.local_files:
+    if not auth.authenticated:
         sys.stderr.write(f"AUTH_REQUIRED: {auth.note}\n")
         return 3
 

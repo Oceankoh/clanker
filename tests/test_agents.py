@@ -7,16 +7,20 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
+import tomllib
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from clanker.agents import build_agent_backend  # noqa: E402
-from clanker.agents.base import default_agent_spec  # noqa: E402
+from clanker.agents.base import DOCS_RESEARCHER, EXPLOIT_TESTER, AgentConfigSpec, default_agent_spec  # noqa: E402
 from clanker.config import Settings  # noqa: E402
 
 
@@ -81,11 +85,53 @@ class CodexRender(unittest.TestCase):
             self.assertEqual(auth.container_env.get("CODEX_HOME"), "/workspace/.codex")
             self.assertIn("/home/ctf/run/.codex", auth.wipe_remote_paths)
 
-    def test_auth_api_key_mode(self):
-        settings = Settings(cli={"openai_api_key": "sk-test"})
+    def test_auth_api_key_mode_requires_no_sync(self):
+        # api-key mode only when the operator opts out of session sync
+        settings = Settings(cli={"openai_api_key": "sk-test", "no_auth_sync": "1"})
         auth = self.backend.materialize_auth(settings)
         self.assertEqual(auth.container_env.get("OPENAI_API_KEY"), "sk-test")
         self.assertEqual(auth.local_files, [])
+        self.assertTrue(auth.authenticated)
+
+    def test_session_wins_over_ambient_openai_api_key(self):
+        with TemporaryDirectory() as home:
+            codex_home = Path(home) / ".codex"
+            codex_home.mkdir()
+            (codex_home / "auth.json").write_text("{}")
+            settings = Settings(cli={"codex_home": str(codex_home), "openai_api_key": "sk-ambient"})
+            auth = self.backend.materialize_auth(settings)
+            # session sync wins; ambient key does NOT flip to api-key mode
+            self.assertTrue(any(f.remote_relpath == ".codex/auth.json" for f in auth.local_files))
+            self.assertNotIn("OPENAI_API_KEY", auth.container_env)
+
+    def test_no_creds_is_unauthenticated(self):
+        with TemporaryDirectory() as home:
+            empty = Path(home) / ".codex"  # does not exist -> no session
+            settings = Settings(cli={"codex_home": str(empty)})
+            with patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("OPENAI_API_KEY", None)
+                auth = self.backend.materialize_auth(settings)
+            self.assertFalse(auth.authenticated)
+            self.assertEqual(auth.local_files, [])
+
+    def test_role_toml_escaping_is_robust(self):
+        # a role whose instructions contain `"""` and a trailing backslash must
+        # still render valid TOML
+        nasty = replace(EXPLOIT_TESTER, instructions='say """ and end with \\')
+        spec = AgentConfigSpec(model="m", roles=[nasty], mcp_servers=[])
+        cfg = _staged(self.backend, spec)
+        tomllib.loads(cfg[".codex/roles/exploit_tester.toml"].content)  # must not raise
+
+    def test_roles_match_committed_toml(self):
+        # drift guard: base.py role constants must match the on-disk codex role
+        # configs (images/ctf-toolbox/codex-config/roles/*.toml)
+        roles_dir = REPO_ROOT / "images/ctf-toolbox/codex-config/roles"
+        for role in (EXPLOIT_TESTER, DOCS_RESEARCHER):
+            data = tomllib.loads((roles_dir / f"{role.name}.toml").read_text())
+            self.assertEqual(data.get("sandbox_mode", ""), role.sandbox, role.name)
+            self.assertEqual(
+                data["developer_instructions"].strip(), role.instructions.strip(), role.name
+            )
 
 
 class ClaudeRender(unittest.TestCase):
