@@ -209,6 +209,11 @@ When the VM is unreachable:
 Note: `ok: true` even when `error` is set — the run record exists but the VM is not responding.
 Use `error` field to distinguish partial vs full snapshots.
 
+The snapshot also carries an **`agent_features`** object — the backend-neutral surface of the agent's
+normal features (pending approval, session id, MCP servers, skills, model/mode, plan, diffs, usage),
+with a `capabilities` list so the SPA only renders controls the backend actually supports. See
+[`AGENTS.md`](AGENTS.md) §6b for the shape and the Codex/Claude mapping.
+
 ---
 
 ### `POST /api/v1/runs`

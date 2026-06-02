@@ -94,8 +94,27 @@ Stand up `clanker/` and make it the home of shared logic, without removing the b
 - Extract the SPA to `frontend/index.html`; delete dead `/artifacts` route + `render_artifacts_page`.
 - Remove `select-directory`; SPA uses a typed challenge-path field with `agent_backend` selector.
 - Old non-versioned routes deleted (return 404).
-- Acceptance: SPA drives fleet + focused + subagents + artifacts + steering against `/api/v1/`; all
-  removed routes 404.
+- **Agent-feature parity in the frontend (backend-neutral).** The SPA must surface the *normal*
+  day-to-day features of whichever agent a run uses, not just raw pane text. The agent backend exposes
+  these as uniform snapshot/endpoint data; the SPA renders them the same way for Codex and Claude Code:
+  - **Approvals / permission prompts** — detect a pending tool/command approval in the pane and offer
+    one-click Approve / Approve-always / Deny (generalizes today's `trust` button). Codex approval
+    prompts and Claude permission prompts both map to this control.
+  - **Sessions** — show the current session/thread id; resume/continue a prior session
+    (`codex resume` / `claude --resume`) from the UI.
+  - **Subagents** — the `/subagents` list with per-subagent live pane, status, and steering (AGENTS.md §5).
+  - **MCP servers & skills** — list configured MCP servers (gdb, ida, …) and available skills for the
+    run, with health/enabled state; this is read from the rendered agent config.
+  - **Model & mode** — display the active model and permission/approval mode; allow switching where the
+    backend supports it.
+  - **Plan / todo & diffs** — surface the agent's plan/todo and file diffs/edits when the backend emits
+    them (Claude stream-json `Task`/tool events; Codex equivalents).
+  - **Token/cost & turn status** — show usage and whether the agent is mid-turn, waiting, or idle.
+  Each item degrades gracefully: if a backend doesn't expose a feature, the control hides itself rather
+  than erroring. The mapping of these to each backend's signals lives in `agents/<backend>.py` and is
+  documented in AGENTS.md (new §"Frontend feature surface").
+- Acceptance: SPA drives fleet + focused + subagents + artifacts + steering + approvals + sessions
+  against `/api/v1/`; all removed routes 404; the same UI controls work on a Codex run and a Claude run.
 
 ## Phase 6 — Claude Code backend + VM hardening
 

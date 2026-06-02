@@ -204,6 +204,55 @@ defaults to the tmux path.
 
 ---
 
+## 6b. Frontend feature surface
+
+The frontend must expose the **normal day-to-day features** of whichever agent a run uses — not just
+raw pane text — and render them *identically* across backends. To keep the SPA backend-neutral, the
+`AgentBackend` translates each backend's native signals into one uniform shape that rides along with
+the snapshot:
+
+```python
+class AgentBackend(ABC):
+    def frontend_features(self, run: RunRecord, snapshot: RawSnapshot) -> AgentFeatures: ...
+
+@dataclass
+class AgentFeatures:
+    session: SessionInfo | None              # id, resumable, parent
+    pending_approval: ApprovalPrompt | None  # detected tool/permission prompt + choices
+    model: str                               # active model
+    mode: str                                # approval/permission mode
+    mcp_servers: list[McpStatus]             # name, transport, enabled/healthy
+    skills: list[SkillStatus]                # name, available
+    plan: list[PlanItem]                     # plan/todo, when emitted
+    diffs: list[FileDiff]                    # pending/applied edits, when emitted
+    usage: UsageInfo | None                  # tokens/cost, turn state (mid-turn/waiting/idle)
+    capabilities: set[str]                   # which of the above this backend actually supports
+```
+
+`capabilities` drives graceful degradation: the SPA shows a control only if the backend lists it, so a
+feature one product lacks simply doesn't render (no errors, no empty widgets).
+
+### Backend → feature mapping
+
+| UI feature | Codex source | Claude Code source |
+|------------|--------------|--------------------|
+| Pending approval | approval prompt text in the supervisor pane → Approve/Always/Deny keys | permission prompt in pane, or `can_use_tool`/permission events in stream-json |
+| One-click trust | generalizes today's `trust` (send `1`+Enter) | same control → maps to the permission accept choice |
+| Session id + resume | rollout JSONL session/thread id → `codex resume` | `session_id` from `--output-format json` → `claude --resume` |
+| Subagents | native `thread_spawn` (§5) | platform-spawned sessions (§5) |
+| MCP servers | `config.toml [mcp_servers.*]` | `.mcp.json` `mcpServers` |
+| Skills | `~/.codex/skills/*` | `.claude/skills/*` |
+| Model / mode | config.toml model + approval policy | settings.json `model` + `permissions.defaultMode` |
+| Plan / todo | plan items in transcript, when present | `TodoWrite`/plan tool events in stream-json |
+| Diffs / edits | apply-patch tool calls | `Edit`/`Write` tool_use events in stream-json |
+| Usage / turn state | token usage lines in transcript | `usage` in stream-json result/message events |
+
+The detection lives entirely in `agents/codex.py` / `agents/claude_code.py`; `snapshot.py` carries
+`AgentFeatures` through, the API serializes it (additive to the run snapshot in [`API.md`](API.md)), and
+the SPA renders one set of controls. New backends get the same UI for free by filling in this mapping.
+
+---
+
 ## 7. Skills inventory (must exist on both backends)
 The repo's skills define CTF capabilities; each needs a Claude equivalent so behavior is backend-neutral:
 
