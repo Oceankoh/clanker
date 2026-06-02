@@ -67,27 +67,34 @@ class RunRegistry:
         self._status_cache: dict[str, dict] = {}
 
     # --- single-run loading ------------------------------------------------
-    def load_state(self, run_id: str | None = None) -> RunRecord | None:
+    def load_raw(self, run_id: str | None = None) -> dict | None:
+        """Return the raw, validated state dict for a run (or the current run if
+        ``run_id`` is empty). Callers that need fields not on ``RunRecord``
+        (boot image, toolbox ref, …) use this; everyone else uses ``load_state``."""
         wanted = str(run_id or "").strip()
         if wanted:
             path = self._runs_dir / f"{wanted}.json"
             if path.exists():
                 state = load_json(path)
-                return RunRecord.from_mapping(state) if state_valid(state) else None
+                return state if state_valid(state) else None
             current = load_json(self._state_file) if self._state_file.exists() else None
             if state_valid(current) and self._matches_selector(current, wanted):
-                return RunRecord.from_mapping(current)
+                return current
             if self._runs_dir.exists():
                 for candidate in sorted(self._runs_dir.glob("*.json")):
                     state = load_json(candidate)
                     if state_valid(state) and self._matches_selector(state, wanted):
-                        return RunRecord.from_mapping(state)
+                        return state
             return None
 
         if not self._state_file.exists():
             return None
         state = load_json(self._state_file)
-        return RunRecord.from_mapping(state) if state_valid(state) else None
+        return state if state_valid(state) else None
+
+    def load_state(self, run_id: str | None = None) -> RunRecord | None:
+        raw = self.load_raw(run_id)
+        return RunRecord.from_mapping(raw) if raw else None
 
     def resolve(self, run_id: str | None = None) -> RunRecord | None:
         wanted = str(run_id or "").strip()

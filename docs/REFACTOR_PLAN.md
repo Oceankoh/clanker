@@ -63,12 +63,32 @@ Stand up `clanker/` and make it the home of shared logic, without removing the b
 - Acceptance: `RunRegistry` lists exactly what the bash CLI lists from the same `.ctfvm/`; control
   client round-trips exec/upload/download against a live VM.
 
-## Phase 2 — CloudProvider abstraction + first ported commands
+## Phase 2 — CloudProvider abstraction + first ported commands ✅
 
-- `providers/base.py` ABC; `gcp.py`, `digitalocean.py` (dedupe SSH/registry copy-paste, B10).
-- Port read-only/safe commands first: `status`, `cleanup-state`, `logs`, `fetch`, `sync-down`.
-- Bash `ctfvm` delegates these to `python -m clanker ...` (strangler); others stay bash.
-- Acceptance: ported commands behave identically; `start`/`destroy` still bash and green.
+Done:
+- [x] `clanker/providers/`: `CloudProvider` ABC (`base.py`) + `gcp.py`, `digitalocean.py`
+      (discover + status ported from legacy `ctfvm_ui.providers`); `CloudProviderRegistry`
+      and `build_run_registry()` wire live discovery/status into `RunRegistry`. Provisioning +
+      break-glass declared on the ABC but raise `NotImplementedError` until Phase 3.
+- [x] `clanker/commands.py`: ported `status`, `cleanup-state`, `fetch`, `sync-down` onto the core
+      (control client for transfer; `RunRegistry.load_raw` for status extras).
+- [x] Bash strangler: `ctfvm cleanup-state` now delegates to `python -m clanker cleanup-state`
+      (verified end-to-end; flag interface unchanged). `status`/`fetch`/`sync-down` are available
+      via `python -m clanker` and unit-tested; their **bash cutover is deferred to Phase 3**, when
+      the selector/`--pick` resolution is ported (today that logic lives in bash).
+- [x] `tests/test_commands.py`: cleanup-state (remove/keep/prune/cli-missing/dry-run/promote),
+      status output, and provider-registry dispatch — all via a fake provider (no live cloud).
+
+Deferred (with reason):
+- `logs` stays bash: it is a streaming `tail -f`, which does not map cleanly onto the
+  request/response control plane (the legacy control-plane path blocks until timeout). It moves
+  when steering/streaming is reworked in Phase 4.
+- SSH fallback for `fetch`/`sync-down` is intentionally dropped in the port (control-plane only,
+  clear error otherwise) per Invariant 1 / B7; the default flow always has a control plane.
+- `start`/`destroy` remain bash and untouched.
+
+Acceptance: ported command bodies behave identically; `cleanup-state` cut over and green;
+`start`/`destroy` still bash. ✅
 
 ## Phase 3 — Agent backend abstraction (Codex parity first, then Claude)
 

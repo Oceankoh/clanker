@@ -4054,103 +4054,11 @@ cmd_destroy() {
 }
 
 cmd_cleanup_state() {
+  # Ported to the Python core in Phase 2 (strangler migration). The command
+  # body now lives in clanker/commands.py::cmd_cleanup_state; this shim keeps
+  # the `ctfvm cleanup-state` entrypoint and flag interface unchanged.
   ensure_state_dir
-
-  local dry_run="0"
-  local prune_non_running="0"
-  local removed=0
-  local kept=0
-  local checked=0
-  local promoted_current="0"
-
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --dry-run)
-        dry_run="1"; shift ;;
-      --prune-non-running)
-        prune_non_running="1"; shift ;;
-      *)
-        echo "Unknown argument: $1" >&2
-        exit 1 ;;
-    esac
-  done
-
-  cleanup_one_state_file() {
-    local file="$1"
-    local label="$2"
-    local inst zn proj provider status reason remove_now
-
-    [[ -f "${file}" ]] || return 0
-
-    provider="$(provider_from_state_file "${file}")"
-    inst="$(json_get_from_file instance "${file}" || true)"
-    zn="$(json_get_from_file zone "${file}" || true)"
-    proj="$(json_get_from_file project "${file}" || true)"
-    checked=$((checked + 1))
-
-    remove_now="0"
-    reason=""
-    if [[ -z "${inst}" || -z "${zn}" || -z "${proj}" ]]; then
-      remove_now="1"
-      reason="incomplete metadata"
-    else
-      if [[ "${provider}" == "gcp" ]] && ! command -v gcloud >/dev/null 2>&1; then
-        status="CLI_MISSING"
-      elif [[ "${provider}" == "digitalocean" ]] && ! command -v doctl >/dev/null 2>&1; then
-        status="CLI_MISSING"
-      else
-        status="$(instance_status_for "${provider}" "${inst}" "${zn}" "${proj}")"
-      fi
-      if [[ "${status}" == "CLI_MISSING" ]]; then
-        reason="provider CLI unavailable"
-      elif [[ -z "${status}" ]]; then
-        remove_now="1"
-        reason="instance not found"
-      elif [[ "${prune_non_running}" == "1" && "${status}" != "RUNNING" && "${status}" != "active" ]]; then
-        remove_now="1"
-        reason="instance status=${status}"
-      fi
-    fi
-
-    if [[ "${remove_now}" == "1" ]]; then
-      removed=$((removed + 1))
-      if [[ "${dry_run}" == "1" ]]; then
-        echo "[dry-run] remove ${label}: ${file} (${reason})"
-      else
-        rm -f "${file}"
-        echo "Removed ${label}: ${file} (${reason})"
-      fi
-    else
-      kept=$((kept + 1))
-    fi
-  }
-
-  local f
-  for f in "${RUNS_DIR}"/*.json; do
-    [[ -e "${f}" ]] || continue
-    cleanup_one_state_file "${f}" "run"
-  done
-  if [[ -f "${STATE_FILE}" ]]; then
-    cleanup_one_state_file "${STATE_FILE}" "current"
-  fi
-
-  if [[ "${dry_run}" == "0" && ! -f "${STATE_FILE}" ]]; then
-    local latest_run=""
-    latest_run="$(ls -1t "${RUNS_DIR}"/*.json 2>/dev/null | head -n1 || true)"
-    if [[ -n "${latest_run}" && -f "${latest_run}" ]]; then
-      cp "${latest_run}" "${STATE_FILE}"
-      promoted_current="1"
-      echo "Set current state from: ${latest_run}"
-    fi
-  fi
-
-  echo "Cleanup complete: checked=${checked}, removed=${removed}, kept=${kept}"
-  if [[ "${dry_run}" == "1" ]]; then
-    echo "Dry-run only: no files were changed."
-  fi
-  if [[ "${promoted_current}" == "1" ]]; then
-    echo "Current state was missing and has been restored from the newest remaining run."
-  fi
+  ( cd "${REPO_ROOT}" && PYTHONPATH="${REPO_ROOT}" python3 -m clanker cleanup-state "$@" )
 }
 
 usage() {
