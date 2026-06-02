@@ -89,6 +89,32 @@ class RunRegistryBehavior(unittest.TestCase):
             b = next(l for l in listings if l.record.instance.startswith("ctfvm-b"))
             self.assertEqual(b.record.agent_backend, "claude-code")
 
+    def test_only_live_prune_clears_current_run(self):
+        # A dead run that is ALSO the current run must clear current-run.json
+        # (parity with legacy _prune_local_state_for_run).
+        with TemporaryDirectory() as tmp:
+            runs_dir = Path(tmp) / "runs"
+            runs_dir.mkdir(parents=True)
+            state_file = Path(tmp) / "current-run.json"
+            run = {
+                "provider": "gcp", "run_id": "20250101-000000",
+                "instance": "ctfvm-a-20250101-000000", "zone": "z", "project": "p",
+            }
+            (runs_dir / "20250101-000000.json").write_text(json.dumps(run))
+            state_file.write_text(json.dumps(run))
+
+            reg = RunRegistry(
+                runs_dir=runs_dir,
+                state_file=state_file,
+                status=lambda record: "",  # cloud says it's gone
+            )
+            listings, current = reg.list_runs(only_live=True)
+
+            self.assertEqual(listings, [])
+            self.assertEqual(current, "")
+            self.assertFalse((runs_dir / "20250101-000000.json").exists())
+            self.assertFalse(state_file.exists(), "current-run.json should be cleared for a pruned current run")
+
     def test_agent_backend_defaults_to_codex_for_legacy(self):
         with TemporaryDirectory() as tmp:
             runs_dir = Path(tmp) / "runs"

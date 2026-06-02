@@ -32,6 +32,7 @@ from .config import (
 )
 from .identity import (
     merge_run_entries,
+    normalize_instance_name,
     normalize_run_entry,
     provider_from_state,
     run_identity_keys,
@@ -269,6 +270,9 @@ class RunRegistry:
         return RunRecord.from_mapping(entry)
 
     def _prune_local_state(self, entry: dict) -> None:
+        """Port of legacy ``_prune_local_state_for_run``: remove the per-run state
+        files AND clear ``current-run.json`` if it points at the pruned run, so a
+        destroyed run that happened to be the current one stops being selected."""
         entry = normalize_run_entry(entry)
         run_id = str(entry.get("run_id", "") or "").strip()
         instance = str(entry.get("instance", "") or "").strip()
@@ -281,5 +285,16 @@ class RunRegistry:
                 pass
             except Exception:
                 pass
-        # current-run.json is pruned by the writer path; left intact here to match
-        # the old behavior of only removing per-run files on the only_live sweep.
+
+        current = load_json(self._state_file) if self._state_file.exists() else None
+        if not current:
+            return
+        current_run_id = str((current or {}).get("run_id", "") or "").strip()
+        current_instance = normalize_instance_name((current or {}).get("instance", ""))
+        if (run_id and current_run_id == run_id) or (instance and current_instance == instance):
+            try:
+                self._state_file.unlink()
+            except FileNotFoundError:
+                pass
+            except Exception:
+                pass

@@ -9,13 +9,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from .config import DEFAULT_CONTROL_PORT
 from .identity import (
     normalize_instance_name,
     normalize_provider,
     normalize_run_id,
 )
 
-DEFAULT_CONTROL_PORT = "443"
 DEFAULT_REMOTE_RUN_DIR = "/home/ctf/run"
 DEFAULT_AGENT_BACKEND = "codex"
 
