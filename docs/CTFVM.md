@@ -502,7 +502,12 @@ The shared Python core under `clanker/` is being grown alongside the bash CLI (a
 migration — see [REFACTOR_PLAN.md](REFACTOR_PLAN.md)). Run it with `python -m clanker <cmd>` from the
 repo root. Available today:
 
+Configure everything in one place: copy [`.env.example`](../.env.example) to `.env` and edit. Every
+knob is `CTFVM_*` and listed there; `python -m clanker config show` prints the resolved value and where
+each came from (cli / .env / env / secret / config.json / default).
+
 ```bash
+python -m clanker config show                          # effective config + provenance
 python -m clanker serve --host 127.0.0.1 --port 8765   # the new web UI / /api/v1 server
 python -m clanker runs [--json]                        # list known runs from .ctfvm/
 python -m clanker status --run-id <id>                 # one run's status

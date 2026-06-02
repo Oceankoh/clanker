@@ -83,6 +83,13 @@ def _cmd_sync_down(args: argparse.Namespace) -> int:
     )
 
 
+def _cmd_config(args: argparse.Namespace) -> int:
+    if args.config_cmd == "show":
+        return commands.cmd_config_show()
+    sys.stderr.write("usage: clanker config show\n")
+    return 2
+
+
 def _cmd_serve(args: argparse.Namespace) -> int:
     from .server.app import serve
     serve(args.host, args.port)
@@ -168,6 +175,11 @@ def main(argv: list[str] | None = None) -> int:
     auth_claude.add_argument("--token", default="", help="token to store (else runs `claude setup-token`)")
     auth_sub.add_parser("show", help="show which agent backends have credentials")
     auth.set_defaults(func=_cmd_auth)
+
+    config = sub.add_parser("config", help="inspect resolved configuration")
+    config_sub = config.add_subparsers(dest="config_cmd", required=True)
+    config_sub.add_parser("show", help="print effective config with provenance")
+    config.set_defaults(func=_cmd_config)
 
     serve = sub.add_parser("serve", help="run the local web UI / API server")
     serve.add_argument("--host", default="127.0.0.1")

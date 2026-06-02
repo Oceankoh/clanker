@@ -113,6 +113,31 @@ def cmd_auth_claude(token: str = "") -> int:
     return 0
 
 
+def cmd_config_show(*, settings: Settings | None = None) -> int:
+    """Print the resolved effective config, grouped, with provenance. Secrets are
+    shown only as set/unset."""
+    settings = settings or Settings()
+    rows = settings.effective()
+    groups: dict[str, list] = {}
+    for spec, value, source in rows:
+        groups.setdefault(spec.group, []).append((spec, value, source))
+
+    width = max((len(s.env_var) for s, _, _ in rows), default=10)
+    for group in sorted(groups):
+        print(f"[{group}]")
+        for spec, value, source in groups[group]:
+            if spec.secret:
+                shown = "***set***" if value else "(unset)"
+            else:
+                shown = str(value) if value not in (None, "") else "(unset)"
+            tag = "" if spec.consumed_by == "python" else f"  ·{spec.consumed_by}"
+            print(f"  {spec.env_var:<{width}} = {shown:<28} [{source}]{tag}")
+        print()
+    print("source precedence: cli > .env > env > secret > .ctfvm/config.json > default")
+    print("·bash/·both knobs are consumed by the bash CLI; edit .env to set them.")
+    return 0
+
+
 def cmd_auth_show() -> int:
     settings = Settings()
     codex_home = Path(str(settings.get("codex_home", default=str(Path.home() / ".codex"))))

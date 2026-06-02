@@ -14,7 +14,7 @@ from .. import artifacts as artifacts_mod
 from .. import snapshot as snapshot_mod
 from .. import steering as steering_mod
 from ..artifacts import ArtifactError
-from ..config import ROOT
+from ..config import ROOT, Settings
 from ..controlclient import ControlPlaneClient, ControlPlaneError
 from ..models import RunRecord, Subagent
 from ..providers import build_provider_registry, build_run_registry
@@ -177,12 +177,22 @@ class UiService:
         challenge_dir = str(spec.get("challenge_dir") or "").strip()
         if not challenge_dir:
             raise ApiError("BAD_REQUEST", "challenge_dir is required", 400)
+        # fall back to configured defaults (CTFVM_AGENT / CTFVM_MODEL / …) so a
+        # spawn that omits them honors .env rather than always using codex.
+        settings = Settings()
+        spec = dict(spec)
+        for key in ("agent_backend", "model", "provider", "toolbox_variant", "timeout_min"):
+            if not spec.get(key):
+                resolved = settings.get(key)
+                if resolved not in (None, ""):
+                    spec[key] = resolved
+
         cmd = [str(ROOT / "scripts" / "ctfvm"), "start", "--dir", challenge_dir]
         flag_map = {
             "provider": "--provider", "agent_backend": "--agent", "zone": "--zone",
             "project": "--project", "description": "--desc", "ideas": "--ideas",
-            "machine_type": "--machine-type", "toolbox_variant": "--toolbox-variant",
-            "timeout_min": "--timeout-min",
+            "model": "--model", "machine_type": "--machine-type",
+            "toolbox_variant": "--toolbox-variant", "timeout_min": "--timeout-min",
         }
         for key, flag in flag_map.items():
             val = spec.get(key)
