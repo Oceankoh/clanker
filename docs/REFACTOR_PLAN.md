@@ -136,13 +136,28 @@ Acceptance: ported command bodies behave identically; `cleanup-state` cut over a
 - Acceptance (live): a Codex run via the new path matches today's behavior; a Claude run starts,
   authenticates via the staged token, and is monitorable.
 
-## Phase 4 — Snapshot/steering/artifacts rewrite (bug fixes B1, B7)
+## Phase 4 — Snapshot/steering/artifacts rewrite (bug fixes B1, B7) ✅
 
-- `snapshot.py` — single JSON envelope, base64 fields (kills B1 marker collision).
-- `steering.py`, `artifacts.py` — preserve existing (correct) validation (R1/R2); control-client only,
-  typed error on missing creds (B7). SSH limited to `CloudProvider.ssh_break_glass`.
-- Acceptance: snapshots correct even when pane/findings content contains marker strings and `|`;
-  steering works for text with `|`, backticks, `$`; legacy runs without creds return a clean `error`.
+- [x] `clanker/snapshot.py` — the remote gatherer is now a **single Python program** (shipped via
+      `remote.py::remote_python`, base64-wrapped, run as `ctf`) that emits **one JSON object** with
+      every variable-length field base64-encoded. No markers, so no collision (B1). Ported
+      `derive_challenge_state` (solved/blocked/stopped/halted/stalled/progressing) + the activity/HALTED
+      logic. `fetch_snapshot` is **control-plane only** — `ControlPlaneError` becomes the snapshot
+      `error` field, never an SSH fallback (B7 / Invariant 1).
+- [x] `clanker/steering.py` — `send_text`/`send_keys`/`trust_prompt`/`set`/`clear` status: validate the
+      target/keys **locally before any remote call** (R2), base64 the text (no shell quoting of user
+      content), control-client only. `SteeringError` for bad input → 400.
+- [x] `clanker/artifacts.py` — `preview` (capped, JSON envelope) / `download` (control-plane
+      `/files/download`) / `build_bundle`; `sanitize_relpath` (R1) before any remote call.
+- [x] `clanker/validation.py` — `sanitize_relpath` / `safe_target` / `KEY_RE` ported verbatim
+      (preserved, not introduced — BUGS.md R1/R2).
+- [x] Tests (16): **B1 proof** — pane output + findings containing `__FINDINGS__`/`__SUPERVISOR__`/
+      `__PANE_END__`/`a|b|c` round-trip exactly; the gatherer script compiles and runs locally (no-tmux
+      branch emits valid JSON); steering rejects `ctf:supervisor;rm -rf /` without contacting the VM and
+      base64s `| \` $ ;` text; artifacts reject `artifacts/../../etc/passwd`. **50 tests total green.**
+
+Wiring these modules into the HTTP server is Phase 5; the bash CLI's monitor/snapshot path is replaced
+when the server lands.
 
 ## Phase 5 — Local server v1 + extracted SPA (B3, B12)
 
