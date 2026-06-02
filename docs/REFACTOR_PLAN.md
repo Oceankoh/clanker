@@ -92,13 +92,34 @@ Acceptance: ported command bodies behave identically; `cleanup-state` cut over a
 
 ## Phase 3 — Agent backend abstraction (Codex parity first, then Claude)
 
-- `agents/base.py` ABC; `agents/codex.py` reproducing today's behavior exactly (auth sync, config.toml,
-  launch, native-thread subagents via the existing bridge).
-- Port `start`/`destroy`/`inject`/`send`/`key`/`sync-skill` to the core; `provisioning.py`,
-  `vpn.py`, `images.py`.
-- Make `supervisor.sh` call `supervisor_launch_cmd`; make `subagent-tmux-bridge.sh` backend-aware.
-- Acceptance: a full Codex run via the **Python** path matches the bash path end-to-end. Bash entry
-  becomes a thin shim or is retired per-command.
+### 3a — Agent layer core ✅ (config / auth / launch — pure, fully tested)
+- [x] `clanker/agents/base.py`: `AgentBackend` ABC + neutral specs (`McpServer`, `SubagentRole`,
+      `AgentConfigSpec`, `StagedFile`, `AuthMaterial`) + `default_agent_spec` (bundled GDB MCP, the
+      two standard roles, IDA via `CTFVM_DEFAULT_IDA_MCP_URL`). VM-runtime methods declared, raise
+      `NotImplementedError` until 3b.
+- [x] `clanker/agents/codex.py`: reproduces today's `config.toml` + `roles/*.toml` (validated: the
+      rendered TOML parses and matches the committed config), `~/.codex` session sync (with
+      `OPENAI_API_KEY` alternative), and the exact `codex --no-alt-screen --enable multi_agent
+      --ask-for-approval never --sandbox danger-full-access` launch.
+- [x] `clanker/agents/claude_code.py`: `settings.json` (`permissions.defaultMode=bypassPermissions`)
+      + `.mcp.json` (stdio + http) + `.claude/agents/*.md`; auth via `CLAUDE_CODE_OAUTH_TOKEN`
+      (or `ANTHROPIC_API_KEY`), never copying credential files; `claude --permission-mode
+      bypassPermissions [--model …]` launch.
+- [x] `build_agent_backend()` factory + `clanker render-agent-config --agent …` introspection cmd.
+- [x] `tests/test_agents.py` (12 tests): codex/claude render, IDA-via-env, launch cmds, auth
+      materialization (session sync / API key / missing-creds), registry normalization.
+- Intentional cleanup: dropped the legacy hardcoded `idaPro` URL (a dev-leftover droplet IP); IDA is
+  wired only via `CTFVM_DEFAULT_IDA_MCP_URL`.
+
+### 3b — Provisioning port + VM wiring (follow-on; needs live-VM validation)
+- Port `start`/`destroy`/`inject`/`send`/`key`/`sync-skill`; `provisioning.py`, `vpn.py`, `images.py`.
+  `start` selects the backend (`--agent`), calls `materialize_auth` + `render_config` to stage files,
+  and refuses with `AUTH_REQUIRED` when Claude creds are missing. `clanker auth claude` wraps
+  `claude setup-token`.
+- Make `supervisor.sh` call `supervisor_launch_cmd`; make `subagent-tmux-bridge.sh` backend-aware
+  (Codex native threads; Claude platform-spawned sessions — AGENTS.md §5).
+- Acceptance: a full Codex run via the **Python** path matches the bash path end-to-end; a Claude run
+  starts, authenticates, and is monitorable.
 
 ## Phase 4 — Snapshot/steering/artifacts rewrite (bug fixes B1, B7)
 

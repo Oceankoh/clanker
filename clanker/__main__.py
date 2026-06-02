@@ -15,6 +15,8 @@ import subprocess
 import sys
 
 from . import __version__, commands
+from .agents import SUPPORTED_BACKENDS, build_agent_backend
+from .config import Settings
 from .controlclient import ControlPlaneError
 from .providers import build_provider_registry, build_run_registry
 from .state import RunRegistry
@@ -81,6 +83,24 @@ def _cmd_sync_down(args: argparse.Namespace) -> int:
     )
 
 
+def _cmd_render_agent_config(args: argparse.Namespace) -> int:
+    backend = build_agent_backend(args.agent)
+    settings = Settings()
+    ida = args.ida_mcp_url or settings.get("ida_mcp_url", env_var="CTFVM_DEFAULT_IDA_MCP_URL", default="")
+    spec = backend.build_spec(model=args.model, ida_mcp_url=ida)
+    auth = backend.materialize_auth(settings)
+
+    print(f"# backend: {backend.display_name} ({backend.name})")
+    print(f"# launch:  {backend.supervisor_launch_cmd(spec)}")
+    print(f"# auth:    env={sorted(auth.container_env)} note={auth.note!r}")
+    if auth.local_files:
+        print(f"# auth files: {[f.remote_relpath for f in auth.local_files]}")
+    for sf in backend.render_config(spec):
+        print(f"\n===== {sf.remote_relpath} (mode {sf.mode or 'default'}) =====")
+        print(sf.content, end="" if sf.content.endswith("\n") else "\n")
+    return 0
+
+
 def _add_selector(p: argparse.ArgumentParser) -> None:
     p.add_argument("--run-id", dest="run_id", default="", help="run id (YYYYmmdd-HHMMSS)")
     p.add_argument("--instance", default="", help="instance name (ctfvm-...)")
@@ -114,6 +134,12 @@ def main(argv: list[str] | None = None) -> int:
     sync_down.add_argument("--out", default="", help="output directory")
     sync_down.add_argument("--remote-path", dest="remote_path", default="/home/ctf/run/challenge")
     sync_down.set_defaults(func=_cmd_sync_down)
+
+    render = sub.add_parser("render-agent-config", help="render an agent backend's on-VM config")
+    render.add_argument("--agent", default="codex", choices=list(SUPPORTED_BACKENDS))
+    render.add_argument("--model", default="")
+    render.add_argument("--ida-mcp-url", dest="ida_mcp_url", default="")
+    render.set_defaults(func=_cmd_render_agent_config)
 
     args = parser.parse_args(argv)
     try:
