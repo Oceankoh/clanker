@@ -48,12 +48,12 @@ contains `|`), parsing splits at the wrong place and the snapshot is silently co
 **Fix (Phase 4):** single JSON envelope; base64-encode every variable-length field (pane output,
 findings, supervisor tail). No marker splitting. → ARCHITECTURE §6 `snapshot.py`, Invariant 4.
 
-### B2 — GDB MCP session not thread-safe
-`images/ctf-toolbox/mcp/gdb_mcp.py:158` is a global singleton `session = GDBSession()` with **no
-lock**. Concurrent tool calls interleave in `_read_until` (`:130`) over one shared stdout buffer →
-responses get cross-wired between commands; `alive` check at `:100` races `stop()`.
-**Fix (Phase 6):** one `asyncio.Lock` (single-threaded asyncio server) serializing
-start/exec/interrupt/stop. Small, isolated change.
+### B2 — GDB MCP session not serialized — FIXED (Phase 6, defense-in-depth)
+`images/ctf-toolbox/mcp/gdb_mcp.py` shares one global `session` over a single stdout. The current
+stdio loop processes messages sequentially (`await handle_message` before the next read), so the race
+isn't reachable *today* — but it would be the moment anyone dispatches messages concurrently.
+**Fixed:** a module `asyncio.Lock` (`_TOOL_LOCK`) serializes the stateful tools (`gdb_start`/`gdb_exec`/
+`gdb_stop`); `interrupt` deliberately bypasses it so it can preempt a blocked `execute`.
 
 ### B3 — Dead `/artifacts` route + unreachable page
 `web.py:2080` maps `GET /artifacts` to `render_run_page()` (the wrong function); the dedicated
@@ -72,18 +72,22 @@ The status cache *is* locked (`service.py:202`), so this is the lone gap.
 **Fix (Phase 1):** move discovery + status caching into `RunRegistry` under one `RLock`.
 → ARCHITECTURE §6 `state.py`, Invariant 2.
 
-### B5 — No request logging on the control server
-`vm/control_server.py:77` `log_message` is a no-op `return`. There is **no** audit trail of control-
-plane requests (auth attempts, exec calls, upload sizes) — hard to debug a stuck run or spot abuse.
-**Fix (Phase 6):** structured one-line stderr log per request (`<ts> <method> <path> <status> <ms>`),
-captured by the systemd unit's journal.
+### B5 — No request logging on the control server — FIXED (Phase 6)
+`vm/control_server.py` `log_message` was a no-op `return`. **Fixed:** a structured one-line stderr log
+per request (`<ts> <client> <method> <path> <status> <ms>ms`), captured by the systemd journal, plus a
+separate 10 MB cap for `/exec` bodies (`MAX_EXEC_BYTES`) vs the 1 GB file-upload cap. Tested in
+`tests/test_control_server.py`.
 
-### B6 — `findings.md` / `supervisor.log` appended without `flock`
-`runner/supervisor.sh:67-77` (`>> findings.md`) and multiple `tee -a supervisor.log` sites. With
-subagents and the bridge writing concurrently, appends can interleave / tear lines, corrupting the
-markdown the UI renders and the mtime-based activity detection reads.
-**Fix (Phase 6):** wrap appends in `flock` on a per-file lock; or route all log writes through a single
-appender. Low-risk, on-VM bash change.
+### B6 — `findings.md` / `supervisor.log` appends — DOWNGRADED (re-investigated)
+Re-investigation in Phase 6 found the original premise overstated for *our* scripts: `supervisor.sh`
+writes the `findings.md` header once **before** launching the agent, and its `tee -a supervisor.log`
+calls all run on the single supervisor thread; the subagent bridge writes a **separate** file
+(`logs/subagent-bridge.log`). So there is no multi-writer race in the shell we control. The real
+concurrent writer to `findings.md` is the **agent itself** (the model + its subagents) inside the
+container — which we don't serialize from bash. That is mitigated by convention, not `flock`: the
+subagent role instructions direct evidence to per-subagent dirs
+(`/workspace/artifacts/subagents/<role>/`). No `flock` added (it would protect a write that isn't
+contended); tracked as a prompt/convention concern rather than a bash bug.
 
 ### B7 — SSH used whenever control creds are absent (monitoring path)
 `providers.py:265-280` (GCP) / `:348-360` (DO): `ssh_cmd()` uses the control plane *if configured*,
@@ -126,18 +130,18 @@ unlintable, no syntax highlighting, and the dead-route bug (B3) hid here.
 
 ## Bug → phase summary
 
-| ID  | Severity | Area                | Fixed by phase |
-|-----|----------|---------------------|----------------|
-| B1  | P0       | snapshot parsing    | 4              |
-| B2  | P0       | gdb MCP concurrency | 6              |
-| B3  | P0       | dead route / page   | 5              |
-| B4  | P1       | discovery race      | 1              |
-| B5  | P1       | control-server logs | 6              |
-| B6  | P1       | log write races     | 6              |
-| B7  | P1       | SSH on hot path     | 4              |
-| B8  | P2       | control client      | 1              |
-| B9  | P2       | bash write_state    | 1–2            |
-| B10 | P2       | provider duplication| 2              |
-| B11 | P2       | startup install     | 6              |
-| B12 | P2       | embedded frontend   | 5              |
-| R1–R3 | —      | refuted (preserve)  | n/a            |
+| ID  | Severity | Area                | Phase | Status |
+|-----|----------|---------------------|-------|--------|
+| B1  | P0       | snapshot parsing    | 4     | ✅ fixed |
+| B2  | P0       | gdb MCP concurrency | 6     | ✅ fixed (defense-in-depth) |
+| B3  | P0       | dead route / page   | 5     | ✅ fixed (route gone) |
+| B4  | P1       | discovery race      | 1     | ✅ fixed (one RLock) |
+| B5  | P1       | control-server logs | 6     | ✅ fixed (+/exec cap) |
+| B6  | P1       | log write races     | 6     | ▽ downgraded (not contended in our scripts) |
+| B7  | P1       | SSH on hot path     | 4     | ✅ fixed (control-plane only) |
+| B8  | P2       | control client      | 1     | ✅ fixed (typed client) |
+| B9  | P2       | bash write_state    | 1–2   | ◑ Python core writes state; bash `start` cutover live-deferred |
+| B10 | P2       | provider duplication| 2     | ✅ fixed (CloudProvider ABC) |
+| B11 | P2       | startup install     | 6     | ✅ fixed (fallback error + Claude install) |
+| B12 | P2       | embedded frontend   | 5     | ✅ fixed (extracted index.html) |
+| R1–R3 | —      | refuted (preserve)  | n/a   | preserved (asserts in tests) |

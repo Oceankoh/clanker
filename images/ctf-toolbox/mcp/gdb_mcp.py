@@ -219,21 +219,31 @@ async def gdb_stop() -> str:
     return "GDB session terminated."
 
 
+# Serializes stateful GDB operations so two tool calls can never interleave
+# over the single shared stdout (BUGS.md B2). `interrupt` deliberately bypasses
+# the lock — it must be able to preempt a blocked `execute`.
+_TOOL_LOCK = asyncio.Lock()
+
+
 async def call_tool(name: str, arguments: dict) -> str:
-    if name == "gdb_start":
-        return await gdb_start(
-            binary=str(arguments.get("binary", "")),
-            remote=str(arguments.get("remote", "")),
-            args=str(arguments.get("args", "")),
-            init_script=str(arguments.get("init_script", "")),
-        )
-    if name == "gdb_exec":
-        return await gdb_exec(
-            command=str(arguments.get("command", "")),
-            timeout=float(arguments.get("timeout", 30.0)),
-        )
-    if name == "gdb_stop":
-        return await gdb_stop()
+    if name == "gdb_exec" and str(arguments.get("command", "")).strip().lower() == "interrupt":
+        return await gdb_exec(command="interrupt")
+
+    async with _TOOL_LOCK:
+        if name == "gdb_start":
+            return await gdb_start(
+                binary=str(arguments.get("binary", "")),
+                remote=str(arguments.get("remote", "")),
+                args=str(arguments.get("args", "")),
+                init_script=str(arguments.get("init_script", "")),
+            )
+        if name == "gdb_exec":
+            return await gdb_exec(
+                command=str(arguments.get("command", "")),
+                timeout=float(arguments.get("timeout", 30.0)),
+            )
+        if name == "gdb_stop":
+            return await gdb_stop()
     raise RuntimeError(f"Unknown tool: {name}")
 
 

@@ -5,6 +5,7 @@ import base64
 import json
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import time
@@ -14,7 +15,8 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 
-MAX_REQUEST_BYTES = 1_073_741_824
+MAX_REQUEST_BYTES = 1_073_741_824   # file uploads
+MAX_EXEC_BYTES = 10_485_760         # /exec JSON body (B5): commands are small
 
 
 def _basic_header(user: str, password: str) -> str:
@@ -75,7 +77,17 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def log_message(self, _format, *_args):
-        return
+        return  # default access log silenced; we emit a structured line per request
+
+    def _log(self, status: int, extra: str = "") -> None:
+        """Structured one-line request log to stderr (captured by the systemd
+        journal). Replaces the no-op access log (B5)."""
+        t0 = getattr(self, "_t0", None)
+        ms = int((time.time() - t0) * 1000) if t0 else 0
+        ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        client = self.client_address[0] if self.client_address else "-"
+        sys.stderr.write(f"{ts} {client} {self.command} {self.path} {int(status)} {ms}ms {extra}".rstrip() + "\n")
+        sys.stderr.flush()
 
     @property
     def auth_header(self) -> str:
@@ -96,6 +108,7 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+        self._log(status)
 
     def _send_bytes(self, status: int, payload: bytes, content_type: str) -> None:
         self.send_response(status)
@@ -103,12 +116,14 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
+        self._log(status, f"{len(payload)}B")
 
     def _unauthorized(self) -> None:
         self.send_response(HTTPStatus.UNAUTHORIZED)
         self.send_header("WWW-Authenticate", 'Basic realm="ctfvm-control"')
         self.send_header("Content-Length", "0")
         self.end_headers()
+        self._log(HTTPStatus.UNAUTHORIZED)
 
     def _authenticate(self) -> bool:
         if self.headers.get("Authorization", "") == self.auth_header:
@@ -122,18 +137,18 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
         except ValueError:
             return -1
 
-    def _read_body(self) -> bytes | None:
+    def _read_body(self, max_bytes: int = MAX_REQUEST_BYTES) -> bytes | None:
         size = self._request_size()
         if size < 0:
             self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "invalid content-length"})
             return None
-        if size > MAX_REQUEST_BYTES:
+        if size > max_bytes:
             self._send_json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {"ok": False, "error": "request too large"})
             return None
         return self.rfile.read(size)
 
-    def _parse_request_json(self) -> dict | None:
-        body = self._read_body()
+    def _parse_request_json(self, max_bytes: int = MAX_REQUEST_BYTES) -> dict | None:
+        body = self._read_body(max_bytes)
         if body is None:
             return None
         try:
@@ -143,6 +158,7 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
             return None
 
     def do_GET(self) -> None:
+        self._t0 = time.time()
         parsed = urlparse(self.path)
         if parsed.path == "/healthz":
             self._send_json(
@@ -173,11 +189,12 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
         self._send_json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "not found"})
 
     def do_POST(self) -> None:
+        self._t0 = time.time()
         parsed = urlparse(self.path)
         if parsed.path == "/exec":
             if not self._authenticate():
                 return
-            payload = self._parse_request_json()
+            payload = self._parse_request_json(max_bytes=MAX_EXEC_BYTES)
             if payload is None:
                 return
             command = str(payload.get("command", "") or "").strip()
