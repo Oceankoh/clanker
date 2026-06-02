@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 
 from . import __version__, commands
@@ -119,6 +120,13 @@ def main(argv: list[str] | None = None) -> int:
         return args.func(args)
     except ControlPlaneError as exc:
         sys.stderr.write(f"control plane error: {exc}\n")
+        return 1
+    except subprocess.CalledProcessError as exc:
+        sys.stderr.write(f"local command failed (rc={exc.returncode}): {' '.join(map(str, exc.cmd))}\n")
+        return 1
+    except OSError as exc:
+        # e.g. `tar` binary missing, or a local I/O failure during extract
+        sys.stderr.write(f"error: {exc}\n")
         return 1
 
 

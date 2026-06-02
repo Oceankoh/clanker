@@ -142,6 +142,87 @@ class Status(unittest.TestCase):
             rc = commands.cmd_status(registry, _registry({}), run_id="nope")
             self.assertEqual(rc, 1)
 
+    def test_empty_run_id_does_not_leak_current_run_extras(self):
+        # An IP-only run (no run_id) must NOT pick up the current run's extras.
+        with TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            runs.mkdir(parents=True)
+            state_file = Path(tmp) / "current-run.json"
+            commands.RUNS_DIR = runs
+            commands.STATE_FILE = state_file
+            # current run is a DIFFERENT gcp run carrying a distinctive toolbox ref
+            _write(
+                state_file, run_id="20250101-000000",
+                instance="ctfvm-gcp-20250101-000000", toolbox_image_ref="GCPTOOLBOX",
+            )
+            # target: a DO run with NO run_id (instance has no date suffix)
+            (runs / "do.json").write_text(json.dumps({
+                "provider": "digitalocean", "instance": "ctfvm-do-x",
+                "zone": "nyc3", "project": "digitalocean", "ip": "5.6.7.8",
+            }))
+            registry = RunRegistry(runs_dir=runs, state_file=state_file)
+            providers = CloudProviderRegistry([
+                FakeProvider("gcp", {}), FakeProvider("digitalocean", {"ctfvm-do-x": "active"}),
+            ])
+
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                commands.cmd_status(registry, providers, instance="ctfvm-do-x")
+            out = buf.getvalue()
+            self.assertIn("Provider: DigitalOcean", out)
+            self.assertNotIn("GCPTOOLBOX", out)  # must not bleed from current-run.json
+
+
+class _FakeClient:
+    def __init__(self, exec_rc=0):
+        from clanker.models import ExecResult
+        self._rc = exec_rc
+        self.downloaded = False
+        self._ExecResult = ExecResult
+
+    def exec(self, command, *, stdin=b"", timeout=30):
+        return self._ExecResult(returncode=self._rc, stderr=b"boom" if self._rc else b"")
+
+    def download_file(self, remote_path, *, timeout=60):
+        self.downloaded = True
+        return b""
+
+
+class FetchSyncDown(unittest.TestCase):
+    def _run_with_fake(self, fn_name, exec_rc):
+        with TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            runs.mkdir(parents=True)
+            (runs / "20250101-000000.json").write_text(json.dumps({
+                "provider": "gcp", "run_id": "20250101-000000",
+                "instance": "ctfvm-a-20250101-000000", "zone": "z", "project": "p",
+                "control_host": "1.2.3.4", "control_port": "443",
+                "control_user": "u", "control_password": "pw",
+            }))
+            registry = RunRegistry(runs_dir=runs, state_file=Path(tmp) / "none.json")
+            fake = _FakeClient(exec_rc=exec_rc)
+
+            class FakeCPC:
+                @staticmethod
+                def from_run(record, **kw):
+                    return fake
+
+            orig = commands.ControlPlaneClient
+            commands.ControlPlaneClient = FakeCPC
+            try:
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    fn = getattr(commands, fn_name)
+                    rc = fn(registry, run_id="20250101-000000", out_dir=str(Path(tmp) / "out"))
+            finally:
+                commands.ControlPlaneClient = orig
+            return rc, fake
+
+    def test_fetch_aborts_when_remote_archive_fails(self):
+        rc, fake = self._run_with_fake("cmd_fetch", exec_rc=1)
+        self.assertEqual(rc, 1)
+        self.assertFalse(fake.downloaded, "must not download after a failed archive step")
+
 
 class ProviderRegistryWiring(unittest.TestCase):
     def test_get_normalizes_and_raises(self):

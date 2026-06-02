@@ -77,7 +77,14 @@ def cmd_status(
         sys.stderr.write("No matching run found.\n")
         return 1
 
-    raw = registry.load_raw(record.run_id) or registry.load_raw(record.instance) or {}
+    # Look up raw state by a SPECIFIC selector — never load_raw("") which would
+    # fall back to the current run and show a different run's extras.
+    raw: dict = {}
+    for selector in (record.run_id, record.instance):
+        if selector:
+            raw = registry.load_raw(selector) or {}
+            if raw:
+                break
     status = providers.get_status(record)
 
     scope = PROVIDER_SCOPE_LABELS.get(record.provider, "Project")
@@ -150,6 +157,11 @@ def cmd_cleanup_state(
                 backend = providers.get(provider)
                 cli_ok = backend.cli_available
             except KeyError:
+                # Intentional divergence from the bash port: a state file with an
+                # unknown/typo provider is KEPT (treated as "CLI unavailable")
+                # rather than deleted. Keeping un-classifiable state is safer than
+                # destroying it during a partial upgrade; genuinely broken files
+                # are still removed via the "incomplete metadata" path above.
                 backend, cli_ok = None, False
             if not cli_ok:
                 reason = "provider CLI unavailable"
@@ -222,7 +234,13 @@ def cmd_fetch(
         f"tar -czf {remote_tar} findings.md artifacts logs inject.queue challenge_prompt.txt 2>/dev/null "
         f"|| tar -czf {remote_tar} artifacts logs challenge_prompt.txt'"
     )
-    client.exec(tar_cmd, timeout=EXEC_TIMEOUT)
+    result = client.exec(tar_cmd, timeout=EXEC_TIMEOUT)
+    if not result.ok:
+        sys.stderr.write(
+            f"remote archive step failed (rc={result.returncode}): "
+            f"{result.stderr_text().strip() or 'see VM logs'}\n"
+        )
+        return 1
     payload = client.download_file(remote_tar, timeout=DOWNLOAD_TIMEOUT)
     archive = out / f"ctfvm-{rid}.tar.gz"
     archive.write_bytes(payload)
@@ -266,11 +284,17 @@ def cmd_sync_down(
 
     suffix = os.getpid()
     remote_tar = f"/tmp/ctfvm-sync-down-{rid}-{suffix}.tar"
-    client.exec(
+    result = client.exec(
         f"sudo -u ctf bash -lc 'tmp={remote_tar}; rm -f \"$tmp\"; "
         f"tar -C \"{remote_path}\" -cf \"$tmp\" .'",
         timeout=EXEC_TIMEOUT,
     )
+    if not result.ok:
+        sys.stderr.write(
+            f"remote archive step failed (rc={result.returncode}): "
+            f"{result.stderr_text().strip() or 'see VM logs'}\n"
+        )
+        return 1
     payload = client.download_file(remote_tar, timeout=DOWNLOAD_TIMEOUT)
     with tempfile.NamedTemporaryFile(dir=out, suffix=".tar", delete=False) as tf:
         tf.write(payload)
