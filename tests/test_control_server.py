@@ -75,7 +75,10 @@ class ControlServerTest(unittest.TestCase):
         c.putheader("Content-Length", str(control_server.MAX_EXEC_BYTES + 1))
         c.endheaders()
         c.send(b"{}")  # small actual body; server rejects on declared size
-        self.assertEqual(c.getresponse().status, 413)
+        r = c.getresponse()
+        self.assertEqual(r.status, 413)
+        # connection is closed on reject so a queued body can't desync keep-alive
+        self.assertEqual((r.getheader("Connection") or "").lower(), "close")
 
 
 if __name__ == "__main__":

@@ -140,9 +140,12 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
     def _read_body(self, max_bytes: int = MAX_REQUEST_BYTES) -> bytes | None:
         size = self._request_size()
         if size < 0:
+            # we won't read the body -> close to avoid desyncing a keep-alive conn
+            self.close_connection = True
             self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "invalid content-length"})
             return None
         if size > max_bytes:
+            self.close_connection = True
             self._send_json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {"ok": False, "error": "request too large"})
             return None
         return self.rfile.read(size)
