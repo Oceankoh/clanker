@@ -137,6 +137,11 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(st, 200)
         self.assertTrue(j["ok"])
 
+    def test_inject_queue(self):
+        st, j = self._req("POST", "/api/v1/runs/20250101-000000/inject", {"text": "hint"})
+        self.assertEqual(st, 200)
+        self.assertTrue(j["ok"])
+
     def test_status_set_clear(self):
         st, j = self._req("POST", "/api/v1/runs/20250101-000000/status", {"state": "solved"})
         self.assertEqual(st, 200)
@@ -185,6 +190,9 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(st, 200)
         self.assertIn("text/html", hdr.get("Content-Type", ""))
         self.assertIn(b"clanker", body)
+        # the operational redesign elements are present
+        for marker in (b"submitSteer", b"steerKey", b"name=smode", b"/inject", b"hexDump", b"Approve"):
+            self.assertIn(marker, body, marker)
 
 
 class UiAuth(unittest.TestCase):

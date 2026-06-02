@@ -31,6 +31,12 @@
   pre { background:#0b0d11; border:1px solid var(--line); border-radius:6px; padding:12px; overflow:auto; max-height:52vh; white-space:pre-wrap; word-break:break-word; }
   .row { display:flex; gap:8px; align-items:center; margin:8px 0; flex-wrap:wrap; }
   input[type=text]{ flex:1; min-width:200px; background:#0b0d11; border:1px solid var(--line); color:var(--fg); padding:7px 10px; border-radius:6px; }
+  textarea{ width:100%; background:#0b0d11; border:1px solid var(--line); color:var(--fg); padding:8px 10px; border-radius:6px; font:13px/1.45 ui-monospace,Menlo,monospace; resize:vertical; }
+  textarea:focus,input:focus{ outline:none; border-color:var(--accent); }
+  label.mode{ display:inline-flex; align-items:center; gap:5px; cursor:pointer; }
+  .pane-out{ max-height:46vh; }
+  img.art{ max-width:100%; border:1px solid var(--line); border-radius:6px; }
+  .hint{ color:var(--muted); font-size:12px; }
   button { background:var(--panel); color:var(--fg); border:1px solid var(--line); padding:7px 12px; border-radius:6px; cursor:pointer; }
   button:hover { border-color:var(--accent); }
   button.primary { background:var(--accent); color:#06121f; border-color:var(--accent); font-weight:600; }
@@ -100,12 +106,22 @@ function renderFocus(){
   let body='';
   if(STATE.tab==='panes'){
     const panes = s.panes||[];
-    body = panes.map(p=>`<div class="muted">${p.target} — ${esc(p.window_name)}${p.active?' *':''}</div><pre>${esc(p.output)}</pre>`).join('') || '<div class="muted">no panes</div>';
-    body += `<div class="row">
-      <input type="text" id="steer" placeholder="message to ctf:supervisor… (special chars safe)">
-      <button class="primary" onclick="send()">Send</button>
-      <button onclick="key('C-c')">Ctrl-C</button>
-      <button onclick="trust()">Trust (1↵)</button></div>`;
+    body = panes.map(p=>`<div class="muted">${p.target} — ${esc(p.window_name)}${p.active?' *':''}</div><pre class="pane-out">${esc(p.output)}</pre>`).join('') || '<div class="muted">no panes</div>';
+    body += `
+      <textarea id="steer" rows="2" onkeydown="steerKey(event)" placeholder="message to ctf:supervisor —  Enter to send · Shift+Enter for newline"></textarea>
+      <div class="row">
+        <label class="mode"><input type="radio" name="smode" value="queue" checked> Queue</label>
+        <label class="mode"><input type="radio" name="smode" value="steer"> Send now</label>
+        <span class="hint" id="modehint">queue: appended to inject.queue; the agent reads it at a safe point</span>
+      </div>
+      <div class="row">
+        <button class="primary" onclick="submitSteer()">Send</button>
+        <button onclick="key('C-c')">Ctrl-C</button>
+        <button onclick="keys(['1','Enter'])">Trust (1↵)</button>
+        <button onclick="keys(['y','Enter'])">Approve (y)</button>
+        <button onclick="keys(['n','Enter'])">Deny (n)</button>
+        <button onclick="key('Escape')">Esc</button>
+      </div>`;
   } else if(STATE.tab==='findings'){ body=`<pre>${esc(s.findings_tail)||'(empty)'}</pre>`; }
   else if(STATE.tab==='supervisor'){ body=`<pre>${esc(s.supervisor_tail)||'(empty)'}</pre>`; }
   else if(STATE.tab==='artifacts'){
@@ -114,7 +130,7 @@ function renderFocus(){
       a.map(x=>`<tr><td><a href="#" onclick="preview('${encodeURIComponent(x.relpath)}');return false">${esc(x.relpath)}</a></td>
         <td>${x.size_bytes}</td><td class="muted">${x.mtime}</td>
         <td><a href="/api/v1/runs/${encodeURIComponent(s.run_id)}/artifacts/${encodeURIComponent(x.relpath)}/download">⬇</a></td></tr>`).join('')+'</table>'
-      + `<div class="row"><a href="/api/v1/runs/${encodeURIComponent(s.run_id)}/bundle"><button>Download bundle (.tar.gz)</button></a></div><pre id="artprev" class="muted">click an artifact to preview</pre>`;
+      + `<div class="row"><a href="/api/v1/runs/${encodeURIComponent(s.run_id)}/bundle"><button>Download bundle (.tar.gz)</button></a></div><div id="artprev" class="muted">click an artifact to preview</div>`;
   } else if(STATE.tab==='subagents'){
     const sub=s.subagents||[];
     body = sub.map(x=>`<div class="muted">${x.tmux_target} — ${esc(x.label)} <span class="pill">${x.state}</span></div>`).join('') || '<div class="muted">no subagents</div>';
@@ -130,26 +146,54 @@ function renderFocus(){
       <button onclick="setStatus('blocked')">Mark blocked</button>
       <button onclick="clearStatus()">Clear status</button></div>
     <div class="tabs">${tabBar}</div>${body}`;
+  // keep terminal panes scrolled to the latest output
+  document.querySelectorAll('.pane-out').forEach(el=>{ el.scrollTop = el.scrollHeight; });
+  const hint = $('#modehint');
+  if(hint) document.querySelectorAll('input[name=smode]').forEach(r=>r.addEventListener('change',()=>{
+    hint.textContent = steerMode()==='queue'
+      ? 'queue: appended to inject.queue; the agent reads it at a safe point'
+      : 'send now: typed straight into the live pane (may interrupt the current turn)';
+  }));
 }
 
-async function send(){
-  const t=$('#steer').value; if(!t) return;
-  try{ await api('/runs/'+encodeURIComponent(STATE.current)+'/panes/send',
-    {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({target:'ctf:supervisor',text:t,press_enter:true})});
-    $('#steer').value=''; setTimeout(refreshFocus,400);
+function steerMode(){ const r=document.querySelector('input[name=smode]:checked'); return r?r.value:'queue'; }
+function post(path, payload){ return api('/runs/'+encodeURIComponent(STATE.current)+path,
+  {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload||{})}); }
+
+function steerKey(ev){ if(ev.key==='Enter' && !ev.shiftKey){ ev.preventDefault(); submitSteer(); } }
+async function submitSteer(){
+  const ta=$('#steer'); const t=ta.value; if(!t.trim()) return;
+  try{
+    if(steerMode()==='queue') await post('/inject', {text:t});
+    else                      await post('/panes/send', {target:'ctf:supervisor', text:t, press_enter:true});
+    ta.value=''; setTimeout(refreshFocus, 400);
   }catch(e){ alert(e.message); }
 }
-async function key(k){ try{ await api('/runs/'+encodeURIComponent(STATE.current)+'/panes/keys',
-  {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({target:'ctf:supervisor',keys:[k]})}); setTimeout(refreshFocus,400);}catch(e){alert(e.message);} }
-async function trust(){ try{ await api('/runs/'+encodeURIComponent(STATE.current)+'/panes/trust',
-  {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({target:'ctf:supervisor'})}); setTimeout(refreshFocus,400);}catch(e){alert(e.message);} }
-async function setStatus(st){ try{ await api('/runs/'+encodeURIComponent(STATE.current)+'/status',
-  {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({state:st,note:''})}); refreshFocus();}catch(e){alert(e.message);} }
+async function keys(ks){ try{ await post('/panes/keys', {target:'ctf:supervisor', keys:ks}); setTimeout(refreshFocus,400);}catch(e){alert(e.message);} }
+async function key(k){ keys([k]); }
+async function setStatus(st){ try{ await post('/status', {state:st, note:''}); refreshFocus();}catch(e){alert(e.message);} }
 async function clearStatus(){ try{ await api('/runs/'+encodeURIComponent(STATE.current)+'/status',{method:'DELETE'}); refreshFocus();}catch(e){alert(e.message);} }
+
+function hexDump(b64){
+  let bin; try{ bin=atob(b64); }catch(e){ return '(unprintable)'; }
+  const n=Math.min(bin.length, 4096); let out='';
+  for(let i=0;i<n;i+=16){
+    const row=bin.slice(i,i+16);
+    let hex='',asc='';
+    for(let j=0;j<16;j++){ if(j<row.length){ const c=row.charCodeAt(j); hex+=c.toString(16).padStart(2,'0')+' '; asc+=(c>=32&&c<127)?row[j]:'.'; } else hex+='   '; }
+    out+=i.toString(16).padStart(8,'0')+'  '+hex+' '+asc+'\n';
+  }
+  if(bin.length>n) out+='… (truncated)\n';
+  return out;
+}
 async function preview(rel){
-  try{ const d=await api('/runs/'+encodeURIComponent(STATE.current)+'/artifacts/'+rel);
-    $('#artprev').textContent = d.is_text ? d.content : `[${d.mime}, ${d.size} bytes]${d.truncated?' (truncated)':''}`;
-  }catch(e){ $('#artprev').textContent=e.message; }
+  const el=$('#artprev'); el.className=''; el.textContent='…';
+  try{
+    const d=await api('/runs/'+encodeURIComponent(STATE.current)+'/artifacts/'+rel);
+    if(d.is_image && d.image_data_url){ el.innerHTML=`<img class="art" src="${d.image_data_url}">`; }
+    else if(d.is_text){ el.innerHTML=`<div class="row"><span class="hint">${esc(d.mime)} · ${d.size}B${d.truncated?' · truncated':''}</span><button onclick="navigator.clipboard.writeText(this.parentNode.nextSibling.textContent)">copy</button></div><pre>${esc(d.content)}</pre>`; }
+    else { el.innerHTML=`<div class="hint">${esc(d.mime)} · ${d.size}B · hex</div><pre>${esc(hexDump(d.b64||''))}</pre>`; }
+  }catch(e){ el.textContent=e.message; }
 }
 
 refreshHealth(); refreshFleet();

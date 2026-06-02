@@ -88,6 +88,20 @@ class Steering(unittest.TestCase):
         with self.assertRaises(ControlPlaneError):
             steering.send_text(c, "ctf:supervisor", "hi")
 
+    def test_inject_appends_to_queue(self):
+        c = FakeClient()
+        steering.inject_message(c, "try the heap UAF | path")
+        cmd = c.commands[0]
+        self.assertIn("inject.queue", cmd)
+        self.assertNotIn("heap UAF", cmd)  # base64'd, not raw
+        self.assertIn(base64.b64encode(b"try the heap UAF | path\n").decode(), cmd)
+
+    def test_inject_empty_rejected(self):
+        c = FakeClient()
+        with self.assertRaises(SteeringError):
+            steering.inject_message(c, "   ")
+        self.assertEqual(c.commands, [])
+
 
 class Artifacts(unittest.TestCase):
     def test_download_rejects_traversal_without_remote_call(self):
@@ -123,6 +137,15 @@ class Artifacts(unittest.TestCase):
         self.assertTrue(pv.is_text)
         self.assertEqual(pv.content, "print")
         self.assertEqual(pv.relpath, "artifacts/exploit.py")
+
+    def test_preview_binary_exposes_b64_not_text(self):
+        blob = b"\x00\x01\x02\x03ELF"
+        body = json.dumps({"ok": True, "mime": "application/octet-stream", "size": len(blob),
+                           "truncated": False, "b64": base64.b64encode(blob).decode()})
+        c = FakeClient(exec_result=ExecResult(returncode=0, stdout=body.encode()))
+        pv = artifacts.preview_artifact(c, "/home/ctf/run", "artifacts/chal")
+        self.assertFalse(pv.is_text)
+        self.assertEqual(pv.b64, base64.b64encode(blob).decode())  # bytes for hex view
 
     def test_preview_not_found(self):
         body = json.dumps({"ok": False})

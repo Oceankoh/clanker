@@ -177,12 +177,34 @@ Done:
       target + 200 on special-char text, status set/clear, artifact preview/download (read as ctf),
       bundle, removed-routes 404, SPA served; plus job-tracker run-id detection + limit. **63 tests total.**
 
-Deferred to 5b/6 (richer agent-feature surface — needs live agent output to parse):
-- The full `AgentFeatures` block (pending-approval detection from pane/stream, session id + resume,
-  model/mode display, plan/diffs, usage). The SPA already exposes the steering + **Trust** primitive and
-  the subagent list; the deeper per-backend detection lands with the Claude backend wiring in Phase 6.
+### 5a-operational — UI redesign ✅ (the testable wins)
+Addresses the concrete UX problems in the first SPA cut:
+- [x] **Steer vs queue** — new `POST /api/v1/runs/{id}/inject` appends to `inject.queue` (the safe path
+      the tmux bridge feeds at a good point). The SPA defaults to **Queue (inject)** and offers explicit
+      **Send now (steer)** for typing into the live pane.
+- [x] **Enter-to-send** — the steer box is a `textarea`: Enter submits (in the selected mode),
+      Shift+Enter inserts a newline.
+- [x] **Quick actions** — Ctrl-C, Trust (1↵), Approve (y), Deny (n), Esc as labeled key-sends (no
+      fragile auto-detection).
+- [x] **Artifacts** — images render inline, binaries get a client-side hex dump (preview now returns the
+      capped bytes as `b64`), text gets a copy button; panes auto-scroll to the latest output.
+- [x] Tests: inject endpoint + `steering.inject_message`, binary-preview `b64`, SPA element markers.
+      88 tests total.
 
-### 5b — Agent-feature parity in the frontend (follow-on; needs live agent output)
+### 5b — Chat-transcript experience (deferred; needs live agent output to validate)
+The remaining "full Claude/Codex web UI" piece — a structured transcript (messages, tool calls,
+approvals inline, plan/todo, diffs, usage) parsed from each backend's session JSONL (Codex rollout /
+Claude stream-json) into a chat view. The parser can be written against the documented schema but only
+*validated* against a real run, so it ships with the live agent wiring. The current panes tab remains a
+raw `tmux capture-pane` view until then.
+
+Original 5b spec (the AgentFeatures surface):
+- **Agent-feature parity in the frontend (backend-neutral).** The SPA must surface the *normal*
+  day-to-day features of whichever agent a run uses, not just raw pane text. The agent backend exposes
+  these as uniform snapshot/endpoint data; the SPA renders them the same way for Codex and Claude Code:
+  - **Approvals / permission prompts** — detect a pending tool/command approval in the pane and offer
+    one-click Approve / Approve-always / Deny (generalizes today's `trust` button). Codex approval
+    prompts and Claude permission prompts both map to this control.
 - **Agent-feature parity in the frontend (backend-neutral).** The SPA must surface the *normal*
   day-to-day features of whichever agent a run uses, not just raw pane text. The agent backend exposes
   these as uniform snapshot/endpoint data; the SPA renders them the same way for Codex and Claude Code:

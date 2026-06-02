@@ -36,6 +36,7 @@ class ArtifactPreview:
     is_image: bool
     content: str = ""          # text, when is_text
     image_data_url: str = ""   # data URL, when is_image
+    b64: str = ""              # raw previewed bytes (base64), for hex view of binaries
 
 
 @dataclass
@@ -120,11 +121,13 @@ def preview_artifact(
     effective = mime if mime and mime != "application/octet-stream" else (guessed or mime)
     is_text = effective.startswith("text/") or effective in _TEXT_MIMES
     is_image = effective.startswith("image/")
+    raw_b64 = str(data.get("b64") or "")
     return ArtifactPreview(
         relpath=clean, mime=effective, size=int(data.get("size") or 0),
         truncated=bool(data.get("truncated")), is_text=is_text, is_image=is_image,
         content=raw.decode("utf-8", "replace") if is_text else f"[binary file: {effective}, {data.get('size', 0)} bytes]",
-        image_data_url=(f"data:{effective};base64,{base64.b64encode(raw).decode('ascii')}" if (is_image and raw) else ""),
+        image_data_url=(f"data:{effective};base64,{raw_b64}" if (is_image and raw) else ""),
+        b64=("" if is_text else raw_b64),  # bytes for hex view of binaries (omit for text)
     )
 
 
