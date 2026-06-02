@@ -96,6 +96,7 @@ class Settings:
         self._cli = {k: v for k, v in (cli or {}).items() if v is not None}
         self._dotenv = _parse_env_file(self.root / ".env")
         self._config_json = load_json(self.root / ".ctfvm" / "config.json") or {}
+        self._secrets = load_json(self.root / ".ctfvm" / "secrets.json") or {}
 
     def get(
         self,
@@ -112,6 +113,9 @@ class Settings:
                 return self._dotenv[env_var]
             if env_var in os.environ:
                 return os.environ[env_var]
+        # locally-stored secrets (e.g. Claude OAuth token) sit between env and config
+        if key in self._secrets:
+            return self._secrets[key]
         ck = config_key or key
         if ck in self._config_json:
             return self._config_json[ck]

@@ -111,15 +111,30 @@ Acceptance: ported command bodies behave identically; `cleanup-state` cut over a
 - Intentional cleanup: dropped the legacy hardcoded `idaPro` URL (a dev-leftover droplet IP); IDA is
   wired only via `CTFVM_DEFAULT_IDA_MCP_URL`.
 
-### 3b — Provisioning port + VM wiring (follow-on; needs live-VM validation)
-- Port `start`/`destroy`/`inject`/`send`/`key`/`sync-skill`; `provisioning.py`, `vpn.py`, `images.py`.
-  `start` selects the backend (`--agent`), calls `materialize_auth` + `render_config` to stage files,
-  and refuses with `AUTH_REQUIRED` when Claude creds are missing. `clanker auth claude` wraps
-  `claude setup-token`.
-- Make `supervisor.sh` call `supervisor_launch_cmd`; make `subagent-tmux-bridge.sh` backend-aware
-  (Codex native threads; Claude platform-spawned sessions — AGENTS.md §5).
-- Acceptance: a full Codex run via the **Python** path matches the bash path end-to-end; a Claude run
-  starts, authenticates, and is monitorable.
+### 3b — Agent ↔ provisioning glue ✅ (the testable, backward-compatible parts)
+- [x] `clanker/secretstore.py` + `Settings` read of `.ctfvm/secrets.json` (0600, gitignored).
+- [x] `clanker auth claude [--token]` (wraps `claude setup-token`, or stores a pasted token) +
+      `clanker auth show`. `materialize_auth` picks the token up automatically.
+- [x] `clanker stage-agent --agent … --staging-dir …`: materializes the **full** agent payload —
+      rendered config/MCP/role files, copied local auth (Codex session), and the `agent/` control
+      files consumed by `supervisor.sh` (`backend`, `launch.cmd`, `container.env`, `wipe-paths.txt`).
+      Refuses with `AUTH_REQUIRED` (rc 3) when Claude creds are missing.
+- [x] `runner/supervisor.sh` is now **backend-aware**: it reads `agent/{backend,launch.cmd,
+      container.env}` and launches whatever the backend staged, passing per-agent container env to
+      `docker exec`. When `agent/` is absent (older runs) it falls back to the exact historical Codex
+      defaults — existing runs are unaffected. (bash syntax + parsing logic verified in isolation.)
+- [x] `tests/test_auth_stage.py` (4 tests): secret store roundtrip + 0600; codex/claude stage payload;
+      Claude-no-creds → `AUTH_REQUIRED`. 30 tests total green.
+
+### 3b-cont — `start`/`destroy` wiring (remaining; needs a live VM to validate)
+- `cmd_start`: accept `--agent`; replace the Codex-specific config upload + `~/.codex` sync with a call
+  to `clanker stage-agent` (one unified path for both backends) and upload the staged tree; refuse on
+  `AUTH_REQUIRED`. `cmd_destroy`: shred the backend's `wipe-paths.txt` (already shreds `.codex`/`.claude`
+  generically — extend to read the staged list).
+- `subagent-tmux-bridge.sh` backend-aware (Codex native threads; Claude platform-spawned sessions —
+  AGENTS.md §5). Port `inject`/`send`/`key`/`sync-skill`; `provisioning.py`/`vpn.py`/`images.py`.
+- Acceptance (live): a Codex run via the new path matches today's behavior; a Claude run starts,
+  authenticates via the staged token, and is monitorable.
 
 ## Phase 4 — Snapshot/steering/artifacts rewrite (bug fixes B1, B7)
 

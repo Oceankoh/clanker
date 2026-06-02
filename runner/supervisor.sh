@@ -88,8 +88,38 @@ if ! docker ps --format '{{.Names}}' | grep -q '^ctf-toolbox$'; then
   exec bash
 fi
 
-if ! docker exec ctf-toolbox bash -c 'command -v codex >/dev/null 2>&1'; then
-  echo "codex CLI not found in ctf-toolbox container." | tee -a "${RUN_DIR}/logs/supervisor.log"
+# --- agent backend selection (backend-aware; defaults to Codex) -------------
+# `clanker stage-agent` writes ${RUN_DIR}/agent/{backend,launch.cmd,container.env}.
+# When that dir is absent (older runs), we fall back to the historical Codex
+# defaults so nothing changes for existing runs.
+AGENT_DIR="${RUN_DIR}/agent"
+AGENT_BACKEND="codex"
+if [[ -f "${AGENT_DIR}/backend" ]]; then
+  AGENT_BACKEND="$(tr -d '[:space:]' < "${AGENT_DIR}/backend" 2>/dev/null || echo codex)"
+fi
+
+CODEX_AUTO_ALLOW="${CODEX_AUTO_ALLOW:-1}"
+if [[ -f "${AGENT_DIR}/launch.cmd" ]]; then
+  read -r -a AGENT_ARGS < "${AGENT_DIR}/launch.cmd"
+else
+  AGENT_ARGS=(codex --no-alt-screen --enable multi_agent)
+  if [[ "${CODEX_AUTO_ALLOW}" == "1" ]]; then
+    AGENT_ARGS+=(--ask-for-approval never --sandbox danger-full-access)
+  fi
+fi
+AGENT_BIN="${AGENT_ARGS[0]:-codex}"
+
+# Per-agent container env (e.g. CLAUDE_CODE_OAUTH_TOKEN), staged as KEY=VALUE.
+ENV_FLAGS=()
+if [[ -f "${AGENT_DIR}/container.env" ]]; then
+  while IFS= read -r env_line; do
+    [[ -z "${env_line}" || "${env_line}" == \#* ]] && continue
+    ENV_FLAGS+=(-e "${env_line}")
+  done < "${AGENT_DIR}/container.env"
+fi
+
+if ! docker exec ctf-toolbox bash -c "command -v ${AGENT_BIN} >/dev/null 2>&1"; then
+  echo "${AGENT_BIN} CLI not found in ctf-toolbox container." | tee -a "${RUN_DIR}/logs/supervisor.log"
   echo "Install it in the container and rerun supervisor." | tee -a "${RUN_DIR}/logs/supervisor.log"
   exec bash
 fi
@@ -116,22 +146,14 @@ echo "Bundled MCP server available: gdb" | tee -a "${RUN_DIR}/logs/supervisor.lo
 echo "Codex multi-agent mode is enabled; spawn subagents from supervisor when needed." | tee -a "${RUN_DIR}/logs/supervisor.log"
 echo "Spawned subagents are auto-mirrored to tmux sessions by subagent-tmux-bridge." | tee -a "${RUN_DIR}/logs/supervisor.log"
 
-CODEX_AUTO_ALLOW="${CODEX_AUTO_ALLOW:-1}"
-CODEX_ARGS=(codex --no-alt-screen --enable multi_agent)
-if [[ "${CODEX_AUTO_ALLOW}" == "1" ]]; then
-  # Avoid conflicting flags: do not combine --ask-for-approval with bypass mode.
-  CODEX_ARGS+=(--ask-for-approval never --sandbox danger-full-access)
-  echo "Codex auto-allow mode: enabled (--ask-for-approval never, --sandbox danger-full-access)." | tee -a "${RUN_DIR}/logs/supervisor.log"
-else
-  echo "Codex auto-allow mode: disabled (default Codex approval behavior)." | tee -a "${RUN_DIR}/logs/supervisor.log"
-fi
+echo "Agent backend: ${AGENT_BACKEND} (launch: ${AGENT_ARGS[*]})." | tee -a "${RUN_DIR}/logs/supervisor.log"
 
 start_subagent_bridge
 
-echo "Launching interactive Codex session..." | tee -a "${RUN_DIR}/logs/supervisor.log"
+echo "Launching interactive ${AGENT_BACKEND} session..." | tee -a "${RUN_DIR}/logs/supervisor.log"
 set +e
 initial_prompt="$(cat "${PROMPT_FILE}")"
-docker exec -it ctf-toolbox bash -c 'cd /workspace && "$@"' _ "${CODEX_ARGS[@]}" "${initial_prompt}"
+docker exec -it ${ENV_FLAGS[@]+"${ENV_FLAGS[@]}"} ctf-toolbox bash -c 'cd /workspace && "$@"' _ "${AGENT_ARGS[@]}" "${initial_prompt}"
 rc=$?
 set -e
 

@@ -9,15 +9,18 @@ picker logic stays in bash for now) and delegates the command body here.
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
-from .config import RUNS_DIR, STATE_FILE, load_json, state_valid
+from .agents import build_agent_backend
+from .config import RUNS_DIR, STATE_FILE, Settings, load_json, state_valid
 from .controlclient import ControlPlaneClient, ControlPlaneError
 from .identity import normalize_instance_name, provider_from_state
 from .models import RunRecord
+from .secretstore import get_secret, set_secret
 from .providers.base import (
     PROVIDER_LABELS,
     PROVIDER_LOCATION_LABELS,
@@ -59,6 +62,122 @@ def _client_or_error(record: RunRecord) -> ControlPlaneClient:
 def _extract_tar(archive: Path, dest: Path, *, gzip: bool) -> None:
     flag = "-xzf" if gzip else "-xf"
     subprocess.run(["tar", "-C", str(dest), flag, str(archive)], check=True)
+
+
+def _write_staged(staging: Path, relpath: str, content: str, mode: str = "") -> None:
+    dest = staging / relpath
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(content)
+    if mode:
+        os.chmod(dest, int(mode, 8))
+
+
+# ---------------------------------------------------------------------------
+# auth
+# ---------------------------------------------------------------------------
+
+def _extract_setup_token(stdout: str) -> str:
+    """Pull the OAuth token out of `claude setup-token` output (best effort)."""
+    for line in reversed([l.strip() for l in stdout.splitlines() if l.strip()]):
+        if line.startswith("sk-ant-") or line.startswith("oauth") or len(line) > 40 and " " not in line:
+            return line
+    return ""
+
+
+def cmd_auth_claude(token: str = "") -> int:
+    token = (token or "").strip()
+    if not token:
+        try:
+            proc = subprocess.run(["claude", "setup-token"], stdout=subprocess.PIPE, text=True)
+        except FileNotFoundError:
+            sys.stderr.write(
+                "claude CLI not found. Install Claude Code, then either run\n"
+                "  claude setup-token\n"
+                "and pass it via `clanker auth claude --token <token>`.\n"
+            )
+            return 1
+        if proc.returncode != 0:
+            sys.stderr.write("`claude setup-token` failed; re-run it and pass `--token <token>`.\n")
+            return 1
+        token = _extract_setup_token(proc.stdout or "")
+        if not token:
+            sys.stderr.write(
+                "Could not parse a token from `claude setup-token` output;\n"
+                "copy it and run `clanker auth claude --token <token>`.\n"
+            )
+            return 1
+    set_secret("claude_oauth_token", token)
+    print("Stored Claude OAuth token in .ctfvm/secrets.json (0600).")
+    return 0
+
+
+def cmd_auth_show() -> int:
+    settings = Settings()
+    codex_home = Path(str(settings.get("codex_home", default=str(Path.home() / ".codex"))))
+    codex_ok = (codex_home / "auth.json").exists()
+    claude_token = bool(
+        get_secret("claude_oauth_token")
+        or settings.get("claude_oauth_token", env_var="CLAUDE_CODE_OAUTH_TOKEN", default="")
+    )
+    claude_key = bool(settings.get("anthropic_api_key", env_var="ANTHROPIC_API_KEY", default=""))
+    print(f"codex:        {'session present (~/.codex/auth.json)' if codex_ok else 'no local session (run `codex login`)'}")
+    if claude_token:
+        print("claude-code:  OAuth token stored")
+    elif claude_key:
+        print("claude-code:  ANTHROPIC_API_KEY set")
+    else:
+        print("claude-code:  no credentials (run `clanker auth claude`)")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# stage-agent — materialize the full agent payload into a local staging dir
+# ---------------------------------------------------------------------------
+
+def cmd_stage_agent(
+    backend_name: str,
+    staging_dir: str,
+    *,
+    settings: Settings | None = None,
+    model: str = "",
+    ida_mcp_url: str = "",
+) -> int:
+    settings = settings or Settings()
+    backend = build_agent_backend(backend_name)
+    ida = ida_mcp_url or settings.get("ida_mcp_url", env_var="CTFVM_DEFAULT_IDA_MCP_URL", default="")
+    spec = backend.build_spec(model=model, ida_mcp_url=ida)
+    auth = backend.materialize_auth(settings)
+
+    staging = Path(staging_dir)
+    staging.mkdir(parents=True, exist_ok=True)
+
+    # 1. rendered config / MCP / role files
+    for sf in backend.render_config(spec):
+        _write_staged(staging, sf.remote_relpath, sf.content, sf.mode)
+
+    # 2. local auth files copied verbatim (e.g. Codex session)
+    for af in auth.local_files:
+        dest = staging / af.remote_relpath
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(af.local_path, dest)
+        if af.mode:
+            os.chmod(dest, int(af.mode, 8))
+
+    # 3. the agent/ control files consumed by supervisor.sh
+    _write_staged(staging, "agent/backend", backend.name + "\n")
+    _write_staged(staging, "agent/launch.cmd", backend.supervisor_launch_cmd(spec) + "\n")
+    env_lines = "".join(f"{k}={v}\n" for k, v in sorted(auth.container_env.items()))
+    _write_staged(staging, "agent/container.env", env_lines, mode="600")
+    _write_staged(staging, "agent/wipe-paths.txt", "".join(p + "\n" for p in auth.wipe_remote_paths))
+
+    if not auth.container_env and not auth.local_files:
+        sys.stderr.write(f"AUTH_REQUIRED: {auth.note}\n")
+        return 3
+
+    print(f"Staged {backend.display_name} payload into {staging.resolve()}")
+    if auth.note:
+        print(f"note: {auth.note}")
+    return 0
 
 
 # ---------------------------------------------------------------------------

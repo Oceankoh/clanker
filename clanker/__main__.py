@@ -83,6 +83,21 @@ def _cmd_sync_down(args: argparse.Namespace) -> int:
     )
 
 
+def _cmd_auth(args: argparse.Namespace) -> int:
+    if args.auth_cmd == "claude":
+        return commands.cmd_auth_claude(token=args.token)
+    if args.auth_cmd == "show":
+        return commands.cmd_auth_show()
+    sys.stderr.write("usage: clanker auth {claude,show}\n")
+    return 2
+
+
+def _cmd_stage_agent(args: argparse.Namespace) -> int:
+    return commands.cmd_stage_agent(
+        args.agent, args.staging_dir, model=args.model, ida_mcp_url=args.ida_mcp_url,
+    )
+
+
 def _cmd_render_agent_config(args: argparse.Namespace) -> int:
     backend = build_agent_backend(args.agent)
     settings = Settings()
@@ -140,6 +155,20 @@ def main(argv: list[str] | None = None) -> int:
     render.add_argument("--model", default="")
     render.add_argument("--ida-mcp-url", dest="ida_mcp_url", default="")
     render.set_defaults(func=_cmd_render_agent_config)
+
+    auth = sub.add_parser("auth", help="manage agent credentials")
+    auth_sub = auth.add_subparsers(dest="auth_cmd", required=True)
+    auth_claude = auth_sub.add_parser("claude", help="store a Claude OAuth token (claude setup-token)")
+    auth_claude.add_argument("--token", default="", help="token to store (else runs `claude setup-token`)")
+    auth_sub.add_parser("show", help="show which agent backends have credentials")
+    auth.set_defaults(func=_cmd_auth)
+
+    stage = sub.add_parser("stage-agent", help="materialize an agent payload into a staging dir")
+    stage.add_argument("--agent", default="codex", choices=list(SUPPORTED_BACKENDS))
+    stage.add_argument("--staging-dir", dest="staging_dir", required=True)
+    stage.add_argument("--model", default="")
+    stage.add_argument("--ida-mcp-url", dest="ida_mcp_url", default="")
+    stage.set_defaults(func=_cmd_stage_agent)
 
     args = parser.parse_args(argv)
     try:
