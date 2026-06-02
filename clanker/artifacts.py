@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import json
 import mimetypes
+import shlex
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
@@ -44,28 +45,51 @@ class ArtifactDownload:
     content: bytes
 
 
-def _remote_abspath(remote_run_dir: str, relpath: str) -> tuple[str, str]:
+def _remote_abspath(remote_run_dir: str, relpath: str) -> tuple[str, str, str]:
     clean = sanitize_relpath(relpath)
     if not clean:
         raise ArtifactError("Invalid artifact path")
-    return clean, f"{remote_run_dir.rstrip('/')}/{clean}"
+    run = remote_run_dir.rstrip("/")
+    return clean, f"{run}/{clean}", f"{run}/artifacts"
 
 
+# Both bodies run as the `ctf` user and resolve realpath, refusing to read
+# anything whose resolved path escapes the artifacts dir (blocks symlink-out
+# traversal that sanitize_relpath's string check can't catch).
 _PREVIEW_BODY = r'''
 import base64, json, os, subprocess
 
 out = {"ok": False}
-if os.path.isfile(PATH):
+prefix = os.path.realpath(ART_DIR)
+rp = os.path.realpath(PATH)
+if (rp == prefix or rp.startswith(prefix + os.sep)) and os.path.isfile(rp):
     try:
-        mime = subprocess.run(["file", "-b", "--mime-type", PATH], capture_output=True, text=True).stdout.strip()
+        mime = subprocess.run(["file", "-b", "--mime-type", rp], capture_output=True, text=True).stdout.strip()
     except Exception:
         mime = ""
-    size = os.path.getsize(PATH)
-    with open(PATH, "rb") as f:
+    size = os.path.getsize(rp)
+    with open(rp, "rb") as f:
         data = f.read(CAP + 1)
     truncated = len(data) > CAP
     out = {"ok": True, "mime": mime or "application/octet-stream", "size": size,
            "truncated": truncated, "b64": base64.b64encode(data[:CAP]).decode("ascii")}
+print(json.dumps(out))
+'''
+
+_DOWNLOAD_BODY = r'''
+import base64, json, os, subprocess
+
+out = {"ok": False}
+prefix = os.path.realpath(ART_DIR)
+rp = os.path.realpath(PATH)
+if (rp == prefix or rp.startswith(prefix + os.sep)) and os.path.isfile(rp):
+    try:
+        mime = subprocess.run(["file", "-b", "--mime-type", rp], capture_output=True, text=True).stdout.strip()
+    except Exception:
+        mime = ""
+    with open(rp, "rb") as f:
+        out = {"ok": True, "mime": mime or "application/octet-stream",
+               "b64": base64.b64encode(f.read()).decode("ascii")}
 print(json.dumps(out))
 '''
 
@@ -78,8 +102,8 @@ def preview_artifact(
     cap: int = MAX_ARTIFACT_PREVIEW_BYTES,
     timeout: int = 25,
 ) -> ArtifactPreview:
-    clean, abspath = _remote_abspath(remote_run_dir, relpath)
-    header = f"PATH = {abspath!r}\nCAP = {int(cap)}\n"
+    clean, abspath, art_dir = _remote_abspath(remote_run_dir, relpath)
+    header = f"PATH = {abspath!r}\nART_DIR = {art_dir!r}\nCAP = {int(cap)}\n"
     result = client.exec(remote_python(header + _PREVIEW_BODY), timeout=timeout)
     if not result.ok:
         raise ControlPlaneError(result.stderr_text().strip() or "Failed to fetch artifact")
@@ -111,15 +135,24 @@ def download_artifact(
     *,
     timeout: int = 60,
 ) -> ArtifactDownload:
-    clean, abspath = _remote_abspath(remote_run_dir, relpath)
+    clean, abspath, art_dir = _remote_abspath(remote_run_dir, relpath)
+    # Read as the ctf user (not root) with a realpath guard, so a symlink under
+    # artifacts/ can't be followed out of the run directory.
+    header = f"PATH = {abspath!r}\nART_DIR = {art_dir!r}\n"
+    result = client.exec(remote_python(header + _DOWNLOAD_BODY), timeout=timeout)
+    if not result.ok:
+        raise ControlPlaneError(result.stderr_text().strip() or "Failed to download artifact")
     try:
-        content = client.download_file(abspath, timeout=timeout)
-    except ControlPlaneError as exc:
-        if "404" in str(exc) or "not found" in str(exc).lower():
-            raise ArtifactError("Artifact not found") from exc
-        raise
+        data = json.loads(result.stdout.decode("utf-8") or "{}")
+    except Exception:
+        raise ControlPlaneError("Unexpected artifact download format")
+    if not data.get("ok"):
+        raise ArtifactError("Artifact not found")
+    content = base64.b64decode((data.get("b64") or "").encode("ascii"), validate=False)
+    mime = str(data.get("mime") or "application/octet-stream")
     guessed, _ = mimetypes.guess_type(clean)
-    return ArtifactDownload(filename=PurePosixPath(clean).name, mime=guessed or "application/octet-stream", content=content)
+    effective = mime if mime and mime != "application/octet-stream" else (guessed or mime)
+    return ArtifactDownload(filename=PurePosixPath(clean).name, mime=effective, content=content)
 
 
 def build_bundle(
@@ -153,7 +186,7 @@ def build_bundle(
         content = client.download_file(line, timeout=timeout)
     finally:
         try:
-            client.exec(f"sudo -u ctf bash -lc 'rm -f {line}'", timeout=15)
+            client.exec(f"sudo -u ctf bash -lc {shlex.quote('rm -f ' + shlex.quote(line))}", timeout=15)
         except ControlPlaneError:
             pass
     rid = (run_id or "run").strip() or "run"

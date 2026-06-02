@@ -96,12 +96,24 @@ class Artifacts(unittest.TestCase):
             artifacts.download_artifact(c, "/home/ctf/run", "artifacts/../../etc/passwd")
         self.assertEqual(c.downloads, [])
 
-    def test_download_uses_abspath(self):
-        c = FakeClient(download=b"payload")
+    def test_download_reads_as_ctf_with_realpath_guard(self):
+        body = json.dumps({"ok": True, "mime": "text/x-python",
+                           "b64": base64.b64encode(b"payload").decode()})
+        c = FakeClient(exec_result=ExecResult(returncode=0, stdout=body.encode()))
         dl = artifacts.download_artifact(c, "/home/ctf/run", "artifacts/exploit.py")
-        self.assertEqual(c.downloads, ["/home/ctf/run/artifacts/exploit.py"])
         self.assertEqual(dl.content, b"payload")
         self.assertEqual(dl.filename, "exploit.py")
+        # never uses the root-reading /files/download for artifacts
+        self.assertEqual(c.downloads, [])
+        # the remote program is run as ctf and carries the artifacts-dir guard
+        self.assertIn("sudo -u ctf", c.commands[0])
+        self.assertIn("base64 -d", c.commands[0])
+
+    def test_download_not_found(self):
+        body = json.dumps({"ok": False})
+        c = FakeClient(exec_result=ExecResult(returncode=0, stdout=body.encode()))
+        with self.assertRaises(ArtifactError):
+            artifacts.download_artifact(c, "/home/ctf/run", "artifacts/missing")
 
     def test_preview_parses_json_envelope(self):
         body = json.dumps({"ok": True, "mime": "text/x-python", "size": 5,
