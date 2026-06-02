@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>clanker</title>
+<style>
+  :root { --bg:#0f1115; --panel:#171a21; --line:#2a2f3a; --fg:#e6e8ee; --muted:#9aa3b2;
+          --accent:#5b9dff; --ok:#3fb950; --warn:#d29922; --bad:#f85149; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--fg); }
+  header { display:flex; align-items:center; gap:12px; padding:10px 16px; border-bottom:1px solid var(--line); background:var(--panel); }
+  header h1 { font-size:16px; margin:0; letter-spacing:.5px; }
+  header .sp { flex:1; }
+  a { color:var(--accent); text-decoration:none; }
+  main { display:grid; grid-template-columns:320px 1fr; min-height:calc(100vh - 50px); }
+  #fleet { border-right:1px solid var(--line); overflow:auto; }
+  .run { padding:10px 16px; border-bottom:1px solid var(--line); cursor:pointer; }
+  .run:hover { background:#1d2230; }
+  .run.sel { background:#222a3d; }
+  .run .id { font-weight:600; }
+  .run .meta { color:var(--muted); font-size:12px; }
+  .pill { display:inline-block; padding:1px 8px; border-radius:10px; font-size:11px; border:1px solid var(--line); }
+  .s-solved{color:var(--ok);border-color:var(--ok)} .s-blocked,.s-halted,.s-stopped{color:var(--bad);border-color:var(--bad)}
+  .s-stalled{color:var(--warn);border-color:var(--warn)} .s-progressing{color:var(--accent);border-color:var(--accent)}
+  #focus { padding:16px; overflow:auto; }
+  .muted { color:var(--muted); }
+  .tabs { display:flex; gap:6px; margin:12px 0; flex-wrap:wrap; }
+  .tab { padding:5px 12px; border:1px solid var(--line); border-radius:6px; cursor:pointer; background:var(--panel); }
+  .tab.active { border-color:var(--accent); color:var(--accent); }
+  pre { background:#0b0d11; border:1px solid var(--line); border-radius:6px; padding:12px; overflow:auto; max-height:52vh; white-space:pre-wrap; word-break:break-word; }
+  .row { display:flex; gap:8px; align-items:center; margin:8px 0; flex-wrap:wrap; }
+  input[type=text]{ flex:1; min-width:200px; background:#0b0d11; border:1px solid var(--line); color:var(--fg); padding:7px 10px; border-radius:6px; }
+  button { background:var(--panel); color:var(--fg); border:1px solid var(--line); padding:7px 12px; border-radius:6px; cursor:pointer; }
+  button:hover { border-color:var(--accent); }
+  button.primary { background:var(--accent); color:#06121f; border-color:var(--accent); font-weight:600; }
+  table { width:100%; border-collapse:collapse; }
+  td,th { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); font-size:13px; }
+  .feat { display:flex; gap:8px; flex-wrap:wrap; margin:8px 0; }
+  .feat .pill { background:#0b0d11; }
+  .err { color:var(--bad); }
+</style>
+</head>
+<body>
+<header>
+  <h1>clanker</h1>
+  <span class="pill" id="health">…</span>
+  <span class="sp"></span>
+  <button onclick="refreshFleet(true)">↻ rediscover</button>
+</header>
+<main>
+  <div id="fleet"><div class="muted" style="padding:16px">loading…</div></div>
+  <div id="focus"><div class="muted">Select a run.</div></div>
+</main>
+<script>
+const $ = (s,el=document)=>el.querySelector(s);
+let STATE = { current:null, tab:'panes', runs:[], snap:null };
+
+async function api(path, opts){
+  const r = await fetch('/api/v1'+path, opts);
+  const j = await r.json().catch(()=>({ok:false,error:'bad json',code:'PARSE'}));
+  if(!j.ok) throw new Error(j.error||('error '+r.status));
+  return j.data;
+}
+function statePill(cs){
+  if(!cs) return '';
+  return `<span class="pill s-${cs.state}">${cs.label||cs.state}</span>`;
+}
+async function refreshHealth(){
+  try{ const h=await api('/health'); $('#health').textContent=`${h.known_runs} runs · ${h.active_jobs} jobs · up ${h.uptime_sec}s`; }
+  catch(e){ $('#health').textContent='offline'; }
+}
+async function refreshFleet(force){
+  try{
+    const d = await api('/runs?include_status=true'+(force?'&force_discovery=true':''));
+    STATE.runs = d.runs;
+    const html = d.runs.map(r=>`
+      <div class="run ${r.run_id===STATE.current?'sel':''}" onclick="selectRun('${r.run_id}')">
+        <div class="id">${r.run_id||r.instance} ${statePill(r.challenge_state)}</div>
+        <div class="meta">${r.provider} · ${r.agent_backend} · ${r.runtime_status||'?'} · ${r.ip||'—'}</div>
+      </div>`).join('') || '<div class="muted" style="padding:16px">no runs</div>';
+    $('#fleet').innerHTML = html;
+  }catch(e){ $('#fleet').innerHTML='<div class="err" style="padding:16px">'+e.message+'</div>'; }
+}
+async function selectRun(id){ STATE.current=id; await refreshFleet(); await refreshFocus(); }
+function setTab(t){ STATE.tab=t; renderFocus(); }
+
+async function refreshFocus(){
+  if(!STATE.current){ $('#focus').innerHTML='<div class="muted">Select a run.</div>'; return; }
+  try{ STATE.snap = await api('/runs/'+encodeURIComponent(STATE.current)); }
+  catch(e){ $('#focus').innerHTML='<div class="err">'+e.message+'</div>'; return; }
+  renderFocus();
+}
+function esc(s){ return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+
+function renderFocus(){
+  const s = STATE.snap; if(!s){ return; }
+  const tabs = ['panes','findings','supervisor','artifacts','subagents'];
+  const tabBar = tabs.map(t=>`<div class="tab ${STATE.tab===t?'active':''}" onclick="setTab('${t}')">${t}</div>`).join('');
+  let body='';
+  if(STATE.tab==='panes'){
+    const panes = s.panes||[];
+    body = panes.map(p=>`<div class="muted">${p.target} — ${esc(p.window_name)}${p.active?' *':''}</div><pre>${esc(p.output)}</pre>`).join('') || '<div class="muted">no panes</div>';
+    body += `<div class="row">
+      <input type="text" id="steer" placeholder="message to ctf:supervisor… (special chars safe)">
+      <button class="primary" onclick="send()">Send</button>
+      <button onclick="key('C-c')">Ctrl-C</button>
+      <button onclick="trust()">Trust (1↵)</button></div>`;
+  } else if(STATE.tab==='findings'){ body=`<pre>${esc(s.findings_tail)||'(empty)'}</pre>`; }
+  else if(STATE.tab==='supervisor'){ body=`<pre>${esc(s.supervisor_tail)||'(empty)'}</pre>`; }
+  else if(STATE.tab==='artifacts'){
+    const a=s.artifacts||[];
+    body = '<table><tr><th>path</th><th>size</th><th>mtime</th><th></th></tr>'+
+      a.map(x=>`<tr><td><a href="#" onclick="preview('${encodeURIComponent(x.relpath)}');return false">${esc(x.relpath)}</a></td>
+        <td>${x.size_bytes}</td><td class="muted">${x.mtime}</td>
+        <td><a href="/api/v1/runs/${encodeURIComponent(s.run_id)}/artifacts/${encodeURIComponent(x.relpath)}/download">⬇</a></td></tr>`).join('')+'</table>'
+      + `<div class="row"><a href="/api/v1/runs/${encodeURIComponent(s.run_id)}/bundle"><button>Download bundle (.tar.gz)</button></a></div><pre id="artprev" class="muted">click an artifact to preview</pre>`;
+  } else if(STATE.tab==='subagents'){
+    const sub=s.subagents||[];
+    body = sub.map(x=>`<div class="muted">${x.tmux_target} — ${esc(x.label)} <span class="pill">${x.state}</span></div>`).join('') || '<div class="muted">no subagents</div>';
+  }
+  const cs=s.challenge_state;
+  $('#focus').innerHTML = `
+    <div class="row"><h2 style="margin:0">${s.run_id} ${statePill(cs)}</h2>
+      <span class="muted">${s.provider} · ${s.agent_backend} · ${s.runtime_status}</span></div>
+    ${cs?`<div class="muted">${esc(cs.summary)} — ${cs.last_activity_label||''}</div>`:''}
+    ${s.error?`<div class="err">⚠ ${esc(s.error)}</div>`:''}
+    <div class="row">
+      <button onclick="setStatus('solved')">Mark solved</button>
+      <button onclick="setStatus('blocked')">Mark blocked</button>
+      <button onclick="clearStatus()">Clear status</button></div>
+    <div class="tabs">${tabBar}</div>${body}`;
+}
+
+async function send(){
+  const t=$('#steer').value; if(!t) return;
+  try{ await api('/runs/'+encodeURIComponent(STATE.current)+'/panes/send',
+    {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({target:'ctf:supervisor',text:t,press_enter:true})});
+    $('#steer').value=''; setTimeout(refreshFocus,400);
+  }catch(e){ alert(e.message); }
+}
+async function key(k){ try{ await api('/runs/'+encodeURIComponent(STATE.current)+'/panes/keys',
+  {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({target:'ctf:supervisor',keys:[k]})}); setTimeout(refreshFocus,400);}catch(e){alert(e.message);} }
+async function trust(){ try{ await api('/runs/'+encodeURIComponent(STATE.current)+'/panes/trust',
+  {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({target:'ctf:supervisor'})}); setTimeout(refreshFocus,400);}catch(e){alert(e.message);} }
+async function setStatus(st){ try{ await api('/runs/'+encodeURIComponent(STATE.current)+'/status',
+  {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({state:st,note:''})}); refreshFocus();}catch(e){alert(e.message);} }
+async function clearStatus(){ try{ await api('/runs/'+encodeURIComponent(STATE.current)+'/status',{method:'DELETE'}); refreshFocus();}catch(e){alert(e.message);} }
+async function preview(rel){
+  try{ const d=await api('/runs/'+encodeURIComponent(STATE.current)+'/artifacts/'+rel);
+    $('#artprev').textContent = d.is_text ? d.content : `[${d.mime}, ${d.size} bytes]${d.truncated?' (truncated)':''}`;
+  }catch(e){ $('#artprev').textContent=e.message; }
+}
+
+refreshHealth(); refreshFleet();
+setInterval(refreshHealth, 15000);
+setInterval(refreshFleet, 30000);
+setInterval(()=>{ if(STATE.current) refreshFocus(); }, 8000);
+</script>
+</body>
+</html>

@@ -83,6 +83,12 @@ def _cmd_sync_down(args: argparse.Namespace) -> int:
     )
 
 
+def _cmd_serve(args: argparse.Namespace) -> int:
+    from .server.app import serve
+    serve(args.host, args.port)
+    return 0
+
+
 def _cmd_auth(args: argparse.Namespace) -> int:
     if args.auth_cmd == "claude":
         return commands.cmd_auth_claude(token=args.token)
@@ -162,6 +168,11 @@ def main(argv: list[str] | None = None) -> int:
     auth_claude.add_argument("--token", default="", help="token to store (else runs `claude setup-token`)")
     auth_sub.add_parser("show", help="show which agent backends have credentials")
     auth.set_defaults(func=_cmd_auth)
+
+    serve = sub.add_parser("serve", help="run the local web UI / API server")
+    serve.add_argument("--host", default="127.0.0.1")
+    serve.add_argument("--port", type=int, default=8765)
+    serve.set_defaults(func=_cmd_serve)
 
     stage = sub.add_parser("stage-agent", help="materialize an agent payload into a staging dir")
     stage.add_argument("--agent", default="codex", choices=list(SUPPORTED_BACKENDS))

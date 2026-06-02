@@ -159,12 +159,30 @@ Acceptance: ported command bodies behave identically; `cleanup-state` cut over a
 Wiring these modules into the HTTP server is Phase 5; the bash CLI's monitor/snapshot path is replaced
 when the server lands.
 
-## Phase 5 — Local server v1 + extracted SPA (B3, B12)
+## Phase 5 — Local server v1 + extracted SPA (B3, B12) ✅
 
-- `server/app.py` + `routes.py` implementing `/api/v1/*` per API.md; `{ok,data}` / `{ok,error,code}`.
-- Extract the SPA to `frontend/index.html`; delete dead `/artifacts` route + `render_artifacts_page`.
-- Remove `select-directory`; SPA uses a typed challenge-path field with `agent_backend` selector.
-- Old non-versioned routes deleted (return 404).
+Done:
+- [x] `clanker/server/`: `app.py` (stdlib router, `{ok,data}`/`{ok,error,code}` envelope, all
+      `/api/v1/*` routes from API.md), `service.py` (`UiService` over RunRegistry + providers + control
+      client + snapshot/steering/artifacts, typed `ApiError`), `serialize.py` (model→JSON), `jobs.py`
+      (bounded thread-safe `SpawnJobTracker` with run-id detection + eviction).
+- [x] Extracted SPA at `server/frontend/index.html` (no more HTML-in-Python — B12); fleet + focused
+      (panes/findings/supervisor/artifacts/subagents), steering box, Ctrl-C/Trust, solved/blocked/clear,
+      artifact preview/download/bundle. `clanker serve` boots it.
+- [x] Dead `/artifacts` route + `render_artifacts_page` gone (B3 — the new server simply doesn't have
+      them); `select-directory` removed (SPA uses a typed path); all non-versioned routes → 404.
+- [x] Subagents are derived live from the snapshot (`subagent-*` tmux sessions) — uniform across backends.
+- [x] `tests/test_server.py` (12): in-process server + fake control client — health, runs list,
+      snapshot (B1 marker content survives through the real parser), subagents, steering 400 on bad
+      target + 200 on special-char text, status set/clear, artifact preview/download (read as ctf),
+      bundle, removed-routes 404, SPA served; plus job-tracker run-id detection + limit. **63 tests total.**
+
+Deferred to 5b/6 (richer agent-feature surface — needs live agent output to parse):
+- The full `AgentFeatures` block (pending-approval detection from pane/stream, session id + resume,
+  model/mode display, plan/diffs, usage). The SPA already exposes the steering + **Trust** primitive and
+  the subagent list; the deeper per-backend detection lands with the Claude backend wiring in Phase 6.
+
+### 5b — Agent-feature parity in the frontend (follow-on; needs live agent output)
 - **Agent-feature parity in the frontend (backend-neutral).** The SPA must surface the *normal*
   day-to-day features of whichever agent a run uses, not just raw pane text. The agent backend exposes
   these as uniform snapshot/endpoint data; the SPA renders them the same way for Codex and Claude Code:
