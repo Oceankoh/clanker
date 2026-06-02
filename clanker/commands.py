@@ -20,7 +20,7 @@ from .config import RUNS_DIR, STATE_FILE, Settings, load_json, state_valid
 from .controlclient import ControlPlaneClient, ControlPlaneError
 from .identity import normalize_instance_name, provider_from_state
 from .models import RunRecord
-from .secretstore import get_secret, set_secret
+from .secretstore import get_profile, get_secret, list_profiles, set_profile, set_secret
 from .providers.base import (
     PROVIDER_LABELS,
     PROVIDER_LOCATION_LABELS,
@@ -86,7 +86,7 @@ def _extract_setup_token(stdout: str) -> str:
     return ""
 
 
-def cmd_auth_claude(token: str = "") -> int:
+def cmd_auth_claude(token: str = "", name: str = "") -> int:
     token = (token or "").strip()
     if not token:
         try:
@@ -108,8 +108,50 @@ def cmd_auth_claude(token: str = "") -> int:
                 "copy it and run `clanker auth claude --token <token>`.\n"
             )
             return 1
-    set_secret("claude_oauth_token", token)
-    print("Stored Claude OAuth token in .ctfvm/secrets.json (0600).")
+    name = (name or "").strip()
+    if name:
+        set_profile(name, {"backend": "claude-code", "claude_oauth_token": token})
+        print(f"Stored Claude OAuth token in profile '{name}' (.ctfvm/secrets.json, 0600).")
+    else:
+        set_secret("claude_oauth_token", token)
+        print("Stored Claude OAuth token in .ctfvm/secrets.json (0600).")
+    return 0
+
+
+def cmd_auth_codex(name: str, *, api_key: str = "", codex_home: str = "") -> int:
+    name = (name or "").strip()
+    if not name:
+        sys.stderr.write("`auth codex` requires --name <profile>.\n")
+        return 2
+    api_key = (api_key or "").strip()
+    codex_home = (codex_home or "").strip()
+    if not api_key and not codex_home:
+        sys.stderr.write(
+            "Provide one of --api-key <OPENAI_API_KEY> or --codex-home <dir with this account's auth.json>.\n"
+        )
+        return 2
+    profile: dict = {"backend": "codex"}
+    if api_key:
+        profile["openai_api_key"] = api_key
+        profile["no_auth_sync"] = "1"
+    if codex_home:
+        profile["codex_home"] = codex_home
+    set_profile(name, profile)
+    how = "API key" if api_key else f"session dir {codex_home}"
+    print(f"Stored Codex profile '{name}' ({how}).")
+    return 0
+
+
+def cmd_config_profiles() -> int:
+    profiles = list_profiles()
+    if not profiles:
+        print("(no credential profiles; create with `clanker auth claude|codex --name <n>`)")
+        return 0
+    for name in sorted(profiles):
+        p = profiles[name]
+        backend = p.get("backend", "?")
+        creds = ", ".join(k for k in p if k != "backend") or "(none)"
+        print(f"{name:<16} {backend:<12} {creds}")
     return 0
 
 
@@ -168,8 +210,14 @@ def cmd_stage_agent(
     settings: Settings | None = None,
     model: str = "",
     ida_mcp_url: str = "",
+    account: str = "",
 ) -> int:
-    settings = settings or Settings()
+    if settings is None:
+        profile = get_profile(account) if account else None
+        if account and not profile:
+            sys.stderr.write(f"Unknown credential profile: {account!r}\n")
+            return 2
+        settings = Settings(profile=profile)
     backend = build_agent_backend(backend_name)
     ida = ida_mcp_url or settings.get("ida_mcp_url", env_var="CTFVM_DEFAULT_IDA_MCP_URL", default="")
     spec = backend.build_spec(model=model, ida_mcp_url=ida)

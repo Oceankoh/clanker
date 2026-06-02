@@ -78,6 +78,36 @@ class ConfigShow(unittest.TestCase):
             self.assertNotIn("supersecret", out)   # never printed
 
 
+class Profiles(unittest.TestCase):
+    def test_profile_overlay_and_precedence(self):
+        with TemporaryDirectory() as tmp, patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
+            from clanker.secretstore import get_profile, list_profiles, set_profile
+            path = Path(tmp) / "secrets.json"
+            set_profile("alice", {"backend": "claude-code", "claude_oauth_token": "alice-tok"}, path=path)
+            set_profile("bob", {"backend": "codex", "openai_api_key": "sk-bob", "no_auth_sync": "1"}, path=path)
+            self.assertEqual(sorted(list_profiles(path=path)), ["alice", "bob"])
+
+            s = Settings(root=Path(tmp), profile=get_profile("alice", path=path))
+            self.assertEqual(s.resolve("claude_oauth_token"), ("alice-tok", "profile"))
+            # cli still beats profile
+            s2 = Settings(root=Path(tmp), cli={"claude_oauth_token": "flag"},
+                          profile=get_profile("alice", path=path))
+            self.assertEqual(s2.resolve("claude_oauth_token")[1], "cli")
+
+    def test_stage_agent_uses_profile_creds(self):
+        with TemporaryDirectory() as tmp:
+            from clanker.secretstore import get_profile, set_profile
+            path = Path(tmp) / "secrets.json"
+            set_profile("alice", {"backend": "claude-code", "claude_oauth_token": "alice-tok"}, path=path)
+            settings = Settings(root=Path(tmp), profile=get_profile("alice", path=path))
+            staging = Path(tmp) / "stage"
+            rc = commands.cmd_stage_agent("claude-code", str(staging), settings=settings)
+            self.assertEqual(rc, 0)
+            env = (staging / "agent/container.env").read_text()
+            self.assertIn("CLAUDE_CODE_OAUTH_TOKEN=alice-tok", env)
+
+
 class SpawnDefaults(unittest.TestCase):
     def test_agent_default_from_env(self):
         with patch.dict(os.environ, {"CTFVM_AGENT": "claude-code"}):

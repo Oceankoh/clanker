@@ -62,7 +62,7 @@ class FakeClient:
 
 def _make_service(tmp: Path) -> UiService:
     runs = tmp / "runs"
-    runs.mkdir(parents=True)
+    runs.mkdir(parents=True, exist_ok=True)
     (runs / "20250101-000000.json").write_text(json.dumps({
         "provider": "gcp", "run_id": "20250101-000000", "instance": "ctfvm-a-20250101-000000",
         "zone": "z", "project": "p", "ip": "1.2.3.4",
@@ -185,6 +185,53 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(st, 200)
         self.assertIn("text/html", hdr.get("Content-Type", ""))
         self.assertIn(b"clanker", body)
+
+
+class UiAuth(unittest.TestCase):
+    def setUp(self):
+        self.tmp = TemporaryDirectory()
+        self.app = App(_make_service(Path(self.tmp.name)), auth_token="s3cret")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_blocks_without_token(self):
+        r = self.app.handle("GET", "/api/v1/runs", {}, b"", {})
+        self.assertEqual(r.status, 401)
+
+    def test_health_open(self):
+        r = self.app.handle("GET", "/health", {}, b"", {})
+        self.assertEqual(r.status, 200)
+
+    def test_query_token_sets_cookie(self):
+        r = self.app.handle("GET", "/", {"token": ["s3cret"]}, b"", {})
+        self.assertEqual(r.status, 200)
+        self.assertIn("clanker_token=s3cret", (r.headers or {}).get("Set-Cookie", ""))
+
+    def test_cookie_and_bearer_accepted(self):
+        r = self.app.handle("GET", "/api/v1/runs", {}, b"", {"Cookie": "clanker_token=s3cret"})
+        self.assertEqual(r.status, 200)
+        r = self.app.handle("GET", "/api/v1/runs", {}, b"", {"Authorization": "Bearer s3cret"})
+        self.assertEqual(r.status, 200)
+
+    def test_wrong_token_blocked(self):
+        r = self.app.handle("GET", "/api/v1/runs", {"token": ["nope"]}, b"", {})
+        self.assertEqual(r.status, 401)
+
+    def test_no_token_configured_is_open(self):
+        open_app = App(_make_service(Path(self.tmp.name)))  # no auth_token
+        r = open_app.handle("GET", "/api/v1/runs", {}, b"", {})
+        self.assertEqual(r.status, 200)
+
+
+class Share(unittest.TestCase):
+    def test_public_link_and_token(self):
+        from clanker.config import Settings
+        from clanker.share import ensure_ui_token, public_link
+        self.assertEqual(public_link("https://x.ngrok.app/", "T"), "https://x.ngrok.app/?token=T")
+        # configured token is reused; otherwise an ephemeral one is minted
+        self.assertEqual(ensure_ui_token(Settings(cli={"ui_token": "fixed"})), "fixed")
+        self.assertGreaterEqual(len(ensure_ui_token(Settings(cli={}))), 16)
 
 
 class JobsTracker(unittest.TestCase):

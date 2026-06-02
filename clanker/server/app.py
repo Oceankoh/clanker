@@ -6,6 +6,7 @@ Pure stdlib (no framework). Handlers are thin: parse -> call service -> serializ
 
 from __future__ import annotations
 
+import hmac
 import json
 import re
 import urllib.parse
@@ -55,9 +56,13 @@ def _bool(query: dict, key: str, default=False) -> bool:
     return default
 
 
+COOKIE = "clanker_token"
+
+
 class App:
-    def __init__(self, service: UiService):
+    def __init__(self, service: UiService, *, auth_token: str = ""):
         self.s = service
+        self.auth_token = (auth_token or "").strip()
         self.routes = [
             ("GET", re.compile(r"^/health$"), self._health),
             ("GET", re.compile(r"^/api/v1/runs$"), self._runs_list),
@@ -77,7 +82,21 @@ class App:
             ("GET", re.compile(r"^/$"), self._frontend),
         ]
 
-    def handle(self, method: str, path: str, query: dict, body: bytes) -> Response:
+    def handle(self, method: str, path: str, query: dict, body: bytes, headers=None) -> Response:
+        # /health stays open for liveness checks (no secrets); everything else is
+        # gated when a UI token is configured.
+        if self.auth_token and path != "/health":
+            ok, from_query = self._check_auth(query, headers or {})
+            if not ok:
+                return self._auth_challenge(method, path)
+            resp = self._route(method, path, query, body)
+            if from_query:  # link carried the token -> drop a cookie so later requests pass
+                resp.headers = {**(resp.headers or {}),
+                                "Set-Cookie": f"{COOKIE}={self.auth_token}; Path=/; SameSite=Lax; HttpOnly"}
+            return resp
+        return self._route(method, path, query, body)
+
+    def _route(self, method: str, path: str, query: dict, body: bytes) -> Response:
         for m, rx, fn in self.routes:
             if m != method:
                 continue
@@ -91,6 +110,35 @@ class App:
             except Exception as e:  # noqa: BLE001
                 return err("INTERNAL", str(e), 500)
         return err("NOT_FOUND", f"No route for {method} {path}", 404)
+
+    def _check_auth(self, query: dict, headers) -> tuple[bool, bool]:
+        tok = self.auth_token
+
+        def eq(v: str) -> bool:
+            return bool(v) and hmac.compare_digest(v, tok)
+
+        q = (query.get("token") or [""])[0]
+        if eq(q):
+            return True, True
+        auth = headers.get("Authorization", "") or ""
+        if auth.startswith("Bearer ") and eq(auth[len("Bearer "):]):
+            return True, False
+        if eq(headers.get("X-Clanker-Token", "") or ""):
+            return True, False
+        for part in (headers.get("Cookie", "") or "").split(";"):
+            part = part.strip()
+            if part.startswith(f"{COOKIE}=") and eq(part[len(COOKIE) + 1:]):
+                return True, False
+        return False, False
+
+    def _auth_challenge(self, method: str, path: str) -> Response:
+        if method == "GET" and path == "/":
+            html = (b"<!doctype html><meta charset=utf-8><title>clanker</title>"
+                    b"<body style='font:14px sans-serif;padding:40px'>"
+                    b"<h2>clanker</h2><p>This UI requires a token. Open the link that includes "
+                    b"<code>?token=...</code> (e.g. from <code>clanker share</code>).</p></body>")
+            return Response(401, html, "text/html; charset=utf-8")
+        return err("UNAUTHORIZED", "missing or invalid token", 401)
 
     # --- helpers -----------------------------------------------------------
     @staticmethod
@@ -202,7 +250,7 @@ def make_handler(app: App):
             except (TypeError, ValueError):
                 length = 0
             body = self.rfile.read(length) if length > 0 else b""
-            resp = app.handle(method, parsed.path, query, body)
+            resp = app.handle(method, parsed.path, query, body, self.headers)
             self.send_response(resp.status)
             self.send_header("Content-Type", resp.content_type)
             self.send_header("Content-Length", str(len(resp.body)))
@@ -223,10 +271,12 @@ def make_handler(app: App):
     return Handler
 
 
-def serve(host: str = "127.0.0.1", port: int = 8765, *, service: UiService | None = None) -> None:
-    app = App(service or UiService())
+def serve(host: str = "127.0.0.1", port: int = 8765, *, service: UiService | None = None,
+          auth_token: str = "") -> None:
+    app = App(service or UiService(), auth_token=auth_token)
     httpd = ThreadingHTTPServer((host, port), make_handler(app))
-    print(f"clanker UI on http://{host}:{port}")
+    note = " (token required)" if auth_token else ""
+    print(f"clanker UI on http://{host}:{port}{note}")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

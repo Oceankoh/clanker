@@ -514,11 +514,32 @@ python -m clanker status --run-id <id>                 # one run's status
 python -m clanker cleanup-state [--dry-run] [--prune-non-running]
 python -m clanker fetch --run-id <id> [--out DIR]      # download findings/artifacts/logs
 python -m clanker sync-down --run-id <id> [--out DIR]
-python -m clanker auth claude [--token <t>]            # store a Claude OAuth token (claude setup-token)
+python -m clanker auth claude [--token <t>] [--name <profile>]   # Claude OAuth token (global or per-profile)
+python -m clanker auth codex --name <profile> [--api-key K | --codex-home DIR]
 python -m clanker auth show                            # which backends have credentials
-python -m clanker stage-agent --agent codex|claude-code --staging-dir DIR
+python -m clanker config profiles                      # list credential profiles
+python -m clanker stage-agent --agent codex|claude-code --staging-dir DIR [--account <profile>]
+python -m clanker share                                # expose the UI via ngrok with a tokenized link
 python -m clanker render-agent-config --agent codex|claude-code
 ```
+
+**Multiple subscriptions (credential profiles).** Store one credential set per account and select it
+per run. Both backends are supported per-account — Claude via a per-profile OAuth token, Codex via a
+per-profile `OPENAI_API_KEY` *or* a per-account `~/.codex` dir (its `auth.json` is portable). A profile
+overlays config just below CLI flags.
+
+```bash
+python -m clanker auth claude --name alice                 # alice's Claude subscription
+python -m clanker auth codex  --name bob --api-key sk-...   # bob's Codex API account
+python -m clanker auth codex  --name team --codex-home ~/.codex-team
+python -m clanker stage-agent --agent claude-code --account alice --staging-dir /tmp/run
+```
+
+**Sharing the UI (`clanker share`).** For temporary CTF VMs you can expose the dashboard via ngrok with
+a one-click tokenized link. `share` mints an ephemeral UI token (or uses `CTFVM_UI_TOKEN`), starts the
+**authed** server, launches ngrok, and prints `https://<public>/?token=<token>`. The `?token` sets a
+cookie on first open, so the rest of the session just works. With no token configured, `clanker serve`
+stays open and local-only (127.0.0.1) as before.
 
 `ctfvm cleanup-state` already delegates to the core. The UI server (`serve`) speaks the versioned
 `/api/v1/*` surface documented in [API.md](API.md). `start`/`destroy` and interactive break-glass

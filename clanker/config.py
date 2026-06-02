@@ -76,6 +76,7 @@ SETTINGS_SCHEMA: list[ConfigKey] = [
     ConfigKey("control_port", "CTFVM_CONTROL_PORT", "443", "control", "Control-plane port", consumed_by="both"),
     ConfigKey("timeout_min", "CTFVM_TIMEOUT_MIN", "1440", "control", "VM self-destruct timeout (minutes)", consumed_by="both"),
     ConfigKey("toolbox_variant", "CTFVM_TOOLBOX_VARIANT", "lean", "control", "Toolbox image variant (lean|full)", consumed_by="both"),
+    ConfigKey("ui_token", "CTFVM_UI_TOKEN", "", "control", "UI auth token (set/non-empty -> server requires it)", secret=True),
     # --- vpn ---
     ConfigKey("vpn", "CTFVM_VPN", "1", "vpn", "Auto-start WireGuard VPN (1|0)", consumed_by="bash"),
     ConfigKey("vpn_cidrs", "CTFVM_VPN_CIDRS", "", "vpn", "Comma-separated local CIDRs to route", consumed_by="bash"),
@@ -138,9 +139,16 @@ class Settings:
     ``os.environ``, ``.ctfvm/config.json`` entry, then the supplied default.
     """
 
-    def __init__(self, root: Path = ROOT, cli: dict[str, Any] | None = None):
+    def __init__(
+        self,
+        root: Path = ROOT,
+        cli: dict[str, Any] | None = None,
+        profile: dict[str, Any] | None = None,
+    ):
         self.root = Path(root)
         self._cli = {k: v for k, v in (cli or {}).items() if v is not None}
+        # a selected credential profile overlays everything except explicit CLI flags
+        self._profile = {k: v for k, v in (profile or {}).items() if v not in (None, "")}
         self._dotenv = _parse_env_file(self.root / ".env")
         self._config_json = load_json(self.root / ".ctfvm" / "config.json") or {}
         self._secrets = load_json(self.root / ".ctfvm" / "secrets.json") or {}
@@ -174,6 +182,8 @@ class Settings:
 
         if key in self._cli:
             return self._cli[key], "cli"
+        if key in self._profile:
+            return self._profile[key], "profile"
         if env_var:
             if env_var in self._dotenv:
                 return self._dotenv[env_var], ".env"
