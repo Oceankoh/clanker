@@ -226,12 +226,20 @@ Deferred to 5b/6 (richer agent-feature surface — needs live agent output to pa
 - Acceptance: a full **Claude Code** run starts, is monitored, has a steerable subagent in its own
   tmux session, and produces artifacts — feature-parity with Codex on the same challenge.
 
-## Phase 7 — Retire bash entrypoint, polish
+## Phase 7 — Polish & docs (✅ docs); bash retirement bundled with the live port
 
-- Final commands ported; `scripts/ctfvm` becomes a one-line shim to `python -m clanker` (or removed
-  with a deprecation note). Cut `bridge`, `ideas`, `monitor` per the inventory.
-- Update `CTFVM.md` / `HTTP_CONTROL_PLANE_ARCHITECTURE.md` to the new surface; fix stale absolute paths
-  (e.g. `/Users/0c34n/...` links in `CTFVM.md`).
+Done (safe, non-live):
+- [x] Top-level `CLAUDE.md` orienting the repo (layout, the two ABCs, conventions, status).
+- [x] `CTFVM.md`: fixed the stale `/Users/0c34n/...` absolute links; added a "Python core (`clanker`)"
+      section listing the new `python -m clanker` commands (`serve`/`runs`/`status`/`auth`/`stage-agent`
+      /…) and pointing at ARCHITECTURE/AGENTS/API.
+
+Bundled into the live 3b-cont port (NOT done blind on the legacy bash file):
+- Cutting `bridge` (legacy TCP) and `ideas` + `spawn-idea-workers.sh` (superseded by subagents), and
+  turning `scripts/ctfvm` into a shim, are entangled with `cmd_start`'s upload list / validation in the
+  4.2k-line bash CLI. Doing them without a VM to re-verify `start` would be reckless, so they execute
+  **together with** the `start`/`destroy` Python port (3b-cont), when the bash file is retired wholesale.
+  The keep/cut decisions are already recorded in the inventory table above.
 
 ---
 
@@ -245,10 +253,18 @@ plane. These become easy follow-ons *because* of the two ABCs, but are not in th
 
 ## Acceptance criteria (whole refactor)
 
-1. `SMOKE_TEST.md` passes for **{gcp, digitalocean} × {codex, claude-code}**.
-2. All verified bugs B1–B12 fixed; refuted R1–R3 protections still present (tests/asserts).
-3. All removed endpoints return 404; `/api/v1/*` matches API.md schemas.
-4. A subagent is visible and steerable in its own tmux session on **both** backends.
-5. Steering handles text containing `|`, backticks, `$`; snapshots survive marker strings in content.
-6. The bash CLI is a shim (or removed); no business logic lives outside `clanker/` and the VM scripts.
-7. `clanker auth claude` materializes a token; a Claude run authenticates without copying credentials.
+Local / unit-verifiable — **met** (69 tests green):
+2. ✅ Verified bugs fixed (B1,B2,B4,B5,B7,B8,B10,B11,B12; B3 by removal; B6 downgraded with evidence;
+   B9 core done). Refuted R1–R3 protections preserved with asserts.
+3. ✅ Removed endpoints return 404; `/api/v1/*` produces the API.md shapes (in-process server tests).
+5. ✅ Steering handles `|`/backticks/`$` (base64 transport); snapshots survive marker strings (B1 proof).
+7. ✅ `clanker auth claude` stores a token; the Claude backend authenticates via env injection, never
+   by copying credential files (stage-agent + auth tests).
+
+Live / VM-gated — **remaining** (need a real run to validate):
+1. `SMOKE_TEST.md` for **{gcp, digitalocean} × {codex, claude-code}**.
+4. A subagent visible + steerable in its own tmux session on **both** backends end-to-end.
+6. `start`/`destroy` ported so the bash CLI becomes a shim (3b-cont).
+
+These depend on provisioning a VM (gcloud/doctl creds + a challenge), which is outside this
+environment; everything they build on is unit-tested.

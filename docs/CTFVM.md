@@ -21,7 +21,7 @@ Precedence is:
 - saved toolbox metadata in `.ctfvm/config.json`
 - built-in script defaults
 
-The repo now includes a starter [.env](/Users/0c34n/Projects/codex-hackathon/.env) with the main knobs:
+The repo now includes a starter [.env](../.env) with the main knobs:
 - provider: `CTFVM_PROVIDER`
 - GCP project/zone/machine defaults: `CTFVM_GCP_*`
 - DigitalOcean region/size/SSH key defaults: `CTFVM_DO_*`
@@ -107,7 +107,9 @@ Load balancer:
 - not required for the current local-first setup
 - only worth adding if you later host the aggregator in the cloud and want a single stable entrypoint
 
-The higher-level design note lives in [HTTP_CONTROL_PLANE_ARCHITECTURE.md](/Users/0c34n/Projects/codex-hackathon/docs/HTTP_CONTROL_PLANE_ARCHITECTURE.md).
+The higher-level design note lives in [HTTP_CONTROL_PLANE_ARCHITECTURE.md](HTTP_CONTROL_PLANE_ARCHITECTURE.md).
+The platform-v2 refactor (the shared Python core under `clanker/`) is described in
+[ARCHITECTURE.md](ARCHITECTURE.md); the agent-backend layer in [AGENTS.md](AGENTS.md).
 
 ## Provider Architecture
 `ctfvm` keeps the shared orchestration flow in `scripts/ctfvm` and pushes cloud-specific lifecycle logic into provider modules under `scripts/lib/ctfvm/providers/`.
@@ -493,6 +495,33 @@ The UI shows:
 Transport notes:
 - the UI prefers the VM HTTP control plane for snapshot polling and artifact access
 - older runs without control-plane metadata can still fall back to SSH-backed behavior
+
+## Python core (`clanker`) — platform-v2
+
+The shared Python core under `clanker/` is being grown alongside the bash CLI (a strangler
+migration — see [REFACTOR_PLAN.md](REFACTOR_PLAN.md)). Run it with `python -m clanker <cmd>` from the
+repo root. Available today:
+
+```bash
+python -m clanker serve --host 127.0.0.1 --port 8765   # the new web UI / /api/v1 server
+python -m clanker runs [--json]                        # list known runs from .ctfvm/
+python -m clanker status --run-id <id>                 # one run's status
+python -m clanker cleanup-state [--dry-run] [--prune-non-running]
+python -m clanker fetch --run-id <id> [--out DIR]      # download findings/artifacts/logs
+python -m clanker sync-down --run-id <id> [--out DIR]
+python -m clanker auth claude [--token <t>]            # store a Claude OAuth token (claude setup-token)
+python -m clanker auth show                            # which backends have credentials
+python -m clanker stage-agent --agent codex|claude-code --staging-dir DIR
+python -m clanker render-agent-config --agent codex|claude-code
+```
+
+`ctfvm cleanup-state` already delegates to the core. The UI server (`serve`) speaks the versioned
+`/api/v1/*` surface documented in [API.md](API.md). `start`/`destroy` and interactive break-glass
+(`attach`/`shell`/`vscode`) remain in the bash CLI until the provisioning port lands.
+
+The selectable **agent backend** (`--agent codex|claude-code`) is the platform-v2 headline: Claude Code
+authenticates via a `claude setup-token` OAuth token (stored by `clanker auth claude`), never by
+copying credential files. See [AGENTS.md](AGENTS.md).
 
 ## Security notes
 - No API keys are required.
