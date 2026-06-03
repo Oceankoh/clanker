@@ -116,12 +116,15 @@ async function refreshFleet(force){
 async function selectRun(id){ STATE.current=id; await refreshFleet(); await refreshFocus(); }
 
 let AGENTS = [];
+let PROFILES = [];
 async function loadAgents(){ try{ const d=await api('/agents'); AGENTS=d.agents||[]; }catch(e){ AGENTS=[]; } }
+async function loadProfiles(){ try{ const d=await api('/profiles'); PROFILES=d.profiles||[]; }catch(e){ PROFILES=[]; } }
 function showSpawn(){
   STATE.current=null;
   document.querySelectorAll('.run').forEach(el=>el.classList.remove('sel'));
   const opts = (AGENTS.length?AGENTS:[{name:'codex',display_name:'Codex',authenticated:true}])
     .map(a=>`<option value="${a.name}">${esc(a.display_name)}${a.authenticated?'':' — needs auth'}</option>`).join('');
+  const propts = PROFILES.map(p=>`<option value="${esc(p.name)}">${esc(p.name)}${p.backend?' · '+esc(p.backend):''}</option>`).join('');
   $('#focus').innerHTML = `<div class="spawn">
     <h2>New run(s)</h2>
     <div class="hint">Spawns a VM and starts the agent. Tick the box to deploy a whole folder of challenges (one VM per subfolder). Blank fields fall back to your <code>.env</code> defaults.</div>
@@ -134,6 +137,10 @@ function showSpawn(){
       <div><label>Provider</label><select id="sp-provider" onchange="providerFields()"><option value="">(default)</option><option value="gcp">gcp</option><option value="digitalocean">digitalocean</option></select></div>
       <div><label>Agent</label><select id="sp-agent"><option value="">(default)</option>${opts}</select></div>
       <div><label>Model</label><input type="text" id="sp-model" placeholder="(backend default)"></div>
+    </div>
+    <div class="cols">
+      <div><label>Account / profile</label><select id="sp-account"><option value="">(default credentials)</option>${propts}</select></div>
+      <div style="grid-column:span 2"><div class="hint" style="margin-top:28px">Profiles are created with <code>clanker auth codex/claude --name &lt;who&gt;</code>; pick one to run as that subscription.</div></div>
     </div>
     <label>Description</label>
     <textarea id="sp-desc" rows="2" placeholder="what the challenge is (defaults to description.txt in the folder)"></textarea>
@@ -194,7 +201,8 @@ async function submitSpawn(){
   const put=(k,v)=>{ v=(v||'').trim(); if(v) body[k]=v; };
   const prov=$('#sp-provider').value;
   put('provider',prov); put('agent_backend',$('#sp-agent').value);
-  put('model',$('#sp-model').value); put('description',$('#sp-desc').value); put('ideas',$('#sp-ideas').value);
+  put('model',$('#sp-model').value); put('account',$('#sp-account').value);
+  put('description',$('#sp-desc').value); put('ideas',$('#sp-ideas').value);
   if(prov==='digitalocean'){ put('zone',$('#sp-region').value); put('size_slug',$('#sp-size').value); }
   else if(prov==='gcp'){ put('zone',$('#sp-zone').value); put('project',$('#sp-project').value); put('machine_type',$('#sp-machine').value); }
   put('toolbox_variant',$('#sp-variant').value); put('timeout_min',$('#sp-timeout').value);
@@ -373,7 +381,7 @@ async function preview(rel){
 const _params = new URLSearchParams(location.search);
 const _initialRun = _params.get('run');
 refreshHealth();
-loadAgents().then(()=>{ if(_params.get('new')) showSpawn(); });
+Promise.all([loadAgents(), loadProfiles()]).then(()=>{ if(_params.get('new')) showSpawn(); });
 refreshFleet().then(()=>{ if(_initialRun) selectRun(_initialRun); });
 setInterval(refreshHealth, 15000);
 setInterval(refreshFleet, 30000);

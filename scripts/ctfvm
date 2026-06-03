@@ -649,6 +649,8 @@ write_state() {
   "zone": "$(json_escape "${zone}")",
   "project": "$(json_escape "${project}")",
   "machine_type": "$(json_escape "${machine_type}")",
+  "agent_backend": "$(json_escape "${START_AGENT_BACKEND:-codex}")",
+  "model": "$(json_escape "${START_AGENT_MODEL:-}")",
   "run_id": "$(json_escape "${run_id}")",
   "challenge_dir": "$(json_escape "${challenge_dir}")",
   "timeout_min": "$(json_escape "${timeout_min}")",
@@ -2474,6 +2476,9 @@ cmd_start() {
   local size_slug="${CTFVM_DO_SIZE_SLUG:-s-4vcpu-8gb}"
   local zone=""
   local project=""
+  local agent="${CTFVM_AGENT:-codex}"
+  local model="${CTFVM_MODEL:-}"
+  local account=""
   local no_auth_sync="0"
   local force_remote_build="0"
   local use_local_image="0"
@@ -2541,6 +2546,12 @@ cmd_start() {
         boot_image_family="$2"; shift 2 ;;
       --boot-image-project)
         boot_image_project="$2"; shift 2 ;;
+      --agent)
+        agent="$2"; shift 2 ;;
+      --model)
+        model="$2"; shift 2 ;;
+      --account)
+        account="$2"; shift 2 ;;
       --no-auth-sync)
         no_auth_sync="1"; shift ;;
       --force-remote-build)
@@ -2577,6 +2588,18 @@ cmd_start() {
   if [[ "${toolbox_variant}" != "lean" && "${toolbox_variant}" != "full" ]]; then
     echo "Invalid toolbox variant: ${toolbox_variant}. Use lean or full." >&2
     exit 1
+  fi
+  if [[ "${agent}" != "codex" && "${agent}" != "claude-code" ]]; then
+    echo "Invalid --agent: ${agent}. Use codex or claude-code." >&2
+    exit 1
+  fi
+  # The proven Codex-without-profile path stays byte-for-byte unchanged (no
+  # staging, ~/.codex auth sync). Anything else (claude-code, or a named
+  # credential profile) goes through `clanker stage-agent`, which writes the
+  # agent/ control files supervisor.sh consumes.
+  local use_staged_agent="0"
+  if [[ "${agent}" != "codex" || -n "${account}" ]]; then
+    use_staged_agent="1"
   fi
   if [[ "${auto_vpn}" != "0" && "${auto_vpn}" != "1" ]]; then
     echo "Invalid CTFVM_VPN value: ${auto_vpn}. Use 0 or 1." >&2
@@ -2849,6 +2872,18 @@ PROMPT
   cp -R "${REPO_ROOT}/skills" "${upload_tmp}/"
   cp -R "${REPO_ROOT}/images/ctf-toolbox/codex-config" "${upload_tmp}/"
 
+  if [[ "${use_staged_agent}" == "1" ]]; then
+    echo "Staging ${agent} agent payload${account:+ (profile: ${account})}..."
+    local -a _stage_args=(--agent "${agent}" --staging-dir "${upload_tmp}/agentstage")
+    [[ -n "${model}" ]] && _stage_args+=(--model "${model}")
+    [[ -n "${account}" ]] && _stage_args+=(--account "${account}")
+    if ! ( cd "${REPO_ROOT}" && PYTHONPATH="${REPO_ROOT}" python3 -m clanker stage-agent "${_stage_args[@]}" ); then
+      echo "Agent staging failed for '${agent}'. Authenticate it first:" >&2
+      echo "  python3 -m clanker auth ${agent%%-*}${account:+ --name ${account}}" >&2
+      exit 1
+    fi
+  fi
+
   gcloud_ssh "mkdir -p ${remote_upload_dir} && rm -rf ${remote_upload_dir}/*"
 
   echo "Uploading challenge and runner files..."
@@ -2862,13 +2897,25 @@ PROMPT
 
   gcloud_ssh "sudo mkdir -p /home/ctf/run /home/ctf/run/.codex/skills && sudo rm -rf /home/ctf/run/challenge /home/ctf/run/prompts /home/ctf/run/.codex/skills/* && sudo cp -R ${remote_upload_dir}/challenge /home/ctf/run/challenge && if [ -d ${remote_upload_dir}/prompts ]; then sudo cp -R ${remote_upload_dir}/prompts /home/ctf/run/prompts; fi && if [ -d ${remote_upload_dir}/skills ]; then sudo cp -R ${remote_upload_dir}/skills/. /home/ctf/run/.codex/skills/; fi && sudo cp ${remote_upload_dir}/challenge_prompt.txt /home/ctf/run/challenge_prompt.txt && sudo cp ${remote_upload_dir}/supervisor.sh ${remote_upload_dir}/spawn-idea-workers.sh ${remote_upload_dir}/subagent-tmux-bridge.sh ${remote_upload_dir}/install-python-runtime.sh /home/ctf/run/ && sudo chown -R ctf:ctf /home/ctf/run && sudo chmod 644 /home/ctf/run/challenge_prompt.txt && sudo -u ctf chmod +x /home/ctf/run/supervisor.sh /home/ctf/run/spawn-idea-workers.sh /home/ctf/run/subagent-tmux-bridge.sh /home/ctf/run/install-python-runtime.sh"
 
-  if [[ "${no_auth_sync}" == "0" ]]; then
+  # Codex-without-profile keeps syncing the operator's ~/.codex session. For a
+  # staged agent (claude-code, or a profile) the credentials come from the
+  # staged payload, so we must NOT leak the operator's Codex session onto it.
+  if [[ "${no_auth_sync}" == "0" && "${use_staged_agent}" == "0" ]]; then
     sync_codex_auth
   else
     auth_sync="disabled"
   fi
 
   install_managed_codex_config "${remote_upload_dir}"
+
+  # Overlay the staged agent payload (agent/ control files + agent-specific
+  # config/auth) on top of the run dir. Applied AFTER the managed codex config
+  # so a profile's rendered config wins. supervisor.sh reads agent/ to decide
+  # which CLI to launch; absent it (codex-no-profile) it falls back to Codex.
+  if [[ "${use_staged_agent}" == "1" ]]; then
+    echo "Installing staged ${agent} agent config on the VM..."
+    gcloud_ssh "sudo cp -R ${remote_upload_dir}/agentstage/. /home/ctf/run/ && sudo chown -R ctf:ctf /home/ctf/run && sudo chmod 600 /home/ctf/run/agent/container.env 2>/dev/null; sudo find /home/ctf/run -name auth.json -exec chmod 600 {} + 2>/dev/null; true"
+  fi
 
   if [[ "${use_local_image}" == "1" ]]; then
     if ! gcloud_ssh "test -f ${remote_upload_dir}/ctf-toolbox.tar.gz"; then
@@ -2891,6 +2938,10 @@ PROMPT
     fi
   fi
 
+  # surfaced in state.json so the UI parses the right transcript format + shows
+  # the backend (read by write_state via these globals).
+  START_AGENT_BACKEND="${agent}"
+  START_AGENT_MODEL="${model}"
   write_state "${provider}" "${instance}" "${ZONE}" "${project}" "${machine_type}" "${run_id}" "$(cd "${challenge_dir}" && pwd)" "${timeout_min}" "" "${auth_sync}" "${no_auth_sync}" "${ip}" "${boot_image}" "${boot_image_family}" "${boot_image_project}" "${toolbox_image_ref}" "${toolbox_image_source}" "${CONTROL_SCHEME}" "${CONTROL_HOST:-${ip}}" "${CONTROL_PORT}" "${CONTROL_USER}" "${CONTROL_PASSWORD}"
 
   if [[ "${auto_vpn}" == "1" ]]; then

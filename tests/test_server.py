@@ -195,6 +195,12 @@ class ServerTest(unittest.TestCase):
         self.assertIn("codex", names)
         self.assertIn("claude-code", names)
 
+    def test_profiles_endpoint(self):
+        st, body, _ = self._get("/api/v1/profiles")
+        d = json.loads(body)["data"]
+        self.assertIn("profiles", d)
+        self.assertIsInstance(d["profiles"], list)
+
     def test_spawn_challenge_root_fans_out(self):
         import os
         import tempfile
@@ -247,7 +253,8 @@ class ServerTest(unittest.TestCase):
         for marker in (b"submitSteer", b"steerKey", b"name=smode", b"/inject", b"hexDump", b"Approve",
                        b"steer-target", b"steerSubagent", b"browseDir", b"select-directory",
                        b"sp-desc", b"sp-novpn", b"status-note",
-                       b"providerFields", b"sp-region", b"sp-do-fields", b"sp-gcp-fields"):
+                       b"providerFields", b"sp-region", b"sp-do-fields", b"sp-gcp-fields",
+                       b"sp-account", b"loadProfiles"):
             self.assertIn(marker, body, marker)
 
 

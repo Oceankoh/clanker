@@ -191,6 +191,15 @@ class UiService:
     def agents(self) -> list[dict]:
         return agents_info()
 
+    def profiles(self) -> list[dict]:
+        """Named credential profiles (for the spawn form's account picker).
+        Never returns secret values — just name + which backend they auth."""
+        from ..secretstore import list_profiles
+        out = []
+        for name, data in sorted(list_profiles().items()):
+            out.append({"name": name, "backend": str((data or {}).get("backend") or "")})
+        return out
+
     def choose_directory(self, current_path: str = "", batch: bool = False) -> dict:
         """macOS Finder folder picker (local convenience). Degrades elsewhere:
         callers just type the path."""
@@ -292,6 +301,10 @@ class UiService:
             val = spec.get(key)
             if val not in (None, ""):
                 cmd += [flag, str(val)]
+        # account/profile is a UI-only selection (not a Settings key)
+        account = str(spec.get("account") or "").strip()
+        if account:
+            cmd += ["--account", account]
         if spec.get("no_vpn"):
             cmd.append("--no-vpn")
         return cmd

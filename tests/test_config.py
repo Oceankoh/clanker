@@ -134,6 +134,15 @@ class SpawnDefaults(unittest.TestCase):
             self.assertEqual(cmd[cmd.index(flag) + 1], val)
         self.assertIn("--no-vpn", cmd)
 
+    def test_account_profile_flag(self):
+        cmd = UiService._build_start_cmd({"challenge_dir": "/x", "agent_backend": "claude-code",
+                                          "account": "alice"})
+        self.assertIn("--account", cmd)
+        self.assertEqual(cmd[cmd.index("--account") + 1], "alice")
+        # no account -> no flag
+        cmd2 = UiService._build_start_cmd({"challenge_dir": "/x", "agent_backend": "codex"})
+        self.assertNotIn("--account", cmd2)
+
 
 class EnvParsing(unittest.TestCase):
     def test_inline_comments_stripped_but_hashes_in_tokens_kept(self):
