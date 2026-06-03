@@ -163,24 +163,41 @@ class ClaudeRender(unittest.TestCase):
         self.assertIn("tools: Read, Grep, Glob, Bash", ro)  # read-only role
 
     def test_launch_cmd(self):
-        self.assertEqual(self.backend.supervisor_launch_cmd(self.spec), "claude --permission-mode bypassPermissions")
+        self.assertEqual(self.backend.supervisor_launch_cmd(self.spec), "claude --dangerously-skip-permissions")
         with_model = self.backend.build_spec(model="opus")
         self.assertEqual(
             self.backend.supervisor_launch_cmd(with_model),
-            "claude --permission-mode bypassPermissions --model opus",
+            "claude --dangerously-skip-permissions --model opus",
         )
 
+    def test_claude_json_preseeds_first_run_gates(self):
+        files = _staged(self.backend, self.spec)
+        cj = json.loads(files[".claude.json"].content)
+        self.assertTrue(cj["hasCompletedOnboarding"])
+        self.assertTrue(cj["bypassPermissionsModeAccepted"])
+        proj = cj["projects"]["/workspace"]
+        self.assertTrue(proj["hasTrustDialogAccepted"])
+        self.assertIn("gdb", proj["enabledMcpjsonServers"])
+
     def test_auth_token_and_apikey_and_missing(self):
-        a = self.backend.materialize_auth(Settings(cli={"claude_oauth_token": "tok"}))
-        self.assertEqual(a.container_env.get("CLAUDE_CODE_OAUTH_TOKEN"), "tok")
-        self.assertEqual(a.local_files, [])  # never copies credential files
+        # isolate from the repo's real .ctfvm/secrets.json and ambient env
+        with TemporaryDirectory() as root, patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
+            os.environ.pop("ANTHROPIC_API_KEY", None)
 
-        b = self.backend.materialize_auth(Settings(cli={"anthropic_api_key": "sk"}))
-        self.assertEqual(b.container_env.get("ANTHROPIC_API_KEY"), "sk")
+            def S(**cli):
+                return Settings(root=Path(root), cli=cli)
 
-        c = self.backend.materialize_auth(Settings(cli={}))
-        self.assertEqual(c.container_env, {})  # forces AUTH_REQUIRED at start
-        self.assertIn("clanker auth claude", c.note)
+            a = self.backend.materialize_auth(S(claude_oauth_token="tok"))
+            self.assertEqual(a.container_env.get("CLAUDE_CODE_OAUTH_TOKEN"), "tok")
+            self.assertEqual(a.local_files, [])  # never copies credential files
+
+            b = self.backend.materialize_auth(S(anthropic_api_key="sk"))
+            self.assertEqual(b.container_env.get("ANTHROPIC_API_KEY"), "sk")
+
+            c = self.backend.materialize_auth(S())
+            self.assertEqual(c.container_env, {})  # forces AUTH_REQUIRED at start
+            self.assertIn("clanker auth claude", c.note)
 
 
 class Registry(unittest.TestCase):

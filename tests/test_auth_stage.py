@@ -70,7 +70,7 @@ class StageAgent(unittest.TestCase):
             self.assertEqual((staging / "agent/backend").read_text().strip(), "claude-code")
             env = (staging / "agent/container.env").read_text()
             self.assertIn("CLAUDE_CODE_OAUTH_TOKEN=tok", env)
-            self.assertIn("claude --permission-mode bypassPermissions", (staging / "agent/launch.cmd").read_text())
+            self.assertIn("claude --dangerously-skip-permissions", (staging / "agent/launch.cmd").read_text())
 
     def test_claude_no_creds_is_auth_required(self):
         with TemporaryDirectory() as tmp:

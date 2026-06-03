@@ -77,6 +77,28 @@ class ClaudeCodeBackend(AgentBackend):
             )
         )
 
+        # ~/.claude.json (container HOME=/workspace -> run-dir root): pre-seed every
+        # first-run gate so the non-interactive tmux launch goes straight to the
+        # prompt instead of stopping on the theme / folder-trust / MCP-approval /
+        # bypass-acceptance screens (all observed on a fresh VM).
+        workspace = "/workspace"
+        claude_json = {
+            "hasCompletedOnboarding": True,
+            "bypassPermissionsModeAccepted": True,
+            "theme": "dark",
+            "numStartups": 5,
+            "projects": {
+                workspace: {
+                    "hasTrustDialogAccepted": True,
+                    "hasCompletedProjectOnboarding": True,
+                    "enabledMcpjsonServers": [s.name for s in spec.mcp_servers],
+                }
+            },
+        }
+        staged.append(
+            StagedFile(remote_relpath=".claude.json", content=json.dumps(claude_json, indent=2) + "\n", mode="600")
+        )
+
         if spec.mcp_servers:
             mcp_json = {"mcpServers": {s.name: _mcp_entry(s) for s in spec.mcp_servers}}
             staged.append(
@@ -108,7 +130,9 @@ class ClaudeCodeBackend(AgentBackend):
     def supervisor_launch_cmd(self, spec: AgentConfigSpec) -> str:
         parts = ["claude"]
         if spec.auto_allow:
-            parts += ["--permission-mode", "bypassPermissions"]
+            # --dangerously-skip-permissions is the container/automation flag; it
+            # skips the bypass-acceptance prompt that --permission-mode would show.
+            parts += ["--dangerously-skip-permissions"]
         if spec.model:
             parts += ["--model", spec.model]
         return " ".join(parts)
