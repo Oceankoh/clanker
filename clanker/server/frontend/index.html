@@ -121,9 +121,10 @@ let DEFAULTS = {};
 async function loadAgents(){ try{ const d=await api('/agents'); AGENTS=d.agents||[]; }catch(e){ AGENTS=[]; } }
 async function loadProfiles(){ try{ const d=await api('/profiles'); PROFILES=d.profiles||[]; }catch(e){ PROFILES=[]; } }
 async function loadDefaults(){ try{ const d=await api('/spawn-defaults'); DEFAULTS=d.defaults||{}; }catch(e){ DEFAULTS={}; } }
-// pre-fill the spawn form from values configured on this instance (.env/env/config)
+// pre-fill the spawn form with the effective default for every field (the
+// value that would actually be used), incl. built-in schema defaults
 function prefillSpawn(){
-  const set=(id,k)=>{ const el=$(id), d=DEFAULTS[k]; if(el && d && d.configured && d.value) el.value=d.value; };
+  const set=(id,k)=>{ const el=$(id), d=DEFAULTS[k]; if(el && d && d.value) el.value=d.value; };
   set('#sp-agent','agent_backend'); set('#sp-model','model'); set('#sp-provider','provider');
   set('#sp-zone','gcp_zone'); set('#sp-project','gcp_project'); set('#sp-machine','gcp_machine_type');
   set('#sp-region','do_region'); set('#sp-size','do_size_slug');
