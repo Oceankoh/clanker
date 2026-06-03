@@ -1253,59 +1253,6 @@ wait_for_remote_bootstrap() {
   exit 1
 }
 
-sync_codex_auth() {
-  local codex_home
-  if [[ -n "${CODEX_HOME:-}" ]]; then
-    codex_home="${CODEX_HOME}"
-  else
-    codex_home="${HOME}/.codex"
-  fi
-
-  if [[ ! -d "${codex_home}" ]]; then
-    echo "Codex auth directory not found at ${codex_home}; skipping auth sync." >&2
-    return 0
-  fi
-
-  local -a auth_files=()
-  local rel
-  for rel in auth.json installation_id; do
-    if [[ -f "${codex_home}/${rel}" ]]; then
-      auth_files+=("${rel}")
-    fi
-  done
-
-  if [[ "${#auth_files[@]}" -eq 0 ]]; then
-    echo "No Codex auth session files found in ${codex_home}; skipping auth sync." >&2
-    return 0
-  fi
-
-  echo "Syncing Codex session data to VM (OAuth session only, no API keys)."
-  COPYFILE_DISABLE=1 tar --no-xattrs -C "${codex_home}" -cf - "${auth_files[@]}" 2>/dev/null | \
-    gcloud_ssh "sudo -u ctf bash -lc 'mkdir -p /home/ctf/run/.codex && tar -C /home/ctf/run/.codex -xf - && chmod -R go-rwx /home/ctf/run/.codex'"
-}
-
-install_managed_codex_config() {
-  local remote_upload_dir="$1"
-  local ida_mcp_url="${CTFVM_DEFAULT_IDA_MCP_URL:-}"
-  local remote_cmd remote_cmd_q
-  echo "Installing managed Codex agent-role config in /home/ctf/run/.codex."
-  remote_cmd="set -euo pipefail; mkdir -p /home/ctf/run/.codex /home/ctf/run/.codex/roles; if [ -f ${remote_upload_dir}/codex-config/config.toml ]; then cp ${remote_upload_dir}/codex-config/config.toml /home/ctf/run/.codex/config.toml; fi; if [ -d ${remote_upload_dir}/codex-config/roles ]; then rm -rf /home/ctf/run/.codex/roles; mkdir -p /home/ctf/run/.codex/roles; cp -R ${remote_upload_dir}/codex-config/roles/. /home/ctf/run/.codex/roles/; fi"
-  if [[ -n "${ida_mcp_url}" ]]; then
-    remote_cmd="${remote_cmd}; if [ -f /home/ctf/run/.codex/config.toml ] && ! grep -q '^\\[mcp_servers\\.ida\\]$' /home/ctf/run/.codex/config.toml; then cat >> /home/ctf/run/.codex/config.toml <<'EOF'
-
-[mcp_servers.ida]
-url = \"${ida_mcp_url}\"
-EOF
-fi"
-  fi
-  remote_cmd="${remote_cmd}; chown -R ctf:ctf /home/ctf/run/.codex; chmod 700 /home/ctf/run/.codex; if [ -f /home/ctf/run/.codex/config.toml ]; then chmod 600 /home/ctf/run/.codex/config.toml; fi; if [ -d /home/ctf/run/.codex/roles ]; then find /home/ctf/run/.codex/roles -type f -name '*.toml' -exec chmod 600 {} +; fi"
-  printf -v remote_cmd_q '%q' "${remote_cmd}"
-  gcloud_ssh "sudo bash -lc ${remote_cmd_q}"
-  if [[ -n "${ida_mcp_url}" ]]; then
-    echo "Managed Codex config includes default ida MCP server: ${ida_mcp_url}"
-  fi
-}
-
 build_remote_toolbox() {
   local variant="${1:-lean}"
   echo "Building toolbox image on VM (${variant} variant; first run may take several minutes)."
@@ -2593,14 +2540,6 @@ cmd_start() {
     echo "Invalid --agent: ${agent}. Use codex or claude-code." >&2
     exit 1
   fi
-  # The proven Codex-without-profile path stays byte-for-byte unchanged (no
-  # staging, ~/.codex auth sync). Anything else (claude-code, or a named
-  # credential profile) goes through `clanker stage-agent`, which writes the
-  # agent/ control files supervisor.sh consumes.
-  local use_staged_agent="0"
-  if [[ "${agent}" != "codex" || -n "${account}" ]]; then
-    use_staged_agent="1"
-  fi
   if [[ "${auto_vpn}" != "0" && "${auto_vpn}" != "1" ]]; then
     echo "Invalid CTFVM_VPN value: ${auto_vpn}. Use 0 or 1." >&2
     exit 1
@@ -2668,7 +2607,7 @@ cmd_start() {
     exit 1
   fi
 
-  if [[ ! -f "${REPO_ROOT}/vm/startup.sh" || ! -f "${REPO_ROOT}/vm/control_server.py" || ! -f "${REPO_ROOT}/runner/supervisor.sh" || ! -f "${REPO_ROOT}/runner/spawn-idea-workers.sh" || ! -f "${REPO_ROOT}/runner/subagent-tmux-bridge.sh" || ! -f "${REPO_ROOT}/runner/install-python-runtime.sh" || ! -d "${REPO_ROOT}/skills" || ! -f "${REPO_ROOT}/images/ctf-toolbox/codex-config/config.toml" ]]; then
+  if [[ ! -f "${REPO_ROOT}/vm/startup.sh" || ! -f "${REPO_ROOT}/vm/control_server.py" || ! -f "${REPO_ROOT}/runner/supervisor.sh" || ! -f "${REPO_ROOT}/runner/spawn-idea-workers.sh" || ! -f "${REPO_ROOT}/runner/subagent-tmux-bridge.sh" || ! -f "${REPO_ROOT}/runner/install-python-runtime.sh" || ! -d "${REPO_ROOT}/skills" ]]; then
     echo "Required implementation files are missing in repo." >&2
     exit 1
   fi
@@ -2870,19 +2809,20 @@ PROMPT
     cp -R "${REPO_ROOT}/prompts" "${upload_tmp}/"
   fi
   cp -R "${REPO_ROOT}/skills" "${upload_tmp}/"
-  cp -R "${REPO_ROOT}/images/ctf-toolbox/codex-config" "${upload_tmp}/"
-
-  if [[ "${use_staged_agent}" == "1" ]]; then
-    echo "Staging ${agent} agent payload${account:+ (profile: ${account})}..."
-    local -a _stage_args=(--agent "${agent}" --staging-dir "${upload_tmp}/agentstage")
-    [[ -n "${model}" ]] && _stage_args+=(--model "${model}")
-    [[ -n "${account}" ]] && _stage_args+=(--account "${account}")
-    if ! ( cd "${REPO_ROOT}" && PYTHONPATH="${REPO_ROOT}" python3 -m clanker stage-agent "${_stage_args[@]}" ); then
-      echo "Agent staging failed for '${agent}'. Authenticate it first:" >&2
-      echo "  python3 -m clanker auth ${agent%%-*}${account:+ --name ${account}}" >&2
-      exit 1
-    fi
+  # Unified agent flow: both codex and claude-code are materialized by
+  # `clanker stage-agent` (rendered config + role files + auth + the agent/
+  # control files supervisor.sh reads). The model is chosen here at start.
+  echo "Staging ${agent} agent payload${model:+ (model: ${model})}${account:+ (profile: ${account})}..."
+  local -a _stage_args=(--agent "${agent}" --staging-dir "${upload_tmp}/agentstage")
+  [[ -n "${model}" ]] && _stage_args+=(--model "${model}")
+  [[ -n "${account}" ]] && _stage_args+=(--account "${account}")
+  if ! ( cd "${REPO_ROOT}" && PYTHONPATH="${REPO_ROOT}" CTFVM_NO_AUTH_SYNC="${no_auth_sync}" \
+         python3 -m clanker stage-agent "${_stage_args[@]}" ); then
+    echo "Agent staging failed for '${agent}'. Authenticate it first:" >&2
+    echo "  python3 -m clanker auth ${agent%%-*}${account:+ --name ${account}}" >&2
+    exit 1
   fi
+  auth_sync="staged"
 
   gcloud_ssh "mkdir -p ${remote_upload_dir} && rm -rf ${remote_upload_dir}/*"
 
@@ -2897,28 +2837,12 @@ PROMPT
 
   gcloud_ssh "sudo mkdir -p /home/ctf/run /home/ctf/run/.codex/skills && sudo rm -rf /home/ctf/run/challenge /home/ctf/run/prompts /home/ctf/run/.codex/skills/* && sudo cp -R ${remote_upload_dir}/challenge /home/ctf/run/challenge && if [ -d ${remote_upload_dir}/prompts ]; then sudo cp -R ${remote_upload_dir}/prompts /home/ctf/run/prompts; fi && if [ -d ${remote_upload_dir}/skills ]; then sudo cp -R ${remote_upload_dir}/skills/. /home/ctf/run/.codex/skills/; fi && sudo cp ${remote_upload_dir}/challenge_prompt.txt /home/ctf/run/challenge_prompt.txt && sudo cp ${remote_upload_dir}/supervisor.sh ${remote_upload_dir}/spawn-idea-workers.sh ${remote_upload_dir}/subagent-tmux-bridge.sh ${remote_upload_dir}/install-python-runtime.sh /home/ctf/run/ && sudo chown -R ctf:ctf /home/ctf/run && sudo chmod 644 /home/ctf/run/challenge_prompt.txt && sudo -u ctf chmod +x /home/ctf/run/supervisor.sh /home/ctf/run/spawn-idea-workers.sh /home/ctf/run/subagent-tmux-bridge.sh /home/ctf/run/install-python-runtime.sh"
 
-  # Codex-without-profile keeps syncing the operator's ~/.codex session. For a
-  # staged agent (claude-code, or a profile) the credentials come from the
-  # staged payload, so we must NOT leak the operator's Codex session onto it.
-  if [[ "${no_auth_sync}" == "0" && "${use_staged_agent}" == "0" ]]; then
-    sync_codex_auth
-  else
-    auth_sync="disabled"
-  fi
-
-  install_managed_codex_config "${remote_upload_dir}"
-
-  # Overlay the staged agent payload (agent/ control files + agent-specific
-  # config/auth) on top of the run dir. Applied AFTER the managed codex config
-  # so a profile's rendered config wins. supervisor.sh reads agent/ to decide
-  # which CLI to launch; absent it (codex-no-profile) it falls back to Codex.
-  if [[ "${use_staged_agent}" == "1" ]]; then
-    echo "Installing staged ${agent} agent config on the VM..."
-    # The cp/chown MUST succeed (else the agent isn't installed and supervisor
-    # would silently fall back to Codex); only the defensive chmods are
-    # tolerant. Don't mask the cp failure with a trailing `true`.
-    gcloud_ssh "sudo cp -R ${remote_upload_dir}/agentstage/. /home/ctf/run/ && sudo chown -R ctf:ctf /home/ctf/run && { sudo chmod 600 /home/ctf/run/agent/container.env 2>/dev/null || true; } && { sudo find /home/ctf/run -name auth.json -exec chmod 600 {} + 2>/dev/null || true; }"
-  fi
+  # Install the staged agent payload (agent/ control files + rendered config +
+  # auth) into the run dir; supervisor.sh reads agent/ to launch the right CLI.
+  # The cp/chown MUST succeed — masking it would silently fall back to Codex —
+  # so only the defensive chmods are tolerant of a missing file.
+  echo "Installing staged ${agent} agent config on the VM..."
+  gcloud_ssh "sudo cp -R ${remote_upload_dir}/agentstage/. /home/ctf/run/ && sudo chown -R ctf:ctf /home/ctf/run && { sudo chmod 600 /home/ctf/run/agent/container.env 2>/dev/null || true; } && { sudo find /home/ctf/run -name auth.json -exec chmod 600 {} + 2>/dev/null || true; }"
 
   if [[ "${use_local_image}" == "1" ]]; then
     if ! gcloud_ssh "test -f ${remote_upload_dir}/ctf-toolbox.tar.gz"; then
