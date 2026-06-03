@@ -75,6 +75,18 @@ class Claude(unittest.TestCase):
         self.assertIn("permission denied", res.text)
 
 
+class TranscriptGlobs(unittest.TestCase):
+    def test_globs_recursive_for_nested_sessions(self):
+        # Codex nests active sessions by date (.codex/sessions/YYYY/MM/DD/...),
+        # Claude nests by project — both must use a recursive ** glob.
+        from clanker.agents import build_agent_backend
+        for name in ("codex", "claude-code"):
+            be = build_agent_backend(name)
+            self.assertIn("**", be.transcript_glob, name)
+            self.assertTrue(be.transcript_recursive, name)
+            self.assertIn("RECURSIVE = True", be.transcript_script("/home/ctf/run"), name)
+
+
 class Dispatch(unittest.TestCase):
     def test_backend_dispatch(self):
         self.assertTrue(parse_transcript("claude-code", CLAUDE))
