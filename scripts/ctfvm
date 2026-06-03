@@ -1313,7 +1313,11 @@ build_remote_toolbox() {
 load_remote_toolbox_archive() {
   local remote_archive="$1"
   echo "Loading cached toolbox image archive on VM."
-  gcloud_ssh "sudo -u ctf bash -lc 'gzip -dc \"${remote_archive}\" | docker load'"
+  # Load as root: the control plane uploads the archive into a root-owned
+  # /tmp/ctfvm-upload (restrictive umask), which the ctf user can't traverse.
+  # `docker load` only needs daemon access, which root has; the image lands in
+  # the shared daemon regardless of which user loads it.
+  gcloud_ssh "gzip -dc \"${remote_archive}\" | docker load"
 }
 
 pull_remote_toolbox_image() {
