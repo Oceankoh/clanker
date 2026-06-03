@@ -201,6 +201,12 @@ class ServerTest(unittest.TestCase):
         self.assertIn("profiles", d)
         self.assertIsInstance(d["profiles"], list)
 
+    def test_spawn_defaults_endpoint(self):
+        st, body, _ = self._get("/api/v1/spawn-defaults")
+        d = json.loads(body)["data"]["defaults"]
+        self.assertIn("provider", d)
+        self.assertIn("configured", d["provider"])
+
     def test_spawn_challenge_root_fans_out(self):
         import os
         import tempfile
@@ -254,8 +260,28 @@ class ServerTest(unittest.TestCase):
                        b"steer-target", b"steerSubagent", b"browseDir", b"select-directory",
                        b"sp-desc", b"sp-novpn", b"status-note",
                        b"providerFields", b"sp-region", b"sp-do-fields", b"sp-gcp-fields",
-                       b"sp-account", b"loadProfiles"):
+                       b"sp-account", b"loadProfiles", b"prefillSpawn", b"loadDefaults", b"spawn-defaults"):
             self.assertIn(marker, body, marker)
+
+
+class SpawnDefaultsResolve(unittest.TestCase):
+    def test_configured_vs_default(self):
+        import clanker.server.service as svc
+        from unittest.mock import patch
+        from clanker.config import Settings as RealSettings
+        with TemporaryDirectory() as env_root, TemporaryDirectory() as runs_root:
+            (Path(env_root) / ".env").write_text(
+                "CTFVM_PROVIDER=digitalocean   # inline comment\nCTFVM_DO_REGION=nyc3\n")
+            service = _make_service(Path(runs_root))
+            with patch.object(svc, "Settings", lambda *a, **k: RealSettings(root=Path(env_root))):
+                d = service.spawn_defaults()
+        self.assertEqual(d["provider"]["value"], "digitalocean")  # comment stripped
+        self.assertTrue(d["provider"]["configured"])
+        self.assertEqual(d["do_region"]["value"], "nyc3")
+        self.assertTrue(d["do_region"]["configured"])
+        # a key left unset is not "configured" (stays a placeholder in the form)
+        self.assertFalse(d["gcp_project"]["configured"])
+        self.assertFalse(d["gcp_machine_type"]["configured"])  # schema default != configured
 
 
 class DirectoryPicker(unittest.TestCase):

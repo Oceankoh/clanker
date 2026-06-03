@@ -191,6 +191,28 @@ class UiService:
     def agents(self) -> list[dict]:
         return agents_info()
 
+    # form fields that can be pre-filled from configured defaults (.env / env /
+    # config.json). schema-only defaults stay blank so the form shows the
+    # built-in default as a placeholder rather than a redundant explicit value.
+    _SPAWN_DEFAULT_KEYS = (
+        "agent_backend", "model", "provider",
+        "gcp_zone", "gcp_project", "gcp_machine_type",
+        "do_region", "do_size_slug",
+        "toolbox_variant", "timeout_min",
+    )
+
+    def spawn_defaults(self) -> dict:
+        settings = Settings()
+        out: dict[str, dict] = {}
+        for key in self._SPAWN_DEFAULT_KEYS:
+            value, source = settings.resolve(key)
+            out[key] = {
+                "value": "" if value is None else str(value),
+                "source": source,
+                "configured": source != "default",  # explicitly set on this instance
+            }
+        return out
+
     def profiles(self) -> list[dict]:
         """Named credential profiles (for the spawn form's account picker).
         Never returns secret values — just name + which backend they auth."""

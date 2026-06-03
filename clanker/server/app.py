@@ -67,6 +67,7 @@ class App:
             ("GET", re.compile(r"^/health$"), self._health),
             ("GET", re.compile(r"^/api/v1/agents$"), self._agents),
             ("GET", re.compile(r"^/api/v1/profiles$"), self._profiles),
+            ("GET", re.compile(r"^/api/v1/spawn-defaults$"), self._spawn_defaults),
             ("GET", re.compile(r"^/api/v1/runs$"), self._runs_list),
             ("POST", re.compile(r"^/api/v1/runs$"), self._spawn),
             ("POST", re.compile(r"^/api/v1/select-directory$"), self._select_directory),
@@ -171,6 +172,9 @@ class App:
 
     def _profiles(self, *_):
         return ok({"profiles": self.s.profiles()})
+
+    def _spawn_defaults(self, *_):
+        return ok({"defaults": self.s.spawn_defaults()})
 
     def _runs_list(self, _m, query, _b):
         listings, current = self.s.list_runs(

@@ -117,8 +117,19 @@ async function selectRun(id){ STATE.current=id; await refreshFleet(); await refr
 
 let AGENTS = [];
 let PROFILES = [];
+let DEFAULTS = {};
 async function loadAgents(){ try{ const d=await api('/agents'); AGENTS=d.agents||[]; }catch(e){ AGENTS=[]; } }
 async function loadProfiles(){ try{ const d=await api('/profiles'); PROFILES=d.profiles||[]; }catch(e){ PROFILES=[]; } }
+async function loadDefaults(){ try{ const d=await api('/spawn-defaults'); DEFAULTS=d.defaults||{}; }catch(e){ DEFAULTS={}; } }
+// pre-fill the spawn form from values configured on this instance (.env/env/config)
+function prefillSpawn(){
+  const set=(id,k)=>{ const el=$(id), d=DEFAULTS[k]; if(el && d && d.configured && d.value) el.value=d.value; };
+  set('#sp-agent','agent_backend'); set('#sp-model','model'); set('#sp-provider','provider');
+  set('#sp-zone','gcp_zone'); set('#sp-project','gcp_project'); set('#sp-machine','gcp_machine_type');
+  set('#sp-region','do_region'); set('#sp-size','do_size_slug');
+  set('#sp-variant','toolbox_variant'); set('#sp-timeout','timeout_min');
+  providerFields();
+}
 function showSpawn(){
   STATE.current=null;
   document.querySelectorAll('.run').forEach(el=>el.classList.remove('sel'));
@@ -167,7 +178,7 @@ function showSpawn(){
     <div class="hint" style="margin-top:18px">Recent spawn jobs:</div>
     <div id="sp-jobs" class="hint">—</div>
   </div>`;
-  providerFields();
+  prefillSpawn();
   loadJobs();
 }
 async function loadJobs(){
@@ -381,7 +392,7 @@ async function preview(rel){
 const _params = new URLSearchParams(location.search);
 const _initialRun = _params.get('run');
 refreshHealth();
-Promise.all([loadAgents(), loadProfiles()]).then(()=>{ if(_params.get('new')) showSpawn(); });
+Promise.all([loadAgents(), loadProfiles(), loadDefaults()]).then(()=>{ if(_params.get('new')) showSpawn(); });
 refreshFleet().then(()=>{ if(_initialRun) selectRun(_initialRun); });
 setInterval(refreshHealth, 15000);
 setInterval(refreshFleet, 30000);
