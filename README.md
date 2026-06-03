@@ -7,9 +7,16 @@ a CTF challenge, and watch/steer it from a local web UI — then throw the VM aw
 - A small HTTP **control plane** on each VM — no SSH on the hot path.
 - A web UI with a live **chat transcript**, steer-vs-queue input, and artifact browsing.
 
-> Migration note: provisioning (`start`/`destroy`, break-glass `attach`/`shell`) is the bash CLI
-> `./scripts/ctfvm`; the monitoring/UI/config layer is the Python core `python -m clanker`. They share
-> the same `.ctfvm/` state. Full details: [docs/REFACTOR_PLAN.md](docs/REFACTOR_PLAN.md).
+> **Two commands, one system.** It's a strangler migration: the two CLIs share the same `.ctfvm/`
+> state, config, and agent/provider abstractions — they just split by job. Use whichever the table
+> says; `clanker` shells out to `ctfvm` for the actual VM spin-up.
+>
+> | Job | Command |
+> |-----|---------|
+> | Spin up / tear down a VM, break-glass `attach`/`shell`, build/push images | `./scripts/ctfvm` (bash) |
+> | Watch / steer, web UI, config, auth, agents, fanout, fetch results | `python -m clanker` (Python) |
+>
+> Full details: [docs/REFACTOR_PLAN.md](docs/REFACTOR_PLAN.md).
 
 ---
 
