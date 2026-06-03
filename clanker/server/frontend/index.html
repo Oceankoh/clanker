@@ -81,7 +81,7 @@
 </main>
 <script>
 const $ = (s,el=document)=>el.querySelector(s);
-let STATE = { current:null, tab:'transcript', runs:[], snap:null, steerTarget:'ctf:supervisor' };
+let STATE = { current:null, tab:'transcript', runs:[], snap:null, steerTarget:'ctf:supervisor', statusByRun:{} };
 
 async function api(path, opts){
   const r = await fetch('/api/v1'+path, opts);
@@ -105,15 +105,40 @@ async function refreshFleet(force){
   try{
     const d = await api('/runs?include_status=true'+(force?'&force_discovery=true':''));
     STATE.runs = d.runs;
-    const html = d.runs.map(r=>`
-      <div class="run ${r.run_id===STATE.current?'sel':''}" onclick="selectRun('${r.run_id}')">
-        <div class="id">${r.run_id||r.instance} ${statePill(r.challenge_state)}</div>
-        <div class="meta">${r.provider} · ${r.agent_backend} · ${r.runtime_status||'?'} · ${r.ip||'—'}</div>
-      </div>`).join('') || '<div class="muted" style="padding:16px">no runs</div>';
-    $('#fleet').innerHTML = html;
+    renderFleet();
+    fillFleetStatuses();   // lazily populate the challenge-state pills (needs a snapshot per run)
   }catch(e){ $('#fleet').innerHTML='<div class="err" style="padding:16px">'+e.message+'</div>'; }
 }
-async function selectRun(id){ STATE.current=id; await refreshFleet(); await refreshFocus(); }
+// render from cached STATE.runs + STATE.statusByRun (no network) so status pills
+// can refresh without re-fetching the whole fleet
+function renderFleet(){
+  const html = STATE.runs.map(r=>{
+    const st = STATE.statusByRun[r.run_id] || r.challenge_state;
+    return `
+      <div class="run ${r.run_id===STATE.current?'sel':''}" onclick="selectRun('${r.run_id}')">
+        <div class="id">${r.run_id||r.instance} ${statePill(st)}</div>
+        <div class="meta">${r.provider} · ${r.agent_backend} · ${r.runtime_status||'?'} · ${r.ip||'—'}</div>
+      </div>`;
+  }).join('') || '<div class="muted" style="padding:16px">no runs</div>';
+  $('#fleet').innerHTML = html;
+}
+// fetch a light snapshot for each run we don't yet have a status for, then
+// re-render the sidebar. Cached after the first fetch; the focused run keeps
+// its status fresh via the focus refresh.
+let _fillingStatuses = false;
+async function fillFleetStatuses(){
+  if(_fillingStatuses) return; _fillingStatuses = true;
+  try{
+    for(const r of STATE.runs){
+      if(STATE.statusByRun[r.run_id] || r.run_id===STATE.current) continue;
+      try{
+        const s = await api('/runs/'+encodeURIComponent(r.run_id)+'?include_artifacts=false');
+        if(s.challenge_state){ STATE.statusByRun[r.run_id]=s.challenge_state; renderFleet(); }
+      }catch(e){ /* run may be off/unreachable — leave its pill blank */ }
+    }
+  } finally { _fillingStatuses = false; }
+}
+async function selectRun(id){ STATE.current=id; renderFleet(); await refreshFocus(); }
 
 let AGENTS = [];
 let PROFILES = [];
@@ -230,12 +255,22 @@ async function submitSpawn(){
 }
 function setTab(t){ STATE.tab=t; renderFocus(); }
 
+function cacheFocusStatus(){
+  if(STATE.snap && STATE.snap.challenge_state){
+    STATE.statusByRun[STATE.current]=STATE.snap.challenge_state; renderFleet();
+  }
+}
 async function refreshFocus(){
   if(!STATE.current){ $('#focus').innerHTML='<div class="muted">Select a run.</div>'; return; }
   // on the transcript tab, refresh just the chat (keeps the shell + scroll)
   if(STATE.tab==='transcript' && STATE.snap){ loadTranscript(); return; }
   try{ STATE.snap = await api('/runs/'+encodeURIComponent(STATE.current)); }
   catch(e){ $('#focus').innerHTML='<div class="err">'+e.message+'</div>'; return; }
+  cacheFocusStatus();
+  // on the panes tab, if the steer box exists and the pane set is unchanged,
+  // update only the pane outputs — never re-render (would clobber what you're
+  // typing + steal focus + reset the mode radio).
+  if(STATE.tab==='panes' && $('#steer') && paneSetMatches()){ updatePaneOutputs(); return; }
   renderFocus();
   if(STATE.tab==='transcript') loadTranscript();
 }
@@ -245,13 +280,39 @@ async function fullRefresh(){
   if(!STATE.current) return;
   try{ STATE.snap = await api('/runs/'+encodeURIComponent(STATE.current)); }
   catch(e){ return; }
+  cacheFocusStatus();
   renderFocus();
   if(STATE.tab==='transcript') loadTranscript();
+}
+// like refreshFocus but used right after a steer action: on the panes tab it
+// updates pane outputs in place (keeps your cursor in the steer box)
+async function softRefresh(){
+  if(!STATE.current) return;
+  try{ STATE.snap = await api('/runs/'+encodeURIComponent(STATE.current)); }catch(e){ return; }
+  cacheFocusStatus();
+  if(STATE.tab==='panes' && $('#steer') && paneSetMatches()){ updatePaneOutputs(); }
+  else { renderFocus(); if(STATE.tab==='transcript') loadTranscript(); }
+}
+function paneSetMatches(){
+  const cur=[...document.querySelectorAll('.pane-out')].map(e=>e.getAttribute('data-target'));
+  const want=((STATE.snap||{}).panes||[]).map(p=>p.target);
+  return cur.length===want.length && cur.every((t,i)=>t===want[i]);
+}
+function updatePaneOutputs(){
+  ((STATE.snap||{}).panes||[]).forEach(p=>{
+    const el=document.querySelector('.pane-out[data-target="'+p.target+'"]');
+    if(el){ const atBottom = el.scrollHeight-el.scrollTop-el.clientHeight < 40;
+      el.textContent=p.output; if(atBottom) el.scrollTop=el.scrollHeight; }
+  });
 }
 function esc(s){ return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
 
 function renderFocus(){
   const s = STATE.snap; if(!s){ return; }
+  // preserve any in-progress input across a re-render (steer text/target/mode,
+  // status note) so a periodic refresh never eats what you're typing
+  const keep={}; ['#steer','#steer-target','#status-note'].forEach(id=>{const el=$(id); if(el) keep[id]=el.value;});
+  const keepMode=(document.querySelector('input[name=smode]:checked')||{}).value;
   const tabs = ['transcript','panes','findings','supervisor','artifacts','subagents'];
   const tabBar = tabs.map(t=>`<div class="tab ${STATE.tab===t?'active':''}" onclick="setTab('${t}')">${t}</div>`).join('');
   let body='';
@@ -260,7 +321,7 @@ function renderFocus(){
          + `<div id="transcript" class="muted">loading transcript…</div>`;
   } else if(STATE.tab==='panes'){
     const panes = s.panes||[];
-    body = panes.map(p=>`<div class="muted">${p.target} — ${esc(p.window_name)}${p.active?' *':''}</div><pre class="pane-out">${esc(p.output)}</pre>`).join('') || '<div class="muted">no panes</div>';
+    body = panes.map(p=>`<div class="muted">${p.target} — ${esc(p.window_name)}${p.active?' *':''}</div><pre class="pane-out" data-target="${esc(p.target)}">${esc(p.output)}</pre>`).join('') || '<div class="muted">no panes</div>';
     body += steerBox(panes);
   } else if(STATE.tab==='findings'){ body=`<pre>${esc(s.findings_tail)||'(empty)'}</pre>`; }
   else if(STATE.tab==='supervisor'){ body=`<pre>${esc(s.supervisor_tail)||'(empty)'}</pre>`; }
@@ -289,14 +350,17 @@ function renderFocus(){
       <button onclick="clearStatus()">Clear status</button>
       <input type="text" id="status-note" placeholder="optional note (attached to the status)"></div>
     <div class="tabs">${tabBar}</div>${body}`;
+  // restore preserved inputs
+  Object.entries(keep).forEach(([id,v])=>{const el=$(id); if(el && v!=null) el.value=v;});
+  if(keepMode){const r=document.querySelector('input[name=smode][value="'+keepMode+'"]'); if(r) r.checked=true;}
   if(STATE.tab==='transcript') loadTranscript();
   // keep terminal panes scrolled to the latest output
   document.querySelectorAll('.pane-out').forEach(el=>{ el.scrollTop = el.scrollHeight; });
   const hint = $('#modehint');
   if(hint) document.querySelectorAll('input[name=smode]').forEach(r=>r.addEventListener('change',()=>{
     hint.textContent = steerMode()==='queue'
-      ? 'queue: appended to inject.queue; the agent reads it at a safe point'
-      : 'send now: typed straight into the live pane (may interrupt the current turn)';
+      ? 'queue: appends to inject.queue — the agent only reads it if its prompt polls the queue (an idle agent will NOT see it)'
+      : 'send now: typed straight into the agent pane — reaches it immediately';
   }));
 }
 
@@ -332,12 +396,12 @@ function steerBox(panes){
     opts += `<option value="${esc(p.target)}"${p.target===tgt?' selected':''}>${esc(p.target)}${sub?' · subagent':''}</option>`; });
   if(!seen.has('ctf:supervisor')) opts = `<option value="ctf:supervisor"${tgt==='ctf:supervisor'?' selected':''}>ctf:supervisor</option>`+opts;
   return `
-    <textarea id="steer" rows="2" onkeydown="steerKey(event)" placeholder="Enter to send · Shift+Enter for newline"></textarea>
+    <textarea id="steer" rows="2" onkeydown="steerKey(event)" placeholder="message to the agent — Enter to send · Shift+Enter for newline"></textarea>
     <div class="row">
-      <label class="mode"><input type="radio" name="smode" value="queue" checked> Queue</label>
-      <label class="mode"><input type="radio" name="smode" value="steer"> Send now</label>
+      <label class="mode"><input type="radio" name="smode" value="steer" checked> Send now</label>
+      <label class="mode"><input type="radio" name="smode" value="queue"> Queue</label>
       <label class="mode">→&nbsp;<select id="steer-target">${opts}</select></label>
-      <span class="hint" id="modehint">queue: appended to inject.queue (the supervisor reads it at a safe point); send-now &amp; keys go to the selected target</span>
+      <span class="hint" id="modehint">send now: typed straight into the agent pane — reaches it immediately. (Queue only works if the agent's prompt polls inject.queue.)</span>
     </div>
     <div class="row">
       <button class="primary" onclick="submitSteer()">Send</button>
@@ -348,7 +412,7 @@ function steerBox(panes){
       <button onclick="key('Escape')">Esc</button>
     </div>`;
 }
-function steerMode(){ const r=document.querySelector('input[name=smode]:checked'); return r?r.value:'queue'; }
+function steerMode(){ const r=document.querySelector('input[name=smode]:checked'); return r?r.value:'steer'; }
 function steerTarget(){ const el=$('#steer-target'); return (el&&el.value) || STATE.steerTarget || 'ctf:supervisor'; }
 function steerSubagent(t){ STATE.steerTarget=t; STATE.tab='panes'; renderFocus(); }
 function post(path, payload){ return api('/runs/'+encodeURIComponent(STATE.current)+path,
@@ -362,10 +426,10 @@ async function submitSteer(){
     // queue is run-level (inject.queue, read by the supervisor); send-now targets the selected pane
     if(steerMode()==='queue') await post('/inject', {text:t});
     else                      await post('/panes/send', {target:steerTarget(), text:t, press_enter:true});
-    ta.value=''; setTimeout(fullRefresh, 400);
+    ta.value=''; ta.focus(); setTimeout(softRefresh, 500);
   }catch(e){ alert(e.message); }
 }
-async function keys(ks){ const target=steerTarget(); STATE.steerTarget=target; try{ await post('/panes/keys', {target, keys:ks}); setTimeout(fullRefresh,400);}catch(e){alert(e.message);} }
+async function keys(ks){ const target=steerTarget(); STATE.steerTarget=target; try{ await post('/panes/keys', {target, keys:ks}); setTimeout(softRefresh,500);}catch(e){alert(e.message);} }
 async function key(k){ keys([k]); }
 async function setStatus(st){ const note=($('#status-note')||{}).value||''; try{ await post('/status', {state:st, note}); fullRefresh();}catch(e){alert(e.message);} }
 async function clearStatus(){ try{ await api('/runs/'+encodeURIComponent(STATE.current)+'/status',{method:'DELETE'}); fullRefresh();}catch(e){alert(e.message);} }
