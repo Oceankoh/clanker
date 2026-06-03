@@ -29,18 +29,18 @@ def _b64(s: str) -> str:
     return base64.b64encode(s.encode()).decode()
 
 
-def _snap(pane_text: str, findings: str, backend: str) -> dict:
+def _snap(pane_text: str, findings: str, backend: str, status=None, extra_pane: str = "") -> dict:
     return {
         "error": None, "no_tmux": False,
         "panes": [
             {"session": "ctf", "index": "0", "name": "supervisor", "active": True,
-             "target": "ctf:supervisor", "output_b64": _b64(pane_text)},
+             "target": "ctf:supervisor", "output_b64": _b64(pane_text + extra_pane)},
             {"session": "subagent-7f3c", "index": "0", "name": "exploit_tester", "active": False,
              "target": "subagent-7f3c:0", "output_b64": _b64("verifying ROP chain... confirmed")},
         ],
         "findings_b64": _b64(findings),
         "supervisor_b64": _b64(f"[supervisor] {backend} session active\n[bridge] subagent-7f3c mirrored"),
-        "explicit_status": None,
+        "explicit_status": status,
         "metrics": {"now": 1000, "findings_mtime": 985, "supervisor_mtime": 995,
                     "artifact_mtime": 980, "artifact_count": 2, "inject_mtime": 0},
         "artifacts": [{"relpath": "artifacts/exploit.py", "size": 2048, "mtime": 980},
@@ -92,11 +92,46 @@ ART = {"ok": True, "mime": "text/x-python", "size": 2048, "truncated": False,
        "b64": _b64("#!/usr/bin/env python3\nfrom pwn import *\np = process('./chal')\n# tcache poison -> __free_hook = system\n")}
 
 
+def _payload_b64(command, marker):
+    """Pull the base64 the steering commands pipe through `base64 -d`."""
+    m = re.search(rf"printf %s (\S+) \| base64 -d{re.escape(marker)}", command)
+    if not m:
+        return None
+    try:
+        return base64.b64decode(m.group(1)).decode("utf-8", "replace")
+    except Exception:
+        return ""
+
+
 class FakeClient:
+    """Stateful fake: status markers and sent/queued messages persist and show up
+    in the next snapshot, so every action button has a visible effect."""
+
     def __init__(self, backend: str):
         self.backend = backend
+        self.status = None            # explicit_status dict (Mark solved/blocked)
+        self.events = []              # ["queued: …", "sent: …"] shown in the pane
 
     def exec(self, command, *, stdin=b"", timeout=30):
+        # --- steering side effects (persist for the next snapshot) ---
+        if "ui-status.json" in command and "rm -f" in command:
+            self.status = None
+            return ExecResult(0)
+        if "ui-status.json" in command:
+            txt = _payload_b64(command, " > /home/ctf/run/ui-status.json")
+            try:
+                self.status = json.loads(txt) if txt else None
+            except Exception:
+                self.status = None
+            return ExecResult(0)
+        if "inject.queue" in command:
+            self.events.append("queued: " + (_payload_b64(command, " >> /home/ctf/run/inject.queue") or "").strip())
+            return ExecResult(0)
+        if "send-keys" in command and "base64 -d" in command:
+            self.events.append("sent: " + (_payload_b64(command, ")") or "").strip())
+            return ExecResult(0)
+
+        # --- reads ---
         if "python3 -" in command:
             m = re.search(r"printf %s (\S+) \|", command)
             src = base64.b64decode(m.group(1)).decode() if m else ""
@@ -108,7 +143,9 @@ class FakeClient:
             backend = "claude-code" if ".claude" in src else "codex"
             pane = ("● flag{x0r_is_not_crypto}  found\n" if backend == "claude-code"
                     else "$ ./exploit.py\n[+] got shell\n$ cat flag.txt\nflag{clanker_demo}\n")
-            return ExecResult(0, stdout=json.dumps(_snap(pane, "## Notes\nSolved.", backend)).encode())
+            extra = ("\n--- operator ---\n" + "\n".join(self.events) + "\n") if self.events else ""
+            return ExecResult(0, stdout=json.dumps(
+                _snap(pane, "## Notes\nSolved.", backend, status=self.status, extra_pane=extra)).encode())
         return ExecResult(0)
 
     def download_file(self, p, *, timeout=60):
