@@ -75,6 +75,7 @@ class App:
             ("POST", re.compile(r"^/api/v1/runs/([^/]+)/panes/trust$"), self._pane_trust),
             ("POST", re.compile(r"^/api/v1/runs/([^/]+)/inject$"), self._inject),
             ("GET", re.compile(r"^/api/v1/runs/([^/]+)/subagents$"), self._subagents),
+            ("GET", re.compile(r"^/api/v1/runs/([^/]+)/transcript$"), self._transcript),
             ("GET", re.compile(r"^/api/v1/runs/([^/]+)/artifacts/(.+)/download$"), self._artifact_download),
             ("GET", re.compile(r"^/api/v1/runs/([^/]+)/bundle$"), self._bundle),
             ("GET", re.compile(r"^/api/v1/runs/([^/]+)/artifacts/(.+)$"), self._artifact_preview),
@@ -213,6 +214,10 @@ class App:
     def _subagents(self, m, _q, _b):
         subs = self.s.subagents(m.group(1))
         return ok({"subagents": [serialize.subagent(s) for s in subs]})
+
+    def _transcript(self, m, _q, _b):
+        backend, events = self.s.transcript(m.group(1))
+        return ok({"backend": backend, "events": [e.to_dict() for e in events]})
 
     def _artifact_preview(self, m, _q, _b):
         relpath = urllib.parse.unquote(m.group(2))

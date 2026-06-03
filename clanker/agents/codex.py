@@ -38,6 +38,8 @@ class CodexBackend(AgentBackend):
     name = "codex"
     display_name = "Codex CLI"
     default_model = "gpt-5.5"
+    transcript_glob = ".codex/sessions/rollout-*.jsonl"
+    transcript_recursive = False
 
     # --- auth --------------------------------------------------------------
     def materialize_auth(self, settings) -> AuthMaterial:  # noqa: ANN001

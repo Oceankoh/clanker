@@ -32,6 +32,8 @@ class ClaudeCodeBackend(AgentBackend):
     name = "claude-code"
     display_name = "Claude Code"
     default_model = ""  # let Claude use its default unless the operator pins one
+    transcript_glob = ".claude/projects/**/*.jsonl"
+    transcript_recursive = True
 
     # --- auth --------------------------------------------------------------
     def materialize_auth(self, settings) -> AuthMaterial:  # noqa: ANN001

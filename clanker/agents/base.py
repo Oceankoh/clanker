@@ -167,10 +167,40 @@ def default_agent_spec(*, model: str = "", ida_mcp_url: str = "") -> AgentConfig
 # ---------------------------------------------------------------------------
 
 
+_TRANSCRIPT_BODY = r'''
+import base64, glob, json, os
+files = glob.glob(PATTERN, recursive=RECURSIVE)
+newest = max(files, key=os.path.getmtime) if files else ""
+data = b""
+if newest:
+    with open(newest, "rb") as f:
+        try:
+            f.seek(-TAIL, 2)
+        except OSError:
+            f.seek(0)
+        data = f.read()
+print(json.dumps({"file": os.path.basename(newest), "b64": base64.b64encode(data).decode("ascii")}))
+'''
+
+
 class AgentBackend(ABC):
     name: str = ""
     display_name: str = ""
     default_model: str = ""
+    # where this backend's session transcript lives, relative to the run dir
+    transcript_glob: str = ""
+    transcript_recursive: bool = False
+
+    def transcript_script(self, remote_run_dir: str, *, tail_bytes: int = 400_000) -> str:
+        """Remote Python that finds the newest session transcript and tails it,
+        emitting ``{file, b64}``. The b64 is parsed by ``transcript.parse_transcript``."""
+        pattern = remote_run_dir.rstrip("/") + "/" + self.transcript_glob
+        header = (
+            f"PATTERN = {pattern!r}\n"
+            f"RECURSIVE = {bool(self.transcript_recursive)}\n"
+            f"TAIL = {int(tail_bytes)}\n"
+        )
+        return header + _TRANSCRIPT_BODY
 
     def build_spec(self, *, model: str = "", ida_mcp_url: str = "") -> AgentConfigSpec:
         return default_agent_spec(model=model or self.default_model, ida_mcp_url=ida_mcp_url)

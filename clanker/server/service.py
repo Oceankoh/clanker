@@ -10,14 +10,19 @@ from __future__ import annotations
 
 import time
 
+import json as _json
+
 from .. import artifacts as artifacts_mod
 from .. import snapshot as snapshot_mod
 from .. import steering as steering_mod
+from .. import transcript as transcript_mod
+from ..agents import build_agent_backend
 from ..artifacts import ArtifactError
 from ..config import ROOT, Settings
 from ..controlclient import ControlPlaneClient, ControlPlaneError
 from ..models import RunRecord, Subagent
 from ..providers import build_provider_registry, build_run_registry
+from ..remote import remote_python
 from .jobs import JobLimitError, SpawnJobTracker
 
 
@@ -97,6 +102,26 @@ class UiService:
 
     def subagents(self, run_id: str) -> list[Subagent]:
         return self.snapshot(run_id, include_artifacts=False).subagents
+
+    def transcript(self, run_id: str) -> tuple[str, list]:
+        """Fetch + parse the agent's session transcript into chat events
+        (control-plane only). Returns (backend_name, events)."""
+        record = self._record(run_id)
+        backend = build_agent_backend(record.agent_backend)
+        client = self._client(record)
+        try:
+            result = client.exec(remote_python(backend.transcript_script(record.remote_run_dir)), timeout=25)
+        except ControlPlaneError as exc:
+            raise ApiError("REMOTE_ERROR", str(exc), 502) from exc
+        if not result.ok:
+            raise ApiError("REMOTE_ERROR", result.stderr_text().strip() or "transcript fetch failed", 502)
+        try:
+            payload = _json.loads(result.stdout.decode("utf-8") or "{}")
+        except Exception:
+            payload = {}
+        import base64 as _b64
+        text = _b64.b64decode((payload.get("b64") or "").encode("ascii"), validate=False).decode("utf-8", "replace")
+        return backend.name, transcript_mod.parse_transcript(backend.name, text)
 
     # --- steering / status -------------------------------------------------
     def pane_send(self, run_id, target, text, enter=True):

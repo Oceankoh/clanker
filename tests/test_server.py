@@ -51,6 +51,15 @@ class FakeClient:
             src = base64.b64decode(m.group(1)).decode() if m else ""
             if "ART_DIR" in src:
                 return ExecResult(0, stdout=json.dumps(_ART).encode())
+            if "PATTERN" in src:  # transcript fetch
+                lines = "\n".join(json.dumps(o) for o in [
+                    {"type": "response_item", "payload": {"type": "message", "role": "user",
+                        "content": [{"type": "input_text", "text": "hi"}]}},
+                    {"type": "response_item", "payload": {"type": "function_call",
+                        "name": "exec_command", "call_id": "c", "arguments": "{}"}},
+                ])
+                env = {"file": "rollout-x.jsonl", "b64": base64.b64encode(lines.encode()).decode()}
+                return ExecResult(0, stdout=json.dumps(env).encode())
             return ExecResult(0, stdout=json.dumps(_SNAP).encode())
         if "tar -czf" in command:
             return ExecResult(0, stdout=b"/tmp/ctfvm-bundle-1.tar.gz\n")
@@ -136,6 +145,15 @@ class ServerTest(unittest.TestCase):
                           {"target": "ctf:supervisor", "text": "a|b `c` $X"})
         self.assertEqual(st, 200)
         self.assertTrue(j["ok"])
+
+    def test_transcript(self):
+        st, body, _ = self._get("/api/v1/runs/20250101-000000/transcript")
+        d = json.loads(body)["data"]
+        self.assertEqual(d["backend"], "codex")
+        kinds = [e["kind"] for e in d["events"]]
+        self.assertIn("message", kinds)
+        self.assertIn("tool_call", kinds)
+        self.assertEqual(next(e for e in d["events"] if e["kind"] == "tool_call")["tool"], "exec_command")
 
     def test_inject_queue(self):
         st, j = self._req("POST", "/api/v1/runs/20250101-000000/inject", {"text": "hint"})

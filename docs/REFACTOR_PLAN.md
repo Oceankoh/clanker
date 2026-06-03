@@ -191,12 +191,24 @@ Addresses the concrete UX problems in the first SPA cut:
 - [x] Tests: inject endpoint + `steering.inject_message`, binary-preview `b64`, SPA element markers.
       88 tests total.
 
-### 5b — Chat-transcript experience (deferred; needs live agent output to validate)
-The remaining "full Claude/Codex web UI" piece — a structured transcript (messages, tool calls,
-approvals inline, plan/todo, diffs, usage) parsed from each backend's session JSONL (Codex rollout /
-Claude stream-json) into a chat view. The parser can be written against the documented schema but only
-*validated* against a real run, so it ships with the live agent wiring. The current panes tab remains a
-raw `tmux capture-pane` view until then.
+### 5b — Chat-transcript experience ✅ (built + validated against real transcripts)
+The "full Claude/Codex web UI" piece — a structured chat transcript instead of a raw terminal scrape.
+Turned out to be testable after all: the parser only needs realistic session JSONL, and real Codex/
+Claude transcripts on the dev machine provided ground truth.
+- [x] `clanker/transcript.py`: `parse_codex_rollout` (response_item: message/reasoning/function_call/
+      _output, custom_tool_call) + `parse_claude_session` (content blocks: text/thinking/tool_use/
+      tool_result) -> uniform `TranscriptEvent` (role, kind, text, tool, tool_input, is_error).
+      **Validated on real data**: 0 malformed events across 800+ events, correct tool names
+      (exec_command/apply_patch, Agent/Bash), paired tool_call/tool_result.
+- [x] `AgentBackend.transcript_script(remote_run_dir)`: per-backend remote Python that finds the newest
+      session JSONL (codex `.codex/sessions/rollout-*.jsonl`, claude `.claude/projects/**/*.jsonl`) and
+      tails it. End-to-end run of the *actual* gatherer over real files produced 110 clean events.
+- [x] `GET /api/v1/runs/{id}/transcript` + `UiService.transcript` (control-plane only).
+- [x] SPA **Transcript** tab (now the default focus view): role-styled chat bubbles, dim reasoning,
+      tool calls with args, collapsible/erroring results; near-bottom auto-follow.
+- [x] Tests: parser fixtures (codex + claude), backend dispatch, endpoint via fake client. 92 total.
+- Only the control-plane transport (same tested urllib client) and the exact on-VM active-session path
+  are unexercised until a live run — everything else is verified.
 
 Original 5b spec (the AgentFeatures surface):
 - **Agent-feature parity in the frontend (backend-neutral).** The SPA must surface the *normal*
