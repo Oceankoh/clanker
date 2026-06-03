@@ -174,6 +174,7 @@ function showSpawn(){
       <div><label>Timeout (min)</label><input type="text" id="sp-timeout" placeholder="(default)"></div>
     </div>
     <label class="chk"><input type="checkbox" id="sp-novpn"> --no-vpn (skip the VPN setup)</label>
+    <label class="chk"><input type="checkbox" id="sp-uselocal"> use local toolbox image archive (--use-local-image; tick this if you built one with <code>ctfvm image build-local</code> and haven't pushed to a registry)</label>
     <div class="row" style="margin-top:14px"><button class="primary" onclick="submitSpawn()">Spawn</button>
       <span id="sp-result" class="hint"></span></div>
     <div class="hint" style="margin-top:18px">Recent spawn jobs:</div>
@@ -219,6 +220,7 @@ async function submitSpawn(){
   else if(prov==='gcp'){ put('zone',$('#sp-zone').value); put('project',$('#sp-project').value); put('machine_type',$('#sp-machine').value); }
   put('toolbox_variant',$('#sp-variant').value); put('timeout_min',$('#sp-timeout').value);
   if($('#sp-novpn').checked) body.no_vpn=true;
+  if($('#sp-uselocal').checked) body.use_local_image=true;
   $('#sp-result').textContent='spawning…';
   try{
     const d=await api('/runs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});

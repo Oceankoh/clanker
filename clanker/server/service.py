@@ -329,6 +329,8 @@ class UiService:
             cmd += ["--account", account]
         if spec.get("no_vpn"):
             cmd.append("--no-vpn")
+        if spec.get("use_local_image"):
+            cmd.append("--use-local-image")
         return cmd
 
     def jobs_list(self):

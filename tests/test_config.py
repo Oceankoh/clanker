@@ -134,6 +134,11 @@ class SpawnDefaults(unittest.TestCase):
             self.assertEqual(cmd[cmd.index(flag) + 1], val)
         self.assertIn("--no-vpn", cmd)
 
+    def test_use_local_image_flag(self):
+        cmd = UiService._build_start_cmd({"challenge_dir": "/x", "use_local_image": True})
+        self.assertIn("--use-local-image", cmd)
+        self.assertNotIn("--use-local-image", UiService._build_start_cmd({"challenge_dir": "/x"}))
+
     def test_account_profile_flag(self):
         cmd = UiService._build_start_cmd({"challenge_dir": "/x", "agent_backend": "claude-code",
                                           "account": "alice"})
