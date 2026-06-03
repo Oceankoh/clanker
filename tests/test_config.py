@@ -163,6 +163,18 @@ class EnvParsing(unittest.TestCase):
         self.assertEqual(d["CTFVM_URL"], "http://x#frag")     # quoted value, comment dropped
         self.assertEqual(d["CTFVM_MODEL"], "gpt-5.5")
 
+    def test_value_starting_with_hash_is_not_a_comment(self):
+        from clanker.config import _parse_env_file
+        with TemporaryDirectory() as tmp:
+            p = Path(tmp) / ".env"
+            p.write_text(
+                "CTFVM_TOKEN=#abc123\n"        # no space before # -> literal value
+                "CTFVM_EMPTY= # only comment\n"  # space before # -> empty
+            )
+            d = _parse_env_file(p)
+        self.assertEqual(d["CTFVM_TOKEN"], "#abc123")  # was silently truncated to ""
+        self.assertEqual(d["CTFVM_EMPTY"], "")
+
     def test_build_start_cmd_has_no_comment_leakage(self):
         # regression: a commented .env must not poison the spawn command
         with TemporaryDirectory() as tmp, patch.dict(os.environ, {}, clear=False):

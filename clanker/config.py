@@ -123,21 +123,22 @@ def _parse_env_file(path: Path) -> dict[str, str]:
             continue
         key, _, value = line.partition("=")
         key = key.strip()
-        value = value.lstrip()
-        if value and value[0] in "\"'":
+        stripped = value.lstrip()
+        if stripped and stripped[0] in "\"'":
             # quoted: take the quoted span, ignore any trailing inline comment
-            quote = value[0]
-            end = value.find(quote, 1)
-            value = value[1:end] if end != -1 else value[1:]
+            quote = stripped[0]
+            end = stripped.find(quote, 1)
+            value = stripped[1:end] if end != -1 else stripped[1:]
         else:
-            # unquoted: a ' #' (whitespace then #) starts an inline comment, like
-            # bash `set -a; source .env`. A bare '#' inside a token (e.g. a URL
-            # fragment or password) is preserved.
+            # unquoted: a '#' STARTS an inline comment only when preceded by
+            # whitespace, matching bash `set -a; source .env` (`FOO=bar # c` ->
+            # "bar"; `FOO= # c` -> ""; `FOO=#c` -> "#c"; `pass#word` -> kept).
+            # Detect on the raw value so leading whitespace is still significant.
             for i, ch in enumerate(value):
-                if ch == "#" and (i == 0 or value[i - 1].isspace()):
+                if ch == "#" and i > 0 and value[i - 1].isspace():
                     value = value[:i]
                     break
-            value = value.rstrip()
+            value = value.strip()
         if key:
             out[key] = value
     return out

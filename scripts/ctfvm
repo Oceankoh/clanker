@@ -2914,7 +2914,10 @@ PROMPT
   # which CLI to launch; absent it (codex-no-profile) it falls back to Codex.
   if [[ "${use_staged_agent}" == "1" ]]; then
     echo "Installing staged ${agent} agent config on the VM..."
-    gcloud_ssh "sudo cp -R ${remote_upload_dir}/agentstage/. /home/ctf/run/ && sudo chown -R ctf:ctf /home/ctf/run && sudo chmod 600 /home/ctf/run/agent/container.env 2>/dev/null; sudo find /home/ctf/run -name auth.json -exec chmod 600 {} + 2>/dev/null; true"
+    # The cp/chown MUST succeed (else the agent isn't installed and supervisor
+    # would silently fall back to Codex); only the defensive chmods are
+    # tolerant. Don't mask the cp failure with a trailing `true`.
+    gcloud_ssh "sudo cp -R ${remote_upload_dir}/agentstage/. /home/ctf/run/ && sudo chown -R ctf:ctf /home/ctf/run && { sudo chmod 600 /home/ctf/run/agent/container.env 2>/dev/null || true; } && { sudo find /home/ctf/run -name auth.json -exec chmod 600 {} + 2>/dev/null || true; }"
   fi
 
   if [[ "${use_local_image}" == "1" ]]; then
