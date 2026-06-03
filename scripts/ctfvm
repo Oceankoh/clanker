@@ -2851,7 +2851,9 @@ PROMPT
   upload_dir_to_remote "${upload_tmp}" "${remote_upload_dir}"
   if [[ "${use_local_image}" == "1" ]]; then
     echo "Uploading local toolbox archive..."
-    upload_file_to_remote "${local_image_archive}" "${remote_upload_dir}/ctf-toolbox.tar.gz"
+    # Mode 644: the control plane uploads as root, but the archive is loaded as
+    # the `ctf` user (`docker load`), which otherwise gets "Permission denied".
+    upload_file_to_remote "${local_image_archive}" "${remote_upload_dir}/ctf-toolbox.tar.gz" 644
   fi
 
   gcloud_ssh "sudo mkdir -p /home/ctf/run /home/ctf/run/.codex/skills && sudo rm -rf /home/ctf/run/challenge /home/ctf/run/prompts /home/ctf/run/.codex/skills/* && sudo cp -R ${remote_upload_dir}/challenge /home/ctf/run/challenge && if [ -d ${remote_upload_dir}/prompts ]; then sudo cp -R ${remote_upload_dir}/prompts /home/ctf/run/prompts; fi && if [ -d ${remote_upload_dir}/skills ]; then sudo cp -R ${remote_upload_dir}/skills/. /home/ctf/run/.codex/skills/; fi && sudo cp ${remote_upload_dir}/challenge_prompt.txt /home/ctf/run/challenge_prompt.txt && sudo cp ${remote_upload_dir}/supervisor.sh ${remote_upload_dir}/spawn-idea-workers.sh ${remote_upload_dir}/subagent-tmux-bridge.sh ${remote_upload_dir}/install-python-runtime.sh /home/ctf/run/ && sudo chown -R ctf:ctf /home/ctf/run && sudo chmod 644 /home/ctf/run/challenge_prompt.txt && sudo -u ctf chmod +x /home/ctf/run/supervisor.sh /home/ctf/run/spawn-idea-workers.sh /home/ctf/run/subagent-tmux-bridge.sh /home/ctf/run/install-python-runtime.sh"
