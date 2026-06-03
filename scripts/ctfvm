@@ -3069,7 +3069,13 @@ cmd_ui() {
   done
 
   require_cmd python3
-  python3 "${REPO_ROOT}/scripts/ctfvm_ui.py" --host "${host}" --port "${port}"
+  # platform-v2: launch the new clanker server (the old scripts/ctfvm_ui.py UI is
+  # retired). Set CTFVM_LEGACY_UI=1 to fall back to it.
+  if [[ "${CTFVM_LEGACY_UI:-0}" == "1" ]]; then
+    python3 "${REPO_ROOT}/scripts/ctfvm_ui.py" --host "${host}" --port "${port}"
+  else
+    ( cd "${REPO_ROOT}" && PYTHONPATH="${REPO_ROOT}" python3 -m clanker serve --host "${host}" --port "${port}" )
+  fi
 }
 
 cmd_mcp() {

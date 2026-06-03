@@ -68,6 +68,7 @@ class App:
             ("GET", re.compile(r"^/api/v1/agents$"), self._agents),
             ("GET", re.compile(r"^/api/v1/runs$"), self._runs_list),
             ("POST", re.compile(r"^/api/v1/runs$"), self._spawn),
+            ("POST", re.compile(r"^/api/v1/select-directory$"), self._select_directory),
             ("GET", re.compile(r"^/api/v1/runs/([^/]+)$"), self._snapshot),
             ("POST", re.compile(r"^/api/v1/runs/([^/]+)/status$"), self._set_status),
             ("DELETE", re.compile(r"^/api/v1/runs/([^/]+)/status$"), self._clear_status),
@@ -182,6 +183,10 @@ class App:
 
     def _spawn(self, _m, _q, body):
         return ok({"job_ids": self.s.spawn(self._body_json(body))})
+
+    def _select_directory(self, _m, _q, body):
+        data = self._body_json(body)
+        return ok(self.s.choose_directory(data.get("current_path", ""), bool(data.get("batch", False))))
 
     def _set_status(self, m, _q, body):
         data = self._body_json(body)

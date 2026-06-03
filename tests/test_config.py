@@ -115,6 +115,21 @@ class SpawnDefaults(unittest.TestCase):
         self.assertIn("--agent", cmd)
         self.assertEqual(cmd[cmd.index("--agent") + 1], "claude-code")
 
+    def test_all_spawn_flags_map_through(self):
+        cmd = UiService._build_start_cmd({
+            "challenge_dir": "/x", "provider": "digitalocean", "zone": "nyc3",
+            "machine_type": "n2-standard-4", "size_slug": "s-4vcpu-8gb",
+            "toolbox_variant": "pwn", "timeout_min": "90", "no_vpn": True,
+            "description": "d", "ideas": "i",
+        })
+        for flag, val in (("--provider", "digitalocean"), ("--zone", "nyc3"),
+                          ("--size-slug", "s-4vcpu-8gb"), ("--machine-type", "n2-standard-4"),
+                          ("--toolbox-variant", "pwn"), ("--timeout-min", "90"),
+                          ("--desc", "d"), ("--ideas", "i")):
+            self.assertIn(flag, cmd)
+            self.assertEqual(cmd[cmd.index(flag) + 1], val)
+        self.assertIn("--no-vpn", cmd)
+
 
 class Fanout(unittest.TestCase):
     def test_discover_challenges(self):

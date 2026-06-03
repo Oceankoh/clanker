@@ -244,8 +244,57 @@ class ServerTest(unittest.TestCase):
         self.assertIn("text/html", hdr.get("Content-Type", ""))
         self.assertIn(b"clanker", body)
         # the operational redesign elements are present
-        for marker in (b"submitSteer", b"steerKey", b"name=smode", b"/inject", b"hexDump", b"Approve"):
+        for marker in (b"submitSteer", b"steerKey", b"name=smode", b"/inject", b"hexDump", b"Approve",
+                       b"steer-target", b"steerSubagent", b"browseDir", b"select-directory",
+                       b"sp-desc", b"sp-novpn", b"status-note"):
             self.assertIn(marker, body, marker)
+
+
+class DirectoryPicker(unittest.TestCase):
+    def _svc(self):
+        with TemporaryDirectory() as tmp:
+            return _make_service(Path(tmp))
+
+    def test_rejects_non_macos(self):
+        import os as _os
+        from unittest.mock import patch
+        from clanker.server.service import ApiError
+        svc = self._svc()
+        Uname = type("U", (), {"sysname": "Linux"})
+        with patch.object(_os, "uname", lambda: Uname()):
+            with self.assertRaises(ApiError) as cm:
+                svc.choose_directory()
+            self.assertEqual(cm.exception.code, "BAD_REQUEST")
+
+    def test_returns_selected_path(self):
+        import os as _os
+        import subprocess as _sp
+        from unittest.mock import patch
+        svc = self._svc()
+        Uname = type("U", (), {"sysname": "Darwin"})
+        with TemporaryDirectory() as chal:
+            (Path(chal) / "description.txt").write_text("a heap chal\n")
+            completed = type("C", (), {"returncode": 0, "stdout": chal + "\n", "stderr": ""})
+            with patch.object(_os, "uname", lambda: Uname()), \
+                 patch("shutil.which", lambda _x: "/usr/bin/osascript"), \
+                 patch.object(_sp, "run", lambda *a, **k: completed()):
+                out = svc.choose_directory()
+        self.assertEqual(out["path"], chal)
+        self.assertEqual(out["description"], "a heap chal")
+        self.assertFalse(out["canceled"])
+
+    def test_cancel_is_not_an_error(self):
+        import os as _os
+        import subprocess as _sp
+        from unittest.mock import patch
+        svc = self._svc()
+        Uname = type("U", (), {"sysname": "Darwin"})
+        canceled = type("C", (), {"returncode": 1, "stdout": "", "stderr": "User canceled. (-128)"})
+        with patch.object(_os, "uname", lambda: Uname()), \
+             patch("shutil.which", lambda _x: "/usr/bin/osascript"), \
+             patch.object(_sp, "run", lambda *a, **k: canceled()):
+            out = svc.choose_directory()
+        self.assertTrue(out["canceled"])
 
 
 class UiAuth(unittest.TestCase):

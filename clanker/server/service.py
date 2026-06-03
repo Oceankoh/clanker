@@ -11,6 +11,10 @@ from __future__ import annotations
 import time
 
 import json as _json
+import os
+import shutil
+import subprocess
+from pathlib import Path
 
 from .. import artifacts as artifacts_mod
 from .. import snapshot as snapshot_mod
@@ -187,6 +191,40 @@ class UiService:
     def agents(self) -> list[dict]:
         return agents_info()
 
+    def choose_directory(self, current_path: str = "", batch: bool = False) -> dict:
+        """macOS Finder folder picker (local convenience). Degrades elsewhere:
+        callers just type the path."""
+        if os.uname().sysname.lower() != "darwin":
+            raise ApiError("BAD_REQUEST", "Finder selection is only available on macOS; type the path instead.", 400)
+        if shutil.which("osascript") is None:
+            raise ApiError("BAD_REQUEST", "osascript is not available.", 400)
+        prompt = "Select challenges root folder" if batch else "Select challenge folder"
+        cmd = ["osascript"]
+        for line in ("on run argv", "set p to item 1 of argv",
+                     "set f to choose folder with prompt p", "return POSIX path of f", "end run"):
+            cmd += ["-e", line]
+        cmd.append(prompt)
+        try:
+            proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=300)
+        except subprocess.TimeoutExpired as exc:
+            raise ApiError("REMOTE_ERROR", "Finder selection timed out.", 504) from exc
+        if proc.returncode != 0:
+            text = (proc.stderr or proc.stdout or "").strip()
+            if "user canceled" in text.lower():
+                return {"canceled": True}
+            raise ApiError("BAD_REQUEST", text or "Finder selection failed.", 400)
+        selected = (proc.stdout or "").strip()
+        if not selected:
+            raise ApiError("BAD_REQUEST", "No folder selected.", 400)
+        path = Path(selected).expanduser()
+        desc = ""
+        if not batch:
+            try:
+                desc = (path / "description.txt").read_text().strip()
+            except Exception:
+                desc = ""
+        return {"path": str(path), "description": desc, "canceled": False}
+
     def spawn(self, payload: dict) -> list[str]:
         batch = payload.get("batch")
         if batch is not None and not isinstance(batch, list):
@@ -247,7 +285,7 @@ class UiService:
         flag_map = {
             "provider": "--provider", "agent_backend": "--agent", "zone": "--zone",
             "project": "--project", "description": "--desc", "ideas": "--ideas",
-            "model": "--model", "machine_type": "--machine-type",
+            "model": "--model", "machine_type": "--machine-type", "size_slug": "--size-slug",
             "toolbox_variant": "--toolbox-variant", "timeout_min": "--timeout-min",
         }
         for key, flag in flag_map.items():

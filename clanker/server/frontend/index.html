@@ -81,7 +81,7 @@
 </main>
 <script>
 const $ = (s,el=document)=>el.querySelector(s);
-let STATE = { current:null, tab:'transcript', runs:[], snap:null };
+let STATE = { current:null, tab:'transcript', runs:[], snap:null, steerTarget:'ctf:supervisor' };
 
 async function api(path, opts){
   const r = await fetch('/api/v1'+path, opts);
@@ -124,15 +124,32 @@ function showSpawn(){
     .map(a=>`<option value="${a.name}">${esc(a.display_name)}${a.authenticated?'':' — needs auth'}</option>`).join('');
   $('#focus').innerHTML = `<div class="spawn">
     <h2>New run(s)</h2>
-    <div class="hint">Spawns a VM and starts the agent. Tick the box to deploy a whole folder of challenges (one VM per subfolder).</div>
+    <div class="hint">Spawns a VM and starts the agent. Tick the box to deploy a whole folder of challenges (one VM per subfolder). Blank fields fall back to your <code>.env</code> defaults.</div>
     <label>Challenge path (a folder)</label>
-    <input type="text" id="sp-dir" placeholder="/path/to/challenge">
-    <label class="chk"><input type="checkbox" id="sp-batch"> deploy folder — each immediate subfolder is its own run</label>
+    <div class="row"><input type="text" id="sp-dir" placeholder="/path/to/challenge">
+      <button onclick="browseDir()">Browse…</button></div>
+    <label class="chk"><input type="checkbox" id="sp-batch" onchange="$('#sp-dirhint').textContent=this.checked?'each immediate subfolder becomes its own run':''"> deploy folder — each immediate subfolder is its own run</label>
+    <div class="hint" id="sp-dirhint"></div>
     <div class="cols">
-      <div><label>Provider</label><select id="sp-provider"><option value="gcp">gcp</option><option value="digitalocean">digitalocean</option></select></div>
-      <div><label>Agent</label><select id="sp-agent">${opts}</select></div>
+      <div><label>Provider</label><select id="sp-provider"><option value="">(default)</option><option value="gcp">gcp</option><option value="digitalocean">digitalocean</option></select></div>
+      <div><label>Agent</label><select id="sp-agent"><option value="">(default)</option>${opts}</select></div>
       <div><label>Model</label><input type="text" id="sp-model" placeholder="(backend default)"></div>
     </div>
+    <label>Description</label>
+    <textarea id="sp-desc" rows="2" placeholder="what the challenge is (defaults to description.txt in the folder)"></textarea>
+    <label>Ideas / hints</label>
+    <textarea id="sp-ideas" rows="2" placeholder="optional starting ideas (defaults to ideas.txt)"></textarea>
+    <div class="cols">
+      <div><label>Zone / region</label><input type="text" id="sp-zone" placeholder="(provider default)"></div>
+      <div><label>Project (GCP)</label><input type="text" id="sp-project" placeholder="(gcloud default)"></div>
+      <div><label>Machine type</label><input type="text" id="sp-machine" placeholder="(GCP)"></div>
+    </div>
+    <div class="cols">
+      <div><label>Size slug</label><input type="text" id="sp-size" placeholder="(DigitalOcean)"></div>
+      <div><label>Toolbox variant</label><input type="text" id="sp-variant" placeholder="(default)"></div>
+      <div><label>Timeout (min)</label><input type="text" id="sp-timeout" placeholder="(default)"></div>
+    </div>
+    <label class="chk"><input type="checkbox" id="sp-novpn"> --no-vpn (skip the VPN setup)</label>
     <div class="row" style="margin-top:14px"><button class="primary" onclick="submitSpawn()">Spawn</button>
       <span id="sp-result" class="hint"></span></div>
     <div class="hint" style="margin-top:18px">Recent spawn jobs:</div>
@@ -145,11 +162,26 @@ async function loadJobs(){
     $('#sp-jobs').innerHTML = (d.jobs||[]).slice(0,8).map(j=>`${j.job_id} · ${j.state}${j.run_id?' · '+j.run_id:''}`).join('<br>') || '(none yet)';
   }catch(e){}
 }
+async function browseDir(){
+  const r=$('#sp-result'); r.textContent='opening Finder…';
+  try{
+    const d=await api('/select-directory',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({batch:$('#sp-batch').checked})});
+    if(d.canceled){ r.textContent=''; return; }
+    $('#sp-dir').value=d.path||'';
+    if(d.description && !$('#sp-desc').value.trim()) $('#sp-desc').value=d.description;
+    r.textContent='';
+  }catch(e){ r.innerHTML='<span class="err">'+esc(e.message)+'</span>'; }
+}
 async function submitSpawn(){
   const dir=$('#sp-dir').value.trim(); if(!dir){ $('#sp-result').innerHTML='<span class="err">challenge path required</span>'; return; }
   const body = $('#sp-batch').checked ? {challenge_root:dir} : {challenge_dir:dir};
-  body.provider=$('#sp-provider').value; body.agent_backend=$('#sp-agent').value;
-  const m=$('#sp-model').value.trim(); if(m) body.model=m;
+  const put=(k,v)=>{ v=(v||'').trim(); if(v) body[k]=v; };
+  put('provider',$('#sp-provider').value); put('agent_backend',$('#sp-agent').value);
+  put('model',$('#sp-model').value); put('description',$('#sp-desc').value); put('ideas',$('#sp-ideas').value);
+  put('zone',$('#sp-zone').value); put('project',$('#sp-project').value); put('machine_type',$('#sp-machine').value);
+  put('size_slug',$('#sp-size').value); put('toolbox_variant',$('#sp-variant').value); put('timeout_min',$('#sp-timeout').value);
+  if($('#sp-novpn').checked) body.no_vpn=true;
   $('#sp-result').textContent='spawning…';
   try{
     const d=await api('/runs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
@@ -190,21 +222,7 @@ function renderFocus(){
   } else if(STATE.tab==='panes'){
     const panes = s.panes||[];
     body = panes.map(p=>`<div class="muted">${p.target} — ${esc(p.window_name)}${p.active?' *':''}</div><pre class="pane-out">${esc(p.output)}</pre>`).join('') || '<div class="muted">no panes</div>';
-    body += `
-      <textarea id="steer" rows="2" onkeydown="steerKey(event)" placeholder="message to ctf:supervisor —  Enter to send · Shift+Enter for newline"></textarea>
-      <div class="row">
-        <label class="mode"><input type="radio" name="smode" value="queue" checked> Queue</label>
-        <label class="mode"><input type="radio" name="smode" value="steer"> Send now</label>
-        <span class="hint" id="modehint">queue: appended to inject.queue; the agent reads it at a safe point</span>
-      </div>
-      <div class="row">
-        <button class="primary" onclick="submitSteer()">Send</button>
-        <button onclick="key('C-c')">Ctrl-C</button>
-        <button onclick="keys(['1','Enter'])">Trust (1↵)</button>
-        <button onclick="keys(['y','Enter'])">Approve (y)</button>
-        <button onclick="keys(['n','Enter'])">Deny (n)</button>
-        <button onclick="key('Escape')">Esc</button>
-      </div>`;
+    body += steerBox(panes);
   } else if(STATE.tab==='findings'){ body=`<pre>${esc(s.findings_tail)||'(empty)'}</pre>`; }
   else if(STATE.tab==='supervisor'){ body=`<pre>${esc(s.supervisor_tail)||'(empty)'}</pre>`; }
   else if(STATE.tab==='artifacts'){
@@ -216,7 +234,9 @@ function renderFocus(){
       + `<div class="row"><a href="/api/v1/runs/${encodeURIComponent(s.run_id)}/bundle"><button>Download bundle (.tar.gz)</button></a></div><div id="artprev" class="muted">click an artifact to preview</div>`;
   } else if(STATE.tab==='subagents'){
     const sub=s.subagents||[];
-    body = sub.map(x=>`<div class="muted">${x.tmux_target} — ${esc(x.label)} <span class="pill">${x.state}</span></div>`).join('') || '<div class="muted">no subagents</div>';
+    body = (sub.map(x=>`<div class="row"><span class="muted">${x.tmux_target} — ${esc(x.label)}</span> <span class="pill">${x.state}</span>
+      <button onclick="steerSubagent('${esc(x.tmux_target)}')">steer →</button></div>`).join('') || '<div class="muted">no subagents</div>')
+      + (sub.length?'<div class="hint">“steer →” opens the panes tab targeting that subagent.</div>':'');
   }
   const cs=s.challenge_state;
   $('#focus').innerHTML = `
@@ -227,7 +247,8 @@ function renderFocus(){
     <div class="row">
       <button onclick="setStatus('solved')">Mark solved</button>
       <button onclick="setStatus('blocked')">Mark blocked</button>
-      <button onclick="clearStatus()">Clear status</button></div>
+      <button onclick="clearStatus()">Clear status</button>
+      <input type="text" id="status-note" placeholder="optional note (attached to the status)"></div>
     <div class="tabs">${tabBar}</div>${body}`;
   if(STATE.tab==='transcript') loadTranscript();
   // keep terminal panes scrolled to the latest output
@@ -262,22 +283,52 @@ function renderEvent(e){
     return `<div class="ev result ${e.is_error?'error':''}"><div class="who">result${e.is_error?' · error':''}</div><pre class="body">${esc(e.text)}</pre></div>`;
   return '';
 }
+// the steer box: a target picker (supervisor + any subagent pane) + queue/send-now + key buttons
+function steerBox(panes){
+  const tgt = STATE.steerTarget || 'ctf:supervisor';
+  const seen = new Set();
+  let opts = '';
+  (panes||[]).forEach(p=>{ if(seen.has(p.target)) return; seen.add(p.target);
+    const sub = (p.session||'').startsWith('subagent-');
+    opts += `<option value="${esc(p.target)}"${p.target===tgt?' selected':''}>${esc(p.target)}${sub?' · subagent':''}</option>`; });
+  if(!seen.has('ctf:supervisor')) opts = `<option value="ctf:supervisor"${tgt==='ctf:supervisor'?' selected':''}>ctf:supervisor</option>`+opts;
+  return `
+    <textarea id="steer" rows="2" onkeydown="steerKey(event)" placeholder="Enter to send · Shift+Enter for newline"></textarea>
+    <div class="row">
+      <label class="mode"><input type="radio" name="smode" value="queue" checked> Queue</label>
+      <label class="mode"><input type="radio" name="smode" value="steer"> Send now</label>
+      <label class="mode">→&nbsp;<select id="steer-target">${opts}</select></label>
+      <span class="hint" id="modehint">queue: appended to inject.queue (the supervisor reads it at a safe point); send-now &amp; keys go to the selected target</span>
+    </div>
+    <div class="row">
+      <button class="primary" onclick="submitSteer()">Send</button>
+      <button onclick="key('C-c')">Ctrl-C</button>
+      <button onclick="keys(['1','Enter'])">Trust (1↵)</button>
+      <button onclick="keys(['y','Enter'])">Approve (y)</button>
+      <button onclick="keys(['n','Enter'])">Deny (n)</button>
+      <button onclick="key('Escape')">Esc</button>
+    </div>`;
+}
 function steerMode(){ const r=document.querySelector('input[name=smode]:checked'); return r?r.value:'queue'; }
+function steerTarget(){ const el=$('#steer-target'); return (el&&el.value) || STATE.steerTarget || 'ctf:supervisor'; }
+function steerSubagent(t){ STATE.steerTarget=t; STATE.tab='panes'; renderFocus(); }
 function post(path, payload){ return api('/runs/'+encodeURIComponent(STATE.current)+path,
   {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload||{})}); }
 
 function steerKey(ev){ if(ev.key==='Enter' && !ev.shiftKey){ ev.preventDefault(); submitSteer(); } }
 async function submitSteer(){
   const ta=$('#steer'); const t=ta.value; if(!t.trim()) return;
+  STATE.steerTarget = steerTarget();
   try{
+    // queue is run-level (inject.queue, read by the supervisor); send-now targets the selected pane
     if(steerMode()==='queue') await post('/inject', {text:t});
-    else                      await post('/panes/send', {target:'ctf:supervisor', text:t, press_enter:true});
+    else                      await post('/panes/send', {target:steerTarget(), text:t, press_enter:true});
     ta.value=''; setTimeout(fullRefresh, 400);
   }catch(e){ alert(e.message); }
 }
-async function keys(ks){ try{ await post('/panes/keys', {target:'ctf:supervisor', keys:ks}); setTimeout(fullRefresh,400);}catch(e){alert(e.message);} }
+async function keys(ks){ const target=steerTarget(); STATE.steerTarget=target; try{ await post('/panes/keys', {target, keys:ks}); setTimeout(fullRefresh,400);}catch(e){alert(e.message);} }
 async function key(k){ keys([k]); }
-async function setStatus(st){ try{ await post('/status', {state:st, note:''}); fullRefresh();}catch(e){alert(e.message);} }
+async function setStatus(st){ const note=($('#status-note')||{}).value||''; try{ await post('/status', {state:st, note}); fullRefresh();}catch(e){alert(e.message);} }
 async function clearStatus(){ try{ await api('/runs/'+encodeURIComponent(STATE.current)+'/status',{method:'DELETE'}); fullRefresh();}catch(e){alert(e.message);} }
 
 function hexDump(b64){
