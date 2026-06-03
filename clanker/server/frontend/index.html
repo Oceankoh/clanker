@@ -85,8 +85,12 @@ function statePill(cs){
   return `<span class="pill s-${cs.state}">${cs.label||cs.state}</span>`;
 }
 async function refreshHealth(){
-  try{ const h=await api('/health'); $('#health').textContent=`${h.known_runs} runs · ${h.active_jobs} jobs · up ${h.uptime_sec}s`; }
-  catch(e){ $('#health').textContent='offline'; }
+  // /health is NOT under /api/v1, so fetch it directly (don't use api()).
+  try{
+    const r=await fetch('/health'); const j=await r.json();
+    if(!j.ok) throw 0;
+    const h=j.data; $('#health').textContent=`${h.known_runs} runs · ${h.active_jobs} jobs · up ${h.uptime_sec}s`;
+  }catch(e){ $('#health').textContent='offline'; }
 }
 async function refreshFleet(force){
   try{
@@ -237,7 +241,9 @@ async function preview(rel){
   }catch(e){ el.textContent=e.message; }
 }
 
-refreshHealth(); refreshFleet();
+const _initialRun = new URLSearchParams(location.search).get('run');
+refreshHealth();
+refreshFleet().then(()=>{ if(_initialRun) selectRun(_initialRun); });
 setInterval(refreshHealth, 15000);
 setInterval(refreshFleet, 30000);
 setInterval(()=>{ if(STATE.current) refreshFocus(); }, 8000);
