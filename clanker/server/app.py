@@ -65,6 +65,7 @@ class App:
         self.auth_token = (auth_token or "").strip()
         self.routes = [
             ("GET", re.compile(r"^/health$"), self._health),
+            ("GET", re.compile(r"^/api/v1/agents$"), self._agents),
             ("GET", re.compile(r"^/api/v1/runs$"), self._runs_list),
             ("POST", re.compile(r"^/api/v1/runs$"), self._spawn),
             ("GET", re.compile(r"^/api/v1/runs/([^/]+)$"), self._snapshot),
@@ -162,6 +163,9 @@ class App:
 
     def _health(self, *_):
         return ok(self.s.health())
+
+    def _agents(self, *_):
+        return ok({"agents": self.s.agents()})
 
     def _runs_list(self, _m, query, _b):
         listings, current = self.s.list_runs(

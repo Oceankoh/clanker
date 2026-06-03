@@ -70,6 +70,21 @@ python -m clanker cleanup-state --prune-non-running # tidy local state files
 
 ## Recipes
 
+**Fan out a folder of challenges — one VM each** (each immediate subfolder is a challenge):
+
+```bash
+python -m clanker fanout ./ctf-challenges --provider digitalocean --agent codex
+# or from the web UI: "+ New run" -> tick "deploy folder — each subfolder is its own run"
+```
+
+**List the agent backends + readiness:**
+
+```bash
+python -m clanker agents
+#  codex        Codex CLI    model=gpt-5.5            auth=ready
+#  claude-code  Claude Code  model=(backend default)  auth=ready
+```
+
 **Run multiple subscriptions side by side** — store one credential profile per account, pick per run:
 
 ```bash
@@ -97,6 +112,37 @@ python -m clanker sync-down --run-id <id> # (Python equivalent)
 ```
 
 ---
+
+## Add an agent backend (TL;DR)
+
+Agents are pluggable. To add one (e.g. Gemini, opencode):
+
+```python
+# clanker/agents/mybackend.py
+from .base import AgentBackend, AgentConfigSpec, AuthMaterial, StagedFile
+
+class MyBackend(AgentBackend):
+    name = "mybackend"; display_name = "My Agent"; cli_binary = "myagent"
+    default_model = "..."
+    transcript_glob = ".myagent/sessions/**/*.jsonl"   # where it writes session JSONL
+    transcript_recursive = True
+
+    def materialize_auth(self, settings) -> AuthMaterial: ...     # token/env or files to inject
+    def render_config(self, spec) -> list[StagedFile]: ...        # on-VM config files
+    def supervisor_launch_cmd(self, spec) -> str: ...             # how supervisor.sh starts it
+```
+
+Then register it (one line — the factory, `clanker agents`, `--agent` choices, and the spawn form
+all read the registry):
+
+```python
+# clanker/agents/__init__.py
+from .mybackend import MyBackend
+register_backend(MyBackend, "my")
+```
+
+Add a transcript parser in `clanker/transcript.py` if its session format differs. Full contract:
+[docs/AGENTS.md](docs/AGENTS.md).
 
 ## Docs
 

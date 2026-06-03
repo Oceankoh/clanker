@@ -32,6 +32,7 @@ class ClaudeCodeBackend(AgentBackend):
     name = "claude-code"
     display_name = "Claude Code"
     default_model = ""  # let Claude use its default unless the operator pins one
+    cli_binary = "claude"
     transcript_glob = ".claude/projects/**/*.jsonl"
     transcript_recursive = True
 

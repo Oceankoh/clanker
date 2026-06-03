@@ -37,6 +37,14 @@
   .pane-out{ max-height:46vh; }
   img.art{ max-width:100%; border:1px solid var(--line); border-radius:6px; }
   .hint{ color:var(--muted); font-size:12px; }
+  .spawn{ max-width:640px; }
+  .spawn h2{ margin:0 0 4px; }
+  .spawn label{ display:block; margin:12px 0 4px; color:var(--muted); font-size:13px; }
+  .spawn input[type=text], .spawn select{ width:100%; background:#0b0d11; border:1px solid var(--line); color:var(--fg); padding:8px 10px; border-radius:6px; }
+  .spawn select{ height:36px; }
+  .spawn .cols{ display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px; }
+  .spawn .chk{ display:flex; align-items:center; gap:6px; margin:10px 0; color:var(--fg); }
+  .agent-badge{ font-size:11px; }
   #transcript{ max-height:58vh; overflow:auto; padding-right:6px; }
   .ev{ margin:8px 0; border-radius:8px; padding:8px 12px; border:1px solid var(--line); }
   .ev .who{ font-size:11px; text-transform:uppercase; letter-spacing:.4px; color:var(--muted); margin-bottom:3px; }
@@ -64,6 +72,7 @@
   <h1>clanker</h1>
   <span class="pill" id="health">…</span>
   <span class="sp"></span>
+  <button class="primary" onclick="showSpawn()">+ New run</button>
   <button onclick="refreshFleet(true)">↻ rediscover</button>
 </header>
 <main>
@@ -105,6 +114,49 @@ async function refreshFleet(force){
   }catch(e){ $('#fleet').innerHTML='<div class="err" style="padding:16px">'+e.message+'</div>'; }
 }
 async function selectRun(id){ STATE.current=id; await refreshFleet(); await refreshFocus(); }
+
+let AGENTS = [];
+async function loadAgents(){ try{ const d=await api('/agents'); AGENTS=d.agents||[]; }catch(e){ AGENTS=[]; } }
+function showSpawn(){
+  STATE.current=null;
+  document.querySelectorAll('.run').forEach(el=>el.classList.remove('sel'));
+  const opts = (AGENTS.length?AGENTS:[{name:'codex',display_name:'Codex',authenticated:true}])
+    .map(a=>`<option value="${a.name}">${esc(a.display_name)}${a.authenticated?'':' — needs auth'}</option>`).join('');
+  $('#focus').innerHTML = `<div class="spawn">
+    <h2>New run(s)</h2>
+    <div class="hint">Spawns a VM and starts the agent. Tick the box to deploy a whole folder of challenges (one VM per subfolder).</div>
+    <label>Challenge path (a folder)</label>
+    <input type="text" id="sp-dir" placeholder="/path/to/challenge">
+    <label class="chk"><input type="checkbox" id="sp-batch"> deploy folder — each immediate subfolder is its own run</label>
+    <div class="cols">
+      <div><label>Provider</label><select id="sp-provider"><option value="gcp">gcp</option><option value="digitalocean">digitalocean</option></select></div>
+      <div><label>Agent</label><select id="sp-agent">${opts}</select></div>
+      <div><label>Model</label><input type="text" id="sp-model" placeholder="(backend default)"></div>
+    </div>
+    <div class="row" style="margin-top:14px"><button class="primary" onclick="submitSpawn()">Spawn</button>
+      <span id="sp-result" class="hint"></span></div>
+    <div class="hint" style="margin-top:18px">Recent spawn jobs:</div>
+    <div id="sp-jobs" class="hint">—</div>
+  </div>`;
+  loadJobs();
+}
+async function loadJobs(){
+  try{ const d=await api('/jobs');
+    $('#sp-jobs').innerHTML = (d.jobs||[]).slice(0,8).map(j=>`${j.job_id} · ${j.state}${j.run_id?' · '+j.run_id:''}`).join('<br>') || '(none yet)';
+  }catch(e){}
+}
+async function submitSpawn(){
+  const dir=$('#sp-dir').value.trim(); if(!dir){ $('#sp-result').innerHTML='<span class="err">challenge path required</span>'; return; }
+  const body = $('#sp-batch').checked ? {challenge_root:dir} : {challenge_dir:dir};
+  body.provider=$('#sp-provider').value; body.agent_backend=$('#sp-agent').value;
+  const m=$('#sp-model').value.trim(); if(m) body.model=m;
+  $('#sp-result').textContent='spawning…';
+  try{
+    const d=await api('/runs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    $('#sp-result').innerHTML=`started ${d.job_ids.length} run(s): ${esc(d.job_ids.join(', '))}`;
+    setTimeout(()=>{ loadJobs(); refreshFleet(); }, 1500);
+  }catch(e){ $('#sp-result').innerHTML='<span class="err">'+esc(e.message)+'</span>'; }
+}
 function setTab(t){ STATE.tab=t; renderFocus(); }
 
 async function refreshFocus(){
@@ -250,8 +302,10 @@ async function preview(rel){
   }catch(e){ el.textContent=e.message; }
 }
 
-const _initialRun = new URLSearchParams(location.search).get('run');
+const _params = new URLSearchParams(location.search);
+const _initialRun = _params.get('run');
 refreshHealth();
+loadAgents().then(()=>{ if(_params.get('new')) showSpawn(); });
 refreshFleet().then(()=>{ if(_initialRun) selectRun(_initialRun); });
 setInterval(refreshHealth, 15000);
 setInterval(refreshFleet, 30000);

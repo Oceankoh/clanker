@@ -187,6 +187,7 @@ class AgentBackend(ABC):
     name: str = ""
     display_name: str = ""
     default_model: str = ""
+    cli_binary: str = ""  # the CLI invoked in the container (for readiness display)
     # where this backend's session transcript lives, relative to the run dir
     transcript_glob: str = ""
     transcript_recursive: bool = False

@@ -15,7 +15,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from .agents import build_agent_backend
+from .agents import build_agent_backend, list_backends
 from .config import RUNS_DIR, STATE_FILE, Settings, load_json, state_valid
 from .controlclient import ControlPlaneClient, ControlPlaneError
 from .identity import normalize_instance_name, provider_from_state
@@ -139,6 +139,103 @@ def cmd_auth_codex(name: str, *, api_key: str = "", codex_home: str = "") -> int
     set_profile(name, profile)
     how = "API key" if api_key else f"session dir {codex_home}"
     print(f"Stored Codex profile '{name}' ({how}).")
+    return 0
+
+
+def agents_info(settings: Settings | None = None) -> list[dict]:
+    """Structured view of the registered agent backends + readiness — powers
+    `clanker agents` and the `/api/v1/agents` endpoint (spawn form)."""
+    settings = settings or Settings()
+    out = []
+    for be in list_backends():
+        auth = be.materialize_auth(settings)
+        out.append({
+            "name": be.name,
+            "display_name": be.display_name,
+            "default_model": be.default_model,
+            "cli": be.cli_binary,
+            "cli_local": bool(shutil.which(be.cli_binary)) if be.cli_binary else False,
+            "authenticated": bool(auth.authenticated),
+            "auth_note": auth.note,
+        })
+    return out
+
+
+def cmd_agents(settings: Settings | None = None) -> int:
+    for a in agents_info(settings):
+        model = a["default_model"] or "(backend default)"
+        auth = "ready" if a["authenticated"] else "needs setup"
+        cli = "✓" if a["cli_local"] else "·"
+        print(f"{a['name']:<13} {a['display_name']:<14} model={model:<18} cli-local={cli}  auth={auth}")
+        if not a["authenticated"] and a["auth_note"]:
+            print(f"    -> {a['auth_note']}")
+    return 0
+
+
+def discover_challenges(root: str) -> list[dict]:
+    """Each immediate subfolder of ``root`` is a challenge (skips dotfiles).
+    Picks up description.txt / ideas.txt if present."""
+    base = Path(root).expanduser()
+    if not base.is_dir():
+        return []
+    out = []
+    for child in sorted(base.iterdir(), key=lambda p: p.name.lower()):
+        if not child.is_dir() or child.name.startswith("."):
+            continue
+        out.append({
+            "challenge_dir": str(child),
+            "name": child.name,
+            "description": _read_text(child / "description.txt"),
+            "ideas": _read_text(child / "ideas.txt"),
+        })
+    return out
+
+
+def _read_text(path: Path) -> str:
+    try:
+        return path.read_text().strip()
+    except Exception:
+        return ""
+
+
+def cmd_fanout(root: str, *, provider: str = "", agent: str = "", model: str = "",
+               service=None, wait: bool = True, sleep=None) -> int:
+    """Deploy a folder of challenges — one VM per immediate subfolder."""
+    challenges = discover_challenges(root)
+    if not challenges:
+        sys.stderr.write(f"No challenge subfolders under {root}\n")
+        return 1
+    print(f"Found {len(challenges)} challenge(s): {', '.join(c['name'] for c in challenges)}")
+
+    from .server.service import UiService  # lazy: avoids a server<->commands import cycle
+    svc = service or UiService()
+    payload: dict = {"challenge_root": str(Path(root).expanduser())}
+    if provider:
+        payload["provider"] = provider
+    if agent:
+        payload["agent_backend"] = agent
+    if model:
+        payload["model"] = model
+
+    job_ids = svc.spawn(payload)
+    print(f"Spawning {len(job_ids)} run(s): {', '.join(job_ids)}")
+    if not wait:
+        return 0
+
+    # jobs run as daemon threads, so block until they finish (the provisioning
+    # subprocesses are tied to this process); print each as it completes.
+    import time
+    _sleep = sleep or time.sleep
+    done: set[str] = set()
+    while len(done) < len(job_ids):
+        for jid in job_ids:
+            j = svc.jobs.get(jid)
+            if j and j.state in ("done", "error") and jid not in done:
+                done.add(jid)
+                print(f"  {jid}: {j.state}  run_id={j.run_id or '?'}")
+        if len(done) < len(job_ids):
+            _sleep(3)
+    print("fan-out complete.")
     return 0
 
 

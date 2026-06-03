@@ -209,6 +209,21 @@ class Registry(unittest.TestCase):
         with self.assertRaises(KeyError):
             build_agent_backend("gemini")
 
+    def test_register_new_backend_without_editing_factory(self):
+        from clanker.agents import CodexBackend, list_backends, register_backend
+        from clanker.agents import _ALIASES, _REGISTRY  # noqa: PLC2701
+
+        class DummyBackend(CodexBackend):
+            name = "dummy-agent"
+            display_name = "Dummy"
+
+        self.addCleanup(lambda: _REGISTRY.pop("dummy-agent", None))
+        self.addCleanup(lambda: [_ALIASES.pop(k, None) for k in ("dummy-agent", "dummy")])
+
+        register_backend(DummyBackend, "dummy")
+        self.assertEqual(build_agent_backend("dummy").name, "dummy-agent")
+        self.assertIn("dummy-agent", [b.name for b in list_backends()])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

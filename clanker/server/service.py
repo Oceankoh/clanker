@@ -18,6 +18,7 @@ from .. import steering as steering_mod
 from .. import transcript as transcript_mod
 from ..agents import build_agent_backend
 from ..artifacts import ArtifactError
+from ..commands import agents_info, discover_challenges
 from ..config import ROOT, Settings
 from ..controlclient import ControlPlaneClient, ControlPlaneError
 from ..models import RunRecord, Subagent
@@ -183,15 +184,17 @@ class UiService:
             raise ApiError("REMOTE_ERROR", str(exc), 502) from exc
 
     # --- spawn / jobs ------------------------------------------------------
+    def agents(self) -> list[dict]:
+        return agents_info()
+
     def spawn(self, payload: dict) -> list[str]:
         batch = payload.get("batch")
         if batch is not None and not isinstance(batch, list):
             raise ApiError("BAD_REQUEST", "batch must be a list", 400)
         specs = batch or [payload]
+        expanded = self._expand_specs(specs)
         job_ids: list[str] = []
-        for spec in specs:
-            if not isinstance(spec, dict):
-                raise ApiError("BAD_REQUEST", "each spawn spec must be an object", 400)
+        for spec in expanded:
             cmd = self._build_start_cmd(spec)
             try:
                 job = self.jobs.submit(cmd)
@@ -199,6 +202,31 @@ class UiService:
                 raise ApiError("JOB_LIMIT", str(exc), 429) from exc
             job_ids.append(job.job_id)
         return job_ids
+
+    @staticmethod
+    def _expand_specs(specs: list) -> list[dict]:
+        """A spec with ``challenge_root`` fans out into one spec per immediate
+        subfolder (recursive folder deploy). Others pass through unchanged."""
+        out: list[dict] = []
+        for spec in specs:
+            if not isinstance(spec, dict):
+                raise ApiError("BAD_REQUEST", "each spawn spec must be an object", 400)
+            root = str(spec.get("challenge_root") or "").strip()
+            if not root:
+                out.append(spec)
+                continue
+            children = discover_challenges(root)
+            if not children:
+                raise ApiError("BAD_REQUEST", f"no challenge subfolders under {root}", 400)
+            for ch in children:
+                merged = {k: v for k, v in spec.items() if k != "challenge_root"}
+                merged["challenge_dir"] = ch["challenge_dir"]
+                if not merged.get("description"):
+                    merged["description"] = ch["description"] or ch["name"]
+                if not merged.get("ideas"):
+                    merged["ideas"] = ch["ideas"]
+                out.append(merged)
+        return out
 
     @staticmethod
     def _build_start_cmd(spec: dict) -> list[str]:

@@ -116,5 +116,23 @@ class SpawnDefaults(unittest.TestCase):
         self.assertEqual(cmd[cmd.index("--agent") + 1], "claude-code")
 
 
+class Fanout(unittest.TestCase):
+    def test_discover_challenges(self):
+        from clanker.commands import discover_challenges
+        with TemporaryDirectory() as root:
+            r = Path(root)
+            (r / "alpha").mkdir()
+            (r / "alpha" / "description.txt").write_text("first chal\n")
+            (r / "alpha" / "ideas.txt").write_text("try uaf\n")
+            (r / "beta").mkdir()
+            (r / ".hidden").mkdir()          # dotfolder skipped
+            (r / "notes.txt").write_text("x")  # file skipped
+            found = discover_challenges(root)
+            self.assertEqual([c["name"] for c in found], ["alpha", "beta"])
+            self.assertEqual(found[0]["description"], "first chal")
+            self.assertEqual(found[0]["ideas"], "try uaf")
+            self.assertTrue(found[0]["challenge_dir"].endswith("/alpha"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

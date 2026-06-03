@@ -92,6 +92,14 @@ def _cmd_config(args: argparse.Namespace) -> int:
     return 2
 
 
+def _cmd_agents(args: argparse.Namespace) -> int:
+    return commands.cmd_agents()
+
+
+def _cmd_fanout(args: argparse.Namespace) -> int:
+    return commands.cmd_fanout(args.root, provider=args.provider, agent=args.agent, model=args.model)
+
+
 def _cmd_serve(args: argparse.Namespace) -> int:
     from .server.app import serve
     token = args.token or str(Settings().get("ui_token") or "")
@@ -153,6 +161,16 @@ def main(argv: list[str] | None = None) -> int:
     runs = sub.add_parser("runs", help="list known runs from .ctfvm/ (local only)")
     runs.add_argument("--json", action="store_true", help="emit JSON")
     runs.set_defaults(func=_cmd_runs)
+
+    agents = sub.add_parser("agents", help="list agent backends + readiness")
+    agents.set_defaults(func=_cmd_agents)
+
+    fanout = sub.add_parser("fanout", help="deploy a folder of challenges — one VM per subfolder")
+    fanout.add_argument("root", help="folder whose immediate subfolders are challenges")
+    fanout.add_argument("--provider", default="")
+    fanout.add_argument("--agent", default="")
+    fanout.add_argument("--model", default="")
+    fanout.set_defaults(func=_cmd_fanout)
 
     status = sub.add_parser("status", help="show a run's status")
     _add_selector(status)

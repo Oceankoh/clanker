@@ -18,6 +18,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from clanker.models import ExecResult  # noqa: E402
 from clanker.server.app import App, make_handler  # noqa: E402
+from clanker.server.jobs import SpawnJobTracker  # noqa: E402
 from clanker.server.service import UiService  # noqa: E402
 from clanker.state import RunRegistry  # noqa: E402
 
@@ -78,7 +79,16 @@ def _make_service(tmp: Path) -> UiService:
         "control_host": "1.2.3.4", "control_port": "443", "control_user": "u", "control_password": "pw",
     }))
     registry = RunRegistry(runs_dir=runs, state_file=tmp / "current.json", status=lambda r: "RUNNING")
-    return UiService(registry=registry, providers=object(), client_factory=lambda rec: FakeClient())
+    return UiService(registry=registry, providers=object(), jobs=_FakeTracker(now=lambda: "t"),
+                     client_factory=lambda rec: FakeClient())
+
+
+class _FakeTracker(SpawnJobTracker):
+    """Never runs the real ctfvm start — just records + marks done."""
+    def _run_subprocess(self, job, command):
+        job.state = "done"
+        job.run_id = "20260101-000000"
+        job.finished_at = self._now()
 
 
 class ServerTest(unittest.TestCase):
@@ -178,6 +188,31 @@ class ServerTest(unittest.TestCase):
     def test_bundle(self):
         st, body, hdr = self._get("/api/v1/runs/20250101-000000/bundle")
         self.assertEqual(body, b"BUNDLE")
+
+    def test_agents_endpoint(self):
+        st, body, _ = self._get("/api/v1/agents")
+        names = [a["name"] for a in json.loads(body)["data"]["agents"]]
+        self.assertIn("codex", names)
+        self.assertIn("claude-code", names)
+
+    def test_spawn_challenge_root_fans_out(self):
+        import os
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            os.mkdir(os.path.join(root, "chalA"))
+            os.mkdir(os.path.join(root, "chalB"))
+            os.mkdir(os.path.join(root, ".git"))  # dotfolder skipped
+            open(os.path.join(root, "readme.txt"), "w").close()  # non-folder skipped
+            st, j = self._req("POST", "/api/v1/runs",
+                              {"challenge_root": root, "provider": "gcp", "agent_backend": "codex"})
+            self.assertEqual(st, 200)
+            self.assertEqual(len(j["data"]["job_ids"]), 2)  # one VM per real subfolder
+
+    def test_spawn_empty_root_is_400(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as root:
+            st, j = self._req("POST", "/api/v1/runs", {"challenge_root": root})
+            self.assertEqual(st, 400)
 
     def test_spawn_bad_batch_is_400(self):
         st, j = self._req("POST", "/api/v1/runs", {"batch": "not-a-list"})

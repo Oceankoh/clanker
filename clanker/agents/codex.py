@@ -38,6 +38,7 @@ class CodexBackend(AgentBackend):
     name = "codex"
     display_name = "Codex CLI"
     default_model = "gpt-5.5"
+    cli_binary = "codex"
     # Codex nests active sessions by date: .codex/sessions/YYYY/MM/DD/rollout-*.jsonl
     transcript_glob = ".codex/sessions/**/rollout-*.jsonl"
     transcript_recursive = True

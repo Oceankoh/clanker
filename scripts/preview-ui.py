@@ -21,8 +21,19 @@ from tempfile import mkdtemp
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from clanker.models import ExecResult  # noqa: E402
 from clanker.server.app import App, make_handler  # noqa: E402
+from clanker.server.jobs import SpawnJobTracker  # noqa: E402
 from clanker.server.service import UiService  # noqa: E402
 from clanker.state import RunRegistry  # noqa: E402
+
+
+class FakeTracker(SpawnJobTracker):
+    """Pretend to provision — never runs the real `ctfvm start`."""
+    def _run_subprocess(self, job, command):
+        job.state = "running"
+        self._append_output(job, f"[demo] would run: {' '.join(command[-4:])}\n")
+        self._append_output(job, "creating instance ctfvm-demo-20260603-150000\n")
+        job.state = "done"
+        job.finished_at = self._now()
 
 
 def _b64(s: str) -> str:
@@ -168,7 +179,7 @@ def main():
 
     by_backend = {b: FakeClient(b) for _, _, b, _ in runs}
     reg = RunRegistry(runs_dir=tmp / "runs", state_file=tmp / "cur.json", status=lambda r: "active")
-    svc = UiService(registry=reg, providers=object(),
+    svc = UiService(registry=reg, providers=object(), jobs=FakeTracker(now=lambda: "demo"),
                     client_factory=lambda rec: by_backend.get(rec.agent_backend, FakeClient("codex")))
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8800
     print(f"clanker UI preview (seeded data) on http://127.0.0.1:{port}")
