@@ -246,7 +246,8 @@ class ServerTest(unittest.TestCase):
         # the operational redesign elements are present
         for marker in (b"submitSteer", b"steerKey", b"name=smode", b"/inject", b"hexDump", b"Approve",
                        b"steer-target", b"steerSubagent", b"browseDir", b"select-directory",
-                       b"sp-desc", b"sp-novpn", b"status-note"):
+                       b"sp-desc", b"sp-novpn", b"status-note",
+                       b"providerFields", b"sp-region", b"sp-do-fields", b"sp-gcp-fields"):
             self.assertIn(marker, body, marker)
 
 

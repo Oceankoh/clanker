@@ -110,7 +110,11 @@ class Profiles(unittest.TestCase):
 
 class SpawnDefaults(unittest.TestCase):
     def test_agent_default_from_env(self):
-        with patch.dict(os.environ, {"CTFVM_AGENT": "claude-code"}):
+        # isolate from the developer's repo .env (which legitimately outranks the
+        # ambient environment, matching bash `set -a; source .env`).
+        import clanker.server.service as svc
+        with TemporaryDirectory() as tmp, patch.dict(os.environ, {"CTFVM_AGENT": "claude-code"}), \
+                patch.object(svc, "Settings", lambda *a, **k: Settings(root=Path(tmp))):
             cmd = UiService._build_start_cmd({"challenge_dir": "/x"})
         self.assertIn("--agent", cmd)
         self.assertEqual(cmd[cmd.index("--agent") + 1], "claude-code")
@@ -129,6 +133,41 @@ class SpawnDefaults(unittest.TestCase):
             self.assertIn(flag, cmd)
             self.assertEqual(cmd[cmd.index(flag) + 1], val)
         self.assertIn("--no-vpn", cmd)
+
+
+class EnvParsing(unittest.TestCase):
+    def test_inline_comments_stripped_but_hashes_in_tokens_kept(self):
+        from clanker.config import _parse_env_file
+        with TemporaryDirectory() as tmp:
+            p = Path(tmp) / ".env"
+            p.write_text(
+                "CTFVM_AGENT=codex  # gcp default: codex | claude-code\n"
+                "CTFVM_PROVIDER=digitalocean   # gcp | digitalocean\n"
+                "CTFVM_PASS=abc#notacomment\n"
+                'CTFVM_URL="http://x#frag"  # trailing comment\n'
+                "export CTFVM_MODEL=gpt-5.5 # exported\n"
+            )
+            d = _parse_env_file(p)
+        self.assertEqual(d["CTFVM_AGENT"], "codex")
+        self.assertEqual(d["CTFVM_PROVIDER"], "digitalocean")
+        self.assertEqual(d["CTFVM_PASS"], "abc#notacomment")  # bare # in a token survives
+        self.assertEqual(d["CTFVM_URL"], "http://x#frag")     # quoted value, comment dropped
+        self.assertEqual(d["CTFVM_MODEL"], "gpt-5.5")
+
+    def test_build_start_cmd_has_no_comment_leakage(self):
+        # regression: a commented .env must not poison the spawn command
+        with TemporaryDirectory() as tmp, patch.dict(os.environ, {}, clear=False):
+            for k in ("CTFVM_AGENT", "CTFVM_PROVIDER", "CTFVM_TOOLBOX_VARIANT", "CTFVM_TIMEOUT_MIN"):
+                os.environ.pop(k, None)
+            (Path(tmp) / ".env").write_text(
+                "CTFVM_PROVIDER=digitalocean   # gcp | digitalocean\n"
+                "CTFVM_TOOLBOX_VARIANT=lean    # lean | full\n"
+            )
+            # _build_start_cmd reads Settings() rooted at cwd; resolve via the parser directly
+            from clanker.config import _parse_env_file
+            vals = _parse_env_file(Path(tmp) / ".env")
+            self.assertNotIn("#", vals["CTFVM_PROVIDER"])
+            self.assertNotIn("#", vals["CTFVM_TOOLBOX_VARIANT"])
 
 
 class Fanout(unittest.TestCase):

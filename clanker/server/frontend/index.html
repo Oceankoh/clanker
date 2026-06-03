@@ -131,7 +131,7 @@ function showSpawn(){
     <label class="chk"><input type="checkbox" id="sp-batch" onchange="$('#sp-dirhint').textContent=this.checked?'each immediate subfolder becomes its own run':''"> deploy folder — each immediate subfolder is its own run</label>
     <div class="hint" id="sp-dirhint"></div>
     <div class="cols">
-      <div><label>Provider</label><select id="sp-provider"><option value="">(default)</option><option value="gcp">gcp</option><option value="digitalocean">digitalocean</option></select></div>
+      <div><label>Provider</label><select id="sp-provider" onchange="providerFields()"><option value="">(default)</option><option value="gcp">gcp</option><option value="digitalocean">digitalocean</option></select></div>
       <div><label>Agent</label><select id="sp-agent"><option value="">(default)</option>${opts}</select></div>
       <div><label>Model</label><input type="text" id="sp-model" placeholder="(backend default)"></div>
     </div>
@@ -139,13 +139,18 @@ function showSpawn(){
     <textarea id="sp-desc" rows="2" placeholder="what the challenge is (defaults to description.txt in the folder)"></textarea>
     <label>Ideas / hints</label>
     <textarea id="sp-ideas" rows="2" placeholder="optional starting ideas (defaults to ideas.txt)"></textarea>
-    <div class="cols">
-      <div><label>Zone / region</label><input type="text" id="sp-zone" placeholder="(provider default)"></div>
-      <div><label>Project (GCP)</label><input type="text" id="sp-project" placeholder="(gcloud default)"></div>
-      <div><label>Machine type</label><input type="text" id="sp-machine" placeholder="(GCP)"></div>
+    <!-- GCP-only fields -->
+    <div class="cols" id="sp-gcp-fields">
+      <div><label>Zone</label><input type="text" id="sp-zone" placeholder="(gcloud default, e.g. us-central1-a)"></div>
+      <div><label>Project</label><input type="text" id="sp-project" placeholder="(gcloud default)"></div>
+      <div><label>Machine type</label><input type="text" id="sp-machine" placeholder="e2-standard-4"></div>
+    </div>
+    <!-- DigitalOcean-only fields -->
+    <div class="cols" id="sp-do-fields">
+      <div><label>Region</label><input type="text" id="sp-region" placeholder="(CTFVM_DO_REGION, e.g. nyc3)"></div>
+      <div><label>Size slug</label><input type="text" id="sp-size" placeholder="s-4vcpu-8gb"></div>
     </div>
     <div class="cols">
-      <div><label>Size slug</label><input type="text" id="sp-size" placeholder="(DigitalOcean)"></div>
       <div><label>Toolbox variant</label><input type="text" id="sp-variant" placeholder="(default)"></div>
       <div><label>Timeout (min)</label><input type="text" id="sp-timeout" placeholder="(default)"></div>
     </div>
@@ -155,6 +160,7 @@ function showSpawn(){
     <div class="hint" style="margin-top:18px">Recent spawn jobs:</div>
     <div id="sp-jobs" class="hint">—</div>
   </div>`;
+  providerFields();
   loadJobs();
 }
 async function loadJobs(){
@@ -173,14 +179,25 @@ async function browseDir(){
     r.textContent='';
   }catch(e){ r.innerHTML='<span class="err">'+esc(e.message)+'</span>'; }
 }
+// show only the fields that matter for the chosen provider
+//   gcp:          zone + project + machine_type
+//   digitalocean: region (-> --zone) + size_slug
+function providerFields(){
+  const p=($('#sp-provider')||{}).value||'';
+  const g=$('#sp-gcp-fields'), d=$('#sp-do-fields');
+  if(g) g.style.display = (p==='gcp')?'grid':'none';
+  if(d) d.style.display = (p==='digitalocean')?'grid':'none';
+}
 async function submitSpawn(){
   const dir=$('#sp-dir').value.trim(); if(!dir){ $('#sp-result').innerHTML='<span class="err">challenge path required</span>'; return; }
   const body = $('#sp-batch').checked ? {challenge_root:dir} : {challenge_dir:dir};
   const put=(k,v)=>{ v=(v||'').trim(); if(v) body[k]=v; };
-  put('provider',$('#sp-provider').value); put('agent_backend',$('#sp-agent').value);
+  const prov=$('#sp-provider').value;
+  put('provider',prov); put('agent_backend',$('#sp-agent').value);
   put('model',$('#sp-model').value); put('description',$('#sp-desc').value); put('ideas',$('#sp-ideas').value);
-  put('zone',$('#sp-zone').value); put('project',$('#sp-project').value); put('machine_type',$('#sp-machine').value);
-  put('size_slug',$('#sp-size').value); put('toolbox_variant',$('#sp-variant').value); put('timeout_min',$('#sp-timeout').value);
+  if(prov==='digitalocean'){ put('zone',$('#sp-region').value); put('size_slug',$('#sp-size').value); }
+  else if(prov==='gcp'){ put('zone',$('#sp-zone').value); put('project',$('#sp-project').value); put('machine_type',$('#sp-machine').value); }
+  put('toolbox_variant',$('#sp-variant').value); put('timeout_min',$('#sp-timeout').value);
   if($('#sp-novpn').checked) body.no_vpn=true;
   $('#sp-result').textContent='spawning…';
   try{
