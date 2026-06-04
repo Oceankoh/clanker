@@ -210,6 +210,40 @@ class UiService:
             }
         return out
 
+    def vpn_status(self, run_id: str) -> dict:
+        """Local VPN state for a run. VPN bring-up is a *local* privileged step
+        (`ctfvm vpn up`, needs sudo on the operator's machine), so the UI reports
+        status + the command to run rather than doing it itself."""
+        up_cmd = f"./scripts/ctfvm vpn --run-id {run_id} up"
+        state = None
+        vpn_dir = ROOT / ".ctfvm" / "vpn"
+        if vpn_dir.is_dir():
+            for sub in sorted(vpn_dir.iterdir()):
+                if not sub.is_dir():
+                    continue
+                for f in sub.glob("*.json"):
+                    try:
+                        data = _json.loads(f.read_text())
+                    except Exception:
+                        continue
+                    if str(data.get("run_id") or "") == run_id:
+                        state = data
+                        break
+                if state:
+                    break
+        if not state:
+            return {"connected": False, "up_command": up_cmd}
+        return {
+            "connected": True,
+            "interface": state.get("local_interface") or state.get("name"),
+            "local_ip": state.get("local_ip"),
+            "remote_ip": state.get("remote_ip"),
+            "cidrs": state.get("local_cidrs") or [],
+            "nat": bool(state.get("nat_enabled")),
+            "up_command": up_cmd,
+            "down_command": f"./scripts/ctfvm vpn --run-id {run_id} down",
+        }
+
     def profiles(self) -> list[dict]:
         """Named credential profiles (for the spawn form's account picker).
         Never returns secret values — just name + which backend they auth."""

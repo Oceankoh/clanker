@@ -260,8 +260,31 @@ class ServerTest(unittest.TestCase):
                        b"steer-target", b"steerSubagent", b"browseDir", b"select-directory",
                        b"sp-desc", b"sp-novpn", b"status-note",
                        b"providerFields", b"sp-region", b"sp-do-fields", b"sp-gcp-fields",
-                       b"sp-account", b"loadProfiles", b"prefillSpawn", b"loadDefaults", b"spawn-defaults"):
+                       b"sp-account", b"loadProfiles", b"prefillSpawn", b"loadDefaults", b"spawn-defaults",
+                       b"vpnchip", b"loadVpnStatus"):
             self.assertIn(marker, body, marker)
+
+
+class VpnStatus(unittest.TestCase):
+    def test_connected_vs_not(self):
+        import clanker.server.service as svc
+        from unittest.mock import patch
+        with TemporaryDirectory() as root, TemporaryDirectory() as runs:
+            service = _make_service(Path(runs))
+            with patch.object(svc, "ROOT", Path(root)):
+                self.assertFalse(service.vpn_status("R1")["connected"])
+                self.assertIn("vpn --run-id R1 up", service.vpn_status("R1")["up_command"])
+                vd = Path(root) / ".ctfvm" / "vpn" / "R1"
+                vd.mkdir(parents=True)
+                (vd / "wg0.json").write_text(json.dumps({
+                    "run_id": "R1", "local_interface": "wg0", "local_ip": "10.88.1.1",
+                    "remote_ip": "10.88.1.2", "local_cidrs": ["192.168.0.0/16"], "nat_enabled": True,
+                }))
+                d = service.vpn_status("R1")
+        self.assertTrue(d["connected"])
+        self.assertEqual(d["interface"], "wg0")
+        self.assertIn("192.168.0.0/16", d["cidrs"])
+        self.assertTrue(d["nat"])
 
 
 class SpawnDefaultsResolve(unittest.TestCase):

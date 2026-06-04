@@ -101,6 +101,29 @@ python -m clanker config profiles
 # (per-run account selection lands with the start port; usable now via `stage-agent --account`)
 ```
 
+**Reach a LAN / internal challenge network from the agent's VM (WireGuard VPN):**
+
+The agent runs on a cloud VM that can't see the competition LAN. clanker tunnels the VM to **your
+laptop** (which *is* on the LAN) and NATs the routed subnets out your laptop's interface — so the agent
+reaches internal services as if it were you. Bringing the tunnel up is a **local privileged step** (it
+needs `sudo` for `wg-quick`/`pfctl` on the machine that's on the LAN), so it does **not** run from the
+web UI or over ngrok — the UI shows status + the exact command instead.
+
+```bash
+# one-time: WireGuard tools (macOS also needs bash 4+, both via Homebrew)
+brew install wireguard-tools bash
+
+# provision without VPN (UI spawns default to --no-vpn for this reason), then bring it up locally:
+./scripts/ctfvm vpn --run-id <id> up        # run in a real terminal; prompts for sudo
+./scripts/ctfvm vpn --run-id <id> status    # or 'down'
+```
+
+- Default routed CIDRs are all RFC1918 (`CTFVM_VPN_CIDRS`); the VM's own subnets are safe (longest-prefix).
+- **At a venue where the LAN is on Ethernet but internet is on Wi-Fi**, the NAT egress auto-detects the
+  *default-route* interface (usually Wi-Fi). Override it to the Ethernet one:
+  `CTFVM_VPN_EGRESS_IF=enX ./scripts/ctfvm vpn --run-id <id> up` (find `enX` via `ifconfig`/`ipconfig getifaddr enX`).
+- The focused run's header in the UI shows **VPN connected · `<iface>` → `<cidrs>`** or the `vpn up` command to run.
+
 **Share the UI for a CTF (ngrok, token baked into the link):**
 
 ```bash

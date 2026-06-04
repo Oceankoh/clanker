@@ -201,7 +201,7 @@ function showSpawn(){
       <div><label>Toolbox variant</label><input type="text" id="sp-variant" placeholder="(default)"></div>
       <div><label>Timeout (min)</label><input type="text" id="sp-timeout" placeholder="(default)"></div>
     </div>
-    <label class="chk"><input type="checkbox" id="sp-novpn"> --no-vpn (skip the VPN setup)</label>
+    <label class="chk"><input type="checkbox" id="sp-novpn" checked> --no-vpn (recommended from the UI — bring the VPN up afterward as a local step: <code>ctfvm vpn --run-id &lt;id&gt; up</code>)</label>
     <label class="chk"><input type="checkbox" id="sp-noauthsync"> skip Codex session sync — use API key / profile creds instead (--no-auth-sync)</label>
     <label class="chk"><input type="checkbox" id="sp-uselocal"> use local toolbox image archive (--use-local-image; tick this if you built one with <code>ctfvm image build-local</code> and haven't pushed to a registry)</label>
     <div class="row" style="margin-top:14px"><button class="primary" onclick="submitSpawn()">Spawn</button>
@@ -350,6 +350,7 @@ function renderFocus(){
       <span class="muted">${s.provider} · ${s.agent_backend} · ${s.runtime_status}</span></div>
     ${cs?`<div class="muted">${esc(cs.summary)} — ${cs.last_activity_label||''}</div>`:''}
     ${s.error?`<div class="err">⚠ ${esc(s.error)}</div>`:''}
+    <div class="row" id="vpnrow"><span id="vpnchip" class="hint">VPN: …</span></div>
     <div class="row">
       <button onclick="setStatus('solved')">Mark solved</button>
       <button onclick="setStatus('blocked')">Mark blocked</button>
@@ -359,8 +360,27 @@ function renderFocus(){
   // restore preserved inputs
   Object.entries(keep).forEach(([id,v])=>{const el=$(id); if(el && v!=null) el.value=v;});
   if(STATE.tab==='transcript') loadTranscript();
+  loadVpnStatus();
   // keep terminal panes scrolled to the latest output
   document.querySelectorAll('.pane-out').forEach(el=>{ el.scrollTop = el.scrollHeight; });
+}
+// VPN bring-up is a LOCAL privileged step (sudo on this machine), so the UI
+// reports status + the exact command rather than doing it itself.
+async function loadVpnStatus(){
+  const el=$('#vpnchip'); if(!el||!STATE.current) return;
+  try{
+    const d=await api('/runs/'+encodeURIComponent(STATE.current)+'/vpn');
+    if(d.connected){
+      el.className='pill s-solved';
+      el.title='Routed: '+(d.cidrs||[]).join(', ');
+      el.textContent='VPN connected · '+(d.interface||'wg')+' → '+((d.cidrs||[]).join(', ')||'(no cidrs)');
+    }else{
+      el.className='';
+      el.innerHTML='<span class="muted">VPN not set up — run in a terminal: </span>'
+        +'<code>'+esc(d.up_command)+'</code> '
+        +'<button onclick="navigator.clipboard.writeText(\''+esc(d.up_command).replace(/'/g,"\\'")+'\')">copy</button>';
+    }
+  }catch(e){ el.className='hint'; el.textContent=''; }
 }
 
 async function loadTranscript(){
