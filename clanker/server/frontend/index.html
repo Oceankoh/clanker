@@ -202,6 +202,7 @@ function showSpawn(){
       <div><label>Timeout (min)</label><input type="text" id="sp-timeout" placeholder="(default)"></div>
     </div>
     <label class="chk"><input type="checkbox" id="sp-novpn"> --no-vpn (skip the VPN setup)</label>
+    <label class="chk"><input type="checkbox" id="sp-noauthsync"> skip Codex session sync — use API key / profile creds instead (--no-auth-sync)</label>
     <label class="chk"><input type="checkbox" id="sp-uselocal"> use local toolbox image archive (--use-local-image; tick this if you built one with <code>ctfvm image build-local</code> and haven't pushed to a registry)</label>
     <div class="row" style="margin-top:14px"><button class="primary" onclick="submitSpawn()">Spawn</button>
       <span id="sp-result" class="hint"></span></div>
@@ -250,6 +251,7 @@ async function submitSpawn(){
   else if(prov==='gcp'){ put('zone',$('#sp-zone').value); put('project',$('#sp-project').value); put('machine_type',$('#sp-machine').value); }
   put('toolbox_variant',$('#sp-variant').value); put('timeout_min',$('#sp-timeout').value);
   if($('#sp-novpn').checked) body.no_vpn=true;
+  if($('#sp-noauthsync').checked) body.no_auth_sync=true;
   if($('#sp-uselocal').checked) body.use_local_image=true;
   $('#sp-result').textContent='spawning…';
   try{
@@ -392,10 +394,12 @@ function steerBox(panes){
     const sub = (p.session||'').startsWith('subagent-');
     opts += `<option value="${esc(p.target)}"${p.target===tgt?' selected':''}>${esc(p.target)}${sub?' · subagent':''}</option>`; });
   if(!seen.has('ctf:supervisor')) opts = `<option value="ctf:supervisor"${tgt==='ctf:supervisor'?' selected':''}>ctf:supervisor</option>`+opts;
+  opts += `<option value="__custom__">custom…</option>`;
   return `
     <textarea id="steer" rows="2" onkeydown="steerKey(event)" placeholder="message to the agent — Enter to send · Shift+Enter for newline"></textarea>
     <div class="row">
-      <label class="mode">send to&nbsp;<select id="steer-target">${opts}</select></label>
+      <label class="mode">send to&nbsp;<select id="steer-target" onchange="onSteerTargetChange()">${opts}</select></label>
+      <input type="text" id="steer-target-custom" placeholder="session:window (e.g. ctf:1)" style="display:none;max-width:220px">
       <span class="hint">typed into the agent pane. If the agent is mid-turn, its own CLI queues your message and runs it after the current turn.</span>
     </div>
     <div class="row">
@@ -407,7 +411,12 @@ function steerBox(panes){
       <button onclick="key('Escape')">Esc</button>
     </div>`;
 }
-function steerTarget(){ const el=$('#steer-target'); return (el&&el.value) || STATE.steerTarget || 'ctf:supervisor'; }
+function onSteerTargetChange(){ const c=$('#steer-target-custom'); if(c) c.style.display=($('#steer-target').value==='__custom__')?'inline-block':'none'; }
+function steerTarget(){
+  const el=$('#steer-target');
+  if(el && el.value==='__custom__'){ return ($('#steer-target-custom')||{}).value || 'ctf:supervisor'; }
+  return (el&&el.value) || STATE.steerTarget || 'ctf:supervisor';
+}
 function steerSubagent(t){ STATE.steerTarget=t; STATE.tab='panes'; renderFocus(); }
 function post(path, payload){ return api('/runs/'+encodeURIComponent(STATE.current)+path,
   {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload||{})}); }

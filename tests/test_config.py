@@ -139,6 +139,11 @@ class SpawnDefaults(unittest.TestCase):
         self.assertIn("--use-local-image", cmd)
         self.assertNotIn("--use-local-image", UiService._build_start_cmd({"challenge_dir": "/x"}))
 
+    def test_no_auth_sync_flag(self):
+        cmd = UiService._build_start_cmd({"challenge_dir": "/x", "no_auth_sync": True})
+        self.assertIn("--no-auth-sync", cmd)
+        self.assertNotIn("--no-auth-sync", UiService._build_start_cmd({"challenge_dir": "/x"}))
+
     def test_flag_format_folds_into_desc(self):
         cmd = UiService._build_start_cmd({"challenge_dir": "/x", "description": "heap uaf",
                                           "flag_format": "flag{...}"})

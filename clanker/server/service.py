@@ -333,6 +333,8 @@ class UiService:
             cmd += ["--account", account]
         if spec.get("no_vpn"):
             cmd.append("--no-vpn")
+        if spec.get("no_auth_sync"):
+            cmd.append("--no-auth-sync")
         if spec.get("use_local_image"):
             cmd.append("--use-local-image")
         return cmd
