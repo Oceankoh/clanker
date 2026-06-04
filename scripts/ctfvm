@@ -1102,13 +1102,15 @@ gcloud_ssh() {
     refresh_instance_ip
   fi
   if control_plane_configured; then
+    # </dev/null: these exec calls never need stdin; without it the client
+    # blocks reading an interactive terminal (hung `ctfvm vpn up` from a tty).
     python3 "${REPO_ROOT}/scripts/ctfvm_control_client.py" \
       --endpoint "$(control_endpoint)" \
       --user "${CONTROL_USER}" \
       --password "${CONTROL_PASSWORD}" \
       exec \
       --timeout "${CTFVM_CONTROL_TIMEOUT_SEC:-1800}" \
-      --command "${cmd}"
+      --command "${cmd}" </dev/null
     return $?
   fi
   if [[ "${PROVIDER}" == "digitalocean" && -z "${IP:-}" ]]; then
