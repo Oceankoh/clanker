@@ -165,10 +165,10 @@ class ServerTest(unittest.TestCase):
         self.assertIn("tool_call", kinds)
         self.assertEqual(next(e for e in d["events"] if e["kind"] == "tool_call")["tool"], "exec_command")
 
-    def test_inject_queue(self):
+    def test_inject_route_removed(self):
+        # the dead inject.queue endpoint was removed (no VM consumer; CLIs queue natively)
         st, j = self._req("POST", "/api/v1/runs/20250101-000000/inject", {"text": "hint"})
-        self.assertEqual(st, 200)
-        self.assertTrue(j["ok"])
+        self.assertEqual(st, 404)
 
     def test_status_set_clear(self):
         st, j = self._req("POST", "/api/v1/runs/20250101-000000/status", {"state": "solved"})
@@ -256,7 +256,7 @@ class ServerTest(unittest.TestCase):
         self.assertIn("text/html", hdr.get("Content-Type", ""))
         self.assertIn(b"clanker", body)
         # the operational redesign elements are present
-        for marker in (b"submitSteer", b"steerKey", b"name=smode", b"/inject", b"hexDump", b"Approve",
+        for marker in (b"submitSteer", b"steerKey", b"hexDump", b"Approve",
                        b"steer-target", b"steerSubagent", b"browseDir", b"select-directory",
                        b"sp-desc", b"sp-novpn", b"status-note",
                        b"providerFields", b"sp-region", b"sp-do-fields", b"sp-gcp-fields",

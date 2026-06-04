@@ -77,7 +77,6 @@ class App:
             ("POST", re.compile(r"^/api/v1/runs/([^/]+)/panes/send$"), self._pane_send),
             ("POST", re.compile(r"^/api/v1/runs/([^/]+)/panes/keys$"), self._pane_keys),
             ("POST", re.compile(r"^/api/v1/runs/([^/]+)/panes/trust$"), self._pane_trust),
-            ("POST", re.compile(r"^/api/v1/runs/([^/]+)/inject$"), self._inject),
             ("GET", re.compile(r"^/api/v1/runs/([^/]+)/subagents$"), self._subagents),
             ("GET", re.compile(r"^/api/v1/runs/([^/]+)/transcript$"), self._transcript),
             ("GET", re.compile(r"^/api/v1/runs/([^/]+)/artifacts/(.+)/download$"), self._artifact_download),
@@ -222,11 +221,6 @@ class App:
         data = self._body_json(body)
         self.s.pane_trust(m.group(1), data.get("target", "ctf:supervisor"))
         return ok({"target": data.get("target", "ctf:supervisor")})
-
-    def _inject(self, m, _q, body):
-        data = self._body_json(body)
-        self.s.inject(m.group(1), data.get("text", ""))
-        return ok({"run_id": m.group(1)})
 
     def _subagents(self, m, _q, _b):
         subs = self.s.subagents(m.group(1))

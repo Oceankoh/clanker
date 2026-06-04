@@ -312,7 +312,6 @@ function renderFocus(){
   // preserve any in-progress input across a re-render (steer text/target/mode,
   // status note) so a periodic refresh never eats what you're typing
   const keep={}; ['#steer','#steer-target','#status-note'].forEach(id=>{const el=$(id); if(el) keep[id]=el.value;});
-  const keepMode=(document.querySelector('input[name=smode]:checked')||{}).value;
   const tabs = ['transcript','panes','findings','supervisor','artifacts','subagents'];
   const tabBar = tabs.map(t=>`<div class="tab ${STATE.tab===t?'active':''}" onclick="setTab('${t}')">${t}</div>`).join('');
   let body='';
@@ -352,16 +351,9 @@ function renderFocus(){
     <div class="tabs">${tabBar}</div>${body}`;
   // restore preserved inputs
   Object.entries(keep).forEach(([id,v])=>{const el=$(id); if(el && v!=null) el.value=v;});
-  if(keepMode){const r=document.querySelector('input[name=smode][value="'+keepMode+'"]'); if(r) r.checked=true;}
   if(STATE.tab==='transcript') loadTranscript();
   // keep terminal panes scrolled to the latest output
   document.querySelectorAll('.pane-out').forEach(el=>{ el.scrollTop = el.scrollHeight; });
-  const hint = $('#modehint');
-  if(hint) document.querySelectorAll('input[name=smode]').forEach(r=>r.addEventListener('change',()=>{
-    hint.textContent = steerMode()==='queue'
-      ? 'queue: appends to inject.queue — the agent only reads it if its prompt polls the queue (an idle agent will NOT see it)'
-      : 'send now: typed straight into the agent pane — reaches it immediately';
-  }));
 }
 
 async function loadTranscript(){
@@ -386,7 +378,7 @@ function renderEvent(e){
     return `<div class="ev result ${e.is_error?'error':''}"><div class="who">result${e.is_error?' · error':''}</div><pre class="body">${esc(e.text)}</pre></div>`;
   return '';
 }
-// the steer box: a target picker (supervisor + any subagent pane) + queue/send-now + key buttons
+// the steer box: a target picker (supervisor + any subagent pane) + key buttons; sends to the agent pane
 function steerBox(panes){
   const tgt = STATE.steerTarget || 'ctf:supervisor';
   const seen = new Set();
@@ -398,10 +390,8 @@ function steerBox(panes){
   return `
     <textarea id="steer" rows="2" onkeydown="steerKey(event)" placeholder="message to the agent — Enter to send · Shift+Enter for newline"></textarea>
     <div class="row">
-      <label class="mode"><input type="radio" name="smode" value="steer" checked> Send now</label>
-      <label class="mode"><input type="radio" name="smode" value="queue"> Queue</label>
-      <label class="mode">→&nbsp;<select id="steer-target">${opts}</select></label>
-      <span class="hint" id="modehint">send now: typed straight into the agent pane — reaches it immediately. (Queue only works if the agent's prompt polls inject.queue.)</span>
+      <label class="mode">send to&nbsp;<select id="steer-target">${opts}</select></label>
+      <span class="hint">typed into the agent pane. If the agent is mid-turn, its own CLI queues your message and runs it after the current turn.</span>
     </div>
     <div class="row">
       <button class="primary" onclick="submitSteer()">Send</button>
@@ -412,7 +402,6 @@ function steerBox(panes){
       <button onclick="key('Escape')">Esc</button>
     </div>`;
 }
-function steerMode(){ const r=document.querySelector('input[name=smode]:checked'); return r?r.value:'steer'; }
 function steerTarget(){ const el=$('#steer-target'); return (el&&el.value) || STATE.steerTarget || 'ctf:supervisor'; }
 function steerSubagent(t){ STATE.steerTarget=t; STATE.tab='panes'; renderFocus(); }
 function post(path, payload){ return api('/runs/'+encodeURIComponent(STATE.current)+path,
@@ -423,9 +412,7 @@ async function submitSteer(){
   const ta=$('#steer'); const t=ta.value; if(!t.trim()) return;
   STATE.steerTarget = steerTarget();
   try{
-    // queue is run-level (inject.queue, read by the supervisor); send-now targets the selected pane
-    if(steerMode()==='queue') await post('/inject', {text:t});
-    else                      await post('/panes/send', {target:steerTarget(), text:t, press_enter:true});
+    await post('/panes/send', {target:steerTarget(), text:t, press_enter:true});
     ta.value=''; ta.focus(); setTimeout(softRefresh, 500);
   }catch(e){ alert(e.message); }
 }

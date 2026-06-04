@@ -138,9 +138,6 @@ class UiService:
     def pane_trust(self, run_id, target="ctf:supervisor"):
         self._steer(lambda c: steering_mod.trust_prompt(c, target), run_id)
 
-    def inject(self, run_id, text):
-        self._steer(lambda c: steering_mod.inject_message(c, text), run_id)
-
     def set_status(self, run_id, state, note=""):
         self._steer(lambda c: steering_mod.set_explicit_status(c, state, note), run_id)
 

@@ -65,21 +65,6 @@ def trust_prompt(client: ControlPlaneClient, target: str = "ctf:supervisor") -> 
     send_keys(client, target, ["1", "Enter"])
 
 
-def inject_message(client: ControlPlaneClient, text: str, *, timeout: int = 15) -> None:
-    """Queue a message for the agent (the safe path): append to the run's
-    inject.queue, which the tmux bridge feeds to the agent at a natural point —
-    as opposed to `send_text`, which types into the live pane immediately."""
-    if not text or not text.strip():
-        raise SteeringError("text is required")
-    payload = base64.b64encode((text.rstrip("\n") + "\n").encode("utf-8")).decode("ascii")
-    remote = (
-        "sudo -u ctf bash -lc '"
-        f"printf %s {shlex.quote(payload)} | base64 -d >> /home/ctf/run/inject.queue"
-        "'"
-    )
-    _exec_ok(client, remote, timeout, "inject failed")
-
-
 def set_explicit_status(client: ControlPlaneClient, state: str, note: str = "", *, timeout: int = 15) -> None:
     state = str(state or "").strip().lower()
     if state not in {"solved", "blocked"}:
