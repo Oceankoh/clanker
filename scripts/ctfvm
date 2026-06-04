@@ -1402,7 +1402,10 @@ vpn_require_local_prereqs() {
 }
 
 vpn_sudo_prefix() {
-  if [[ -t 0 && -t 1 ]]; then
+  # NB: this runs inside $(...), so fd 1 is a pipe — never test `-t 1` here, it
+  # is always false and would force `sudo -n` (which refuses to prompt). Test
+  # the inherited stdin instead: a tty there means sudo can prompt for a passwd.
+  if [[ -t 0 ]]; then
     printf '%s\n' "sudo"
   else
     printf '%s\n' "sudo -n"
