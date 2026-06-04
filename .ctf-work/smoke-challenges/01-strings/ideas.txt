@@ -1,0 +1,1 @@
+Try `strings data.bin | grep -i flag` or just `grep flag data.bin`.

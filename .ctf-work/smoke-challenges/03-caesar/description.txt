@@ -1,0 +1,1 @@
+`cipher.txt` is ROT13-encoded. Decode it to reveal the flag (format flag{...}).

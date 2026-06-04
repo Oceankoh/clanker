@@ -13,6 +13,34 @@ Companion docs: [`ARCHITECTURE.md`](ARCHITECTURE.md) · [`AGENTS.md`](AGENTS.md)
 
 ---
 
+## 0. Quick automated harness
+
+For the common "does a fresh provision actually solve a challenge end-to-end" check, use the scripted
+harness instead of the manual steps below. It provisions a real VM, runs the agent on one challenge,
+asserts the expected flag lands in findings/the agent pane, then **destroys the VM** (auto-teardown on
+exit, even on failure):
+
+```bash
+scripts/smoke.sh --agent claude-code --dir .ctf-work/smoke-challenges/01-strings
+scripts/smoke.sh --agent codex       --dir .ctf-work/smoke-challenges/04-hidden   # needs codex auth
+```
+
+- Challenge fixtures live in [`.ctf-work/smoke-challenges/`](../.ctf-work/smoke-challenges/) (committed):
+  `01-strings`, `02-base64`, `03-caesar`, and `04-hidden` (flag in a **dotfile**, which verifies hidden
+  files upload intact). Expected flags are in `EXPECTED.tsv` at the folder root (never uploaded, so the
+  agent can't cheat).
+- Flags: `--keep` to leave the VM up for inspection; `--size`, `--provider`, `--timeout` to override.
+- It builds a local toolbox archive on first run and spawns with `--use-local-image --no-vpn`.
+
+**Last validated:** 2026-06-04, DigitalOcean + Claude Code solved `01-strings` end-to-end via the unified
+agent-staging flow. Codex parity is pending local `codex login` (the staging payload is verified; no live
+run yet).
+
+The full manual matrix below stays the authoritative acceptance gate (it exercises steering, artifacts,
+status, transcript, and the BUGS.md regressions the harness doesn't touch).
+
+---
+
 ## 1. Coverage matrix
 
 | | **Codex** | **Claude Code** |
@@ -35,15 +63,15 @@ Companion docs: [`ARCHITECTURE.md`](ARCHITECTURE.md) · [`AGENTS.md`](AGENTS.md)
 - ☐ **Codex** auth: `codex login` complete locally.
 - ☐ **Claude Code** auth materialized locally (no credential copying):
   `clanker auth claude` → runs `claude setup-token`, stores the 1-year token. (AGENTS.md §2.2)
-- ☐ A small, known-solvable **practice challenge** dir, e.g. `./.ctf-work/smoke/` containing a trivial
-  binary or script. (A challenge that solves in <2 min keeps the loop fast.)
+- ☐ A small, known-solvable **practice challenge** dir — the committed set lives in
+  `./.ctf-work/smoke-challenges/` (each subfolder solves in well under a minute).
 
 Set per-cell variables to keep the steps copy-pasteable:
 
 ```bash
-export SMOKE_PROVIDER=gcp          # or digitalocean
-export SMOKE_AGENT=claude-code     # or codex
-export SMOKE_DIR=./.ctf-work/smoke
+export SMOKE_PROVIDER=digitalocean   # or gcp
+export SMOKE_AGENT=claude-code       # or codex
+export SMOKE_DIR=./.ctf-work/smoke-challenges/01-strings
 export SMOKE_DESC="smoke test"
 ```
 

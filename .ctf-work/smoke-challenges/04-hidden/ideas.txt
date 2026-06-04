@@ -1,0 +1,1 @@
+List hidden files: `ls -la`. The flag is in a dotfile, e.g. `cat .flag`.
