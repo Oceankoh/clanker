@@ -1578,7 +1578,12 @@ vpn_install_remote() {
   remote_config_b64="$(base64 < "${remote_config}" | tr -d '\n')"
   remote_env_b64="$(base64 < "${remote_env}" | tr -d '\n')"
   remote_json_b64="$(base64 < "${remote_json}" | tr -d '\n')"
-  remote_cmd="set -euo pipefail; export DEBIAN_FRONTEND=noninteractive; if ! command -v wg >/dev/null 2>&1 || ! command -v wg-quick >/dev/null 2>&1; then apt-get update && apt-get install -y wireguard-tools; fi; install -d -m 700 /etc/wireguard ${REMOTE_VPN_DIR}; systemctl stop wg-quick@${remote_interface}.service >/dev/null 2>&1 || true; printf '%s' '${remote_config_b64}' | base64 -d > /etc/wireguard/${remote_interface}.conf; chmod 600 /etc/wireguard/${remote_interface}.conf; printf '%s' '${remote_env_b64}' | base64 -d > ${REMOTE_VPN_DIR}/${remote_interface}.env; printf '%s' '${remote_json_b64}' | base64 -d > ${REMOTE_VPN_DIR}/${remote_interface}.json; chown -R ctf:ctf ${REMOTE_VPN_DIR}; systemctl enable --now wg-quick@${remote_interface}.service"
+  # NB: use `wg-quick up/down` directly, NOT `systemctl … wg-quick@…`. systemctl
+  # hangs over the non-interactive control-plane exec (no tty/session -> blocks
+  # on systemd/dbus), which previously wedged the install at the first
+  # `systemctl stop` before the config was even written. Ephemeral CTF VMs don't
+  # need reboot-persistence. timeout guards so a stuck bring-up fails fast.
+  remote_cmd="set -euo pipefail; export DEBIAN_FRONTEND=noninteractive; if ! command -v wg >/dev/null 2>&1 || ! command -v wg-quick >/dev/null 2>&1; then timeout 180 bash -c 'apt-get update && apt-get install -y wireguard-tools'; fi; install -d -m 700 /etc/wireguard ${REMOTE_VPN_DIR}; wg-quick down ${remote_interface} >/dev/null 2>&1 || true; printf '%s' '${remote_config_b64}' | base64 -d > /etc/wireguard/${remote_interface}.conf; chmod 600 /etc/wireguard/${remote_interface}.conf; printf '%s' '${remote_env_b64}' | base64 -d > ${REMOTE_VPN_DIR}/${remote_interface}.env; printf '%s' '${remote_json_b64}' | base64 -d > ${REMOTE_VPN_DIR}/${remote_interface}.json; chown -R ctf:ctf ${REMOTE_VPN_DIR}; timeout 30 wg-quick up ${remote_interface}"
   printf -v remote_cmd_q '%q' "${remote_cmd}"
   gcloud_ssh "sudo bash -lc ${remote_cmd_q}"
 }
@@ -1690,7 +1695,7 @@ vpn_up_loaded() {
 
   echo "Starting local WireGuard interface ${local_interface}..."
   if ! ${sudo_cmd} wg-quick up "${local_config}"; then
-    gcloud_ssh "sudo bash -lc 'systemctl disable --now wg-quick@${remote_interface}.service >/dev/null 2>&1 || true; rm -f /etc/wireguard/${remote_interface}.conf ${REMOTE_VPN_DIR}/${remote_interface}.env ${REMOTE_VPN_DIR}/${remote_interface}.json'" >/dev/null 2>&1 || true
+    gcloud_ssh "sudo bash -lc 'timeout 20 wg-quick down ${remote_interface} >/dev/null 2>&1 || true; rm -f /etc/wireguard/${remote_interface}.conf ${REMOTE_VPN_DIR}/${remote_interface}.env ${REMOTE_VPN_DIR}/${remote_interface}.json'" >/dev/null 2>&1 || true
     rm -rf "${stage_dir}"
     return 1
   fi
@@ -1700,11 +1705,31 @@ vpn_up_loaded() {
   mv "${state_file}.tmp" "${state_file}"
   rm -rf "${stage_dir}"
 
+  # Verify the tunnel actually carries traffic: ping the VM's WireGuard IP from
+  # here. This also primes the handshake (PersistentKeepalive). A failure here
+  # almost always means UDP ${port} isn't reaching the VM (provider firewall).
+  local _vpn_verified="0" _try _ping
+  case "$(uname -s)" in
+    Darwin) _ping=(ping -c1 -t 3) ;;   # -t = total timeout (s) on macOS
+    *)      _ping=(ping -c1 -W 3) ;;    # -W = per-reply timeout (s) on Linux
+  esac
+  for _try in 1 2 3 4 5; do
+    if "${_ping[@]}" "${remote_ip}" >/dev/null 2>&1; then _vpn_verified="1"; break; fi
+    sleep 2
+  done
+
   echo "VPN ${vpn_name} is up for ${INSTANCE}."
   echo "  VM WireGuard IP: ${remote_ip}"
   echo "  Local gateway: ${local_ip}"
   echo "  Routed local CIDRs: ${cidrs_csv}"
   echo "  Remote env: ${REMOTE_VPN_DIR}/${remote_interface}.env"
+  if [[ "${_vpn_verified}" == "1" ]]; then
+    echo "  Tunnel verified: handshake OK (local <-> VM)."
+  else
+    echo "  WARNING: tunnel handshake not confirmed (could not ping ${remote_ip})." >&2
+    echo "           Usually UDP ${port} isn't reaching the VM. Check the provider firewall," >&2
+    echo "           or that the laptop has outbound UDP. The VM/agent can still run locally." >&2
+  fi
 }
 
 cmd_vpn_up() {
@@ -1844,7 +1869,7 @@ cmd_vpn_down() {
     sudo "${local_nat_script}" down "${local_interface}" >/dev/null 2>&1 || true
   fi
 
-  gcloud_ssh "sudo bash -lc 'systemctl disable --now wg-quick@${remote_interface}.service >/dev/null 2>&1 || true; rm -f /etc/wireguard/${remote_interface}.conf ${REMOTE_VPN_DIR}/${remote_interface}.env ${REMOTE_VPN_DIR}/${remote_interface}.json'" >/dev/null 2>&1 || true
+  gcloud_ssh "sudo bash -lc 'timeout 20 wg-quick down ${remote_interface} >/dev/null 2>&1 || true; rm -f /etc/wireguard/${remote_interface}.conf ${REMOTE_VPN_DIR}/${remote_interface}.env ${REMOTE_VPN_DIR}/${remote_interface}.json'" >/dev/null 2>&1 || true
   rm -f "${local_config}" "${local_nat_script}" "${state_file}"
   rmdir "$(dirname "${state_file}")" >/dev/null 2>&1 || true
   echo "VPN ${vpn_name} removed."
