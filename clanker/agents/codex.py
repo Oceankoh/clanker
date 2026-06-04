@@ -54,7 +54,9 @@ class CodexBackend(AgentBackend):
         # because OPENAI_API_KEY happens to be exported in the operator's shell
         # (that would silently skip the session sync the bash path always did).
         if not no_sync:
-            codex_home = Path(str(settings.get("codex_home", default=str(Path.home() / ".codex"))))
+            # expanduser so a `~/.codex` from .env/env resolves (the .env parser
+            # keeps the literal tilde; bash would expand it but Python won't)
+            codex_home = Path(str(settings.get("codex_home", default=str(Path.home() / ".codex")))).expanduser()
             local_files: list[LocalAuthFile] = []
             for rel in ("auth.json", "installation_id"):
                 src = codex_home / rel

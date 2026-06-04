@@ -83,5 +83,22 @@ class StageAgent(unittest.TestCase):
             self.assertEqual(rc, 3)  # AUTH_REQUIRED
 
 
+class CodexHomeTilde(unittest.TestCase):
+    """Regression: CTFVM_CODEX_HOME=~/.codex must expand (the .env parser keeps
+    the literal tilde; without expanduser codex reads as unauthenticated)."""
+
+    def test_tilde_codex_home_is_expanded(self):
+        from clanker.agents import build_agent_backend
+        with TemporaryDirectory() as home, patch.dict(os.environ, {"HOME": home}, clear=False):
+            os.environ.pop("OPENAI_API_KEY", None)
+            cdir = Path(home) / ".codex"
+            cdir.mkdir()
+            (cdir / "auth.json").write_text("{}")
+            s = Settings(root=Path(home), cli={"codex_home": "~/.codex"})
+            am = build_agent_backend("codex").materialize_auth(s)
+            self.assertTrue(am.authenticated)
+            self.assertIn(".codex/auth.json", [f.remote_relpath for f in am.local_files])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
