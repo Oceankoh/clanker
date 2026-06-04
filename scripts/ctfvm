@@ -1412,6 +1412,27 @@ vpn_sudo_prefix() {
   fi
 }
 
+# `wg-quick` requires bash 4+, but macOS ships bash 3.2 as /bin/bash and sudo
+# resets PATH, so wg-quick's `#!/usr/bin/env bash` shebang resolves to the old
+# one ("Version mismatch: bash 3 detected"). Echo the argv to invoke wg-quick
+# with a bash 4+ interpreter explicitly (no-op on Linux / where bash is modern).
+vpn_wgquick_cmd() {
+  local wgq b
+  wgq="$(command -v wg-quick 2>/dev/null || true)"
+  if [[ -z "${wgq}" || "$(uname -s)" != "Darwin" ]]; then
+    printf '%s' "wg-quick"
+    return
+  fi
+  for b in "$(command -v bash 2>/dev/null)" /opt/homebrew/bin/bash /usr/local/bin/bash; do
+    [[ -x "${b}" ]] || continue
+    if [[ "$("${b}" -c 'printf %s "${BASH_VERSINFO[0]}"' 2>/dev/null)" -ge 4 ]] 2>/dev/null; then
+      printf '%s %s' "${b}" "${wgq}"
+      return
+    fi
+  done
+  printf '%s' "${wgq}"
+}
+
 vpn_write_local_nat_script() {
   local script_file="$1"
   local cidrs_csv="$2"
@@ -1699,7 +1720,7 @@ vpn_up_loaded() {
   fi
 
   echo "Starting local WireGuard interface ${local_interface}..."
-  if ! ${sudo_cmd} wg-quick up "${local_config}"; then
+  if ! ${sudo_cmd} $(vpn_wgquick_cmd) up "${local_config}"; then
     gcloud_ssh "sudo bash -lc 'timeout 20 wg-quick down ${remote_interface} >/dev/null 2>&1 || true; rm -f /etc/wireguard/${remote_interface}.conf ${REMOTE_VPN_DIR}/${remote_interface}.env ${REMOTE_VPN_DIR}/${remote_interface}.json'" >/dev/null 2>&1 || true
     rm -rf "${stage_dir}"
     return 1
@@ -1866,9 +1887,9 @@ cmd_vpn_down() {
   local_nat_script="$(jq -r '.local_nat_script' "${state_file}")"
 
   if [[ -f "${local_config}" ]]; then
-    sudo wg-quick down "${local_config}" >/dev/null 2>&1 || true
+    sudo $(vpn_wgquick_cmd) down "${local_config}" >/dev/null 2>&1 || true
   elif [[ -n "${local_interface}" ]]; then
-    sudo wg-quick down "${local_interface}" >/dev/null 2>&1 || true
+    sudo $(vpn_wgquick_cmd) down "${local_interface}" >/dev/null 2>&1 || true
   fi
   if [[ -x "${local_nat_script}" ]]; then
     sudo "${local_nat_script}" down "${local_interface}" >/dev/null 2>&1 || true
@@ -3891,9 +3912,9 @@ cmd_destroy() {
         local_nat_script="$(json_get_from_file local_nat_script "${f}" || true)"
         if command -v sudo >/dev/null 2>&1; then
           if [[ -f "${local_config}" ]]; then
-            sudo wg-quick down "${local_config}" >/dev/null 2>&1 || true
+            sudo $(vpn_wgquick_cmd) down "${local_config}" >/dev/null 2>&1 || true
           elif [[ -n "${local_interface}" ]]; then
-            sudo wg-quick down "${local_interface}" >/dev/null 2>&1 || true
+            sudo $(vpn_wgquick_cmd) down "${local_interface}" >/dev/null 2>&1 || true
           fi
           if [[ -x "${local_nat_script}" ]]; then
             sudo "${local_nat_script}" down "${local_interface}" >/dev/null 2>&1 || true
