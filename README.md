@@ -5,7 +5,8 @@ a CTF challenge, and watch/steer it from a local web UI — then throw the VM aw
 
 - Pluggable **cloud providers** (GCP, DigitalOcean) and **agent backends** (Codex, Claude Code).
 - A small HTTP **control plane** on each VM — no SSH on the hot path.
-- A web UI with a live **chat transcript**, steer-vs-queue input, and artifact browsing.
+- A web UI with a live **chat transcript**, steering (any pane/subagent), per-run **VPN status**, and
+  artifact browsing.
 
 > **Two commands, one system.** It's a strangler migration: the two CLIs share the same `.ctfvm/`
 > state, config, and agent/provider abstractions — they just split by job. Use whichever the table
@@ -13,7 +14,7 @@ a CTF challenge, and watch/steer it from a local web UI — then throw the VM aw
 >
 > | Job | Command |
 > |-----|---------|
-> | Spin up / tear down a VM, break-glass `attach`/`shell`, build/push images | `./scripts/ctfvm` (bash) |
+> | Spin up / tear down a VM, VPN, break-glass `attach`/`shell`, build/push images | `./scripts/ctfvm` (bash) |
 > | Watch / steer, web UI, config, auth, agents, fanout, fetch results | `python -m clanker` (Python) |
 >
 > Full details: [docs/REFACTOR_PLAN.md](docs/REFACTOR_PLAN.md).
@@ -62,8 +63,10 @@ python -m clanker status --run-id <id>  # one run's status
 ```
 
 In the UI: **Transcript** is the default tab (the agent's real chat — messages, tool calls, results).
-The steer box defaults to **Queue** (appends to the inject queue; the agent reads it at a safe point);
-flip to **Send now** to type into the live pane. Enter sends, Shift+Enter is a newline.
+The **Panes** tab has a steer box that types into the selected target — the supervisor or any subagent
+(Enter sends, Shift+Enter is a newline); if the agent is mid-turn its own CLI queues your message.
+Buttons cover Ctrl-C / Trust / Approve / Deny; the header has mark-solved/blocked, artifact
+preview/download, and a per-run **VPN status** chip.
 
 ## 4. Get results / tear down
 
@@ -76,6 +79,17 @@ python -m clanker cleanup-state --prune-non-running # tidy local state files
 ---
 
 ## Recipes
+
+**Verify the whole pipeline end-to-end** (provision → solve → teardown, on a real VM):
+
+```bash
+scripts/smoke.sh --agent claude-code --dir examples/smoke-challenges/01-strings
+scripts/smoke.sh --agent codex       --dir examples/smoke-challenges/04-hidden   # flag in a dotfile
+```
+
+Runs the agent on a committed sample challenge, asserts the expected flag lands in findings, then
+**auto-destroys** the VM. Costs a few cents / a few minutes. Good first check that auth + image +
+provisioning all work. Sample challenges live in [`examples/smoke-challenges/`](examples/smoke-challenges/).
 
 **Fan out a folder of challenges — one VM each** (each immediate subfolder is a challenge):
 
@@ -98,8 +112,13 @@ python -m clanker agents
 python -m clanker auth claude --name alice                 # alice's Claude sub
 python -m clanker auth codex  --name bob --api-key sk-...   # bob's Codex account
 python -m clanker config profiles
-# (per-run account selection lands with the start port; usable now via `stage-agent --account`)
+# pick the profile per run: the UI spawn form's "Account / profile" field,
+# or  ./scripts/ctfvm start --account alice --dir ./challenge
 ```
+
+> Codex note: a `codex login` subscription token is short-lived and **rotates** — copying it to a VM
+> works but can expire mid-run, and one subscription can't safely fan out across many concurrent VMs.
+> For unattended/parallel Codex, an `--api-key` profile (`OPENAI_API_KEY`, doesn't rotate) is sturdier.
 
 **Reach a LAN / internal challenge network from the agent's VM (WireGuard VPN):**
 
