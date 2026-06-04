@@ -21,11 +21,11 @@ asserts the expected flag lands in findings/the agent pane, then **destroys the 
 exit, even on failure):
 
 ```bash
-scripts/smoke.sh --agent claude-code --dir .ctf-work/smoke-challenges/01-strings
-scripts/smoke.sh --agent codex       --dir .ctf-work/smoke-challenges/04-hidden   # needs codex auth
+scripts/smoke.sh --agent claude-code --dir examples/smoke-challenges/01-strings
+scripts/smoke.sh --agent codex       --dir examples/smoke-challenges/04-hidden   # needs codex auth
 ```
 
-- Challenge fixtures live in [`.ctf-work/smoke-challenges/`](../.ctf-work/smoke-challenges/) (committed):
+- Challenge fixtures live in [`examples/smoke-challenges/`](../examples/smoke-challenges/) (committed):
   `01-strings`, `02-base64`, `03-caesar`, and `04-hidden` (flag in a **dotfile**, which verifies hidden
   files upload intact). Expected flags are in `EXPECTED.tsv` at the folder root (never uploaded, so the
   agent can't cheat).
@@ -64,14 +64,14 @@ status, transcript, and the BUGS.md regressions the harness doesn't touch).
 - ☐ **Claude Code** auth materialized locally (no credential copying):
   `clanker auth claude` → runs `claude setup-token`, stores the 1-year token. (AGENTS.md §2.2)
 - ☐ A small, known-solvable **practice challenge** dir — the committed set lives in
-  `./.ctf-work/smoke-challenges/` (each subfolder solves in well under a minute).
+  `./examples/smoke-challenges/` (each subfolder solves in well under a minute).
 
 Set per-cell variables to keep the steps copy-pasteable:
 
 ```bash
 export SMOKE_PROVIDER=digitalocean   # or gcp
 export SMOKE_AGENT=claude-code       # or codex
-export SMOKE_DIR=./.ctf-work/smoke-challenges/01-strings
+export SMOKE_DIR=./examples/smoke-challenges/01-strings
 export SMOKE_DESC="smoke test"
 ```
 

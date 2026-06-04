@@ -4,8 +4,8 @@
 # VM. This is the repeatable version of a manual smoke run — it spends a few
 # cents and a few minutes, so it is opt-in (not part of `tests/`).
 #
-#   scripts/smoke.sh --agent claude-code --dir .ctf-work/smoke-challenges/01-strings
-#   scripts/smoke.sh --agent codex       --dir .ctf-work/smoke-challenges/04-hidden
+#   scripts/smoke.sh --agent claude-code --dir examples/smoke-challenges/01-strings
+#   scripts/smoke.sh --agent codex       --dir examples/smoke-challenges/04-hidden
 #
 # Needs: a cloud CLI authed (doctl/gcloud) + the chosen agent authed
 # (`python3 -m clanker auth ...` / `codex login`). Builds a local toolbox image
@@ -16,7 +16,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 AGENT="claude-code"
-DIR="${REPO_ROOT}/.ctf-work/smoke-challenges/01-strings"
+DIR="${REPO_ROOT}/examples/smoke-challenges/01-strings"
 FLAG=""
 SIZE="s-2vcpu-4gb"
 PROVIDER=""

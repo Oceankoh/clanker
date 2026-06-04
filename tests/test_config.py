@@ -139,6 +139,17 @@ class SpawnDefaults(unittest.TestCase):
         self.assertIn("--use-local-image", cmd)
         self.assertNotIn("--use-local-image", UiService._build_start_cmd({"challenge_dir": "/x"}))
 
+    def test_flag_format_folds_into_desc(self):
+        cmd = UiService._build_start_cmd({"challenge_dir": "/x", "description": "heap uaf",
+                                          "flag_format": "flag{...}"})
+        self.assertIn("--desc", cmd)
+        desc = cmd[cmd.index("--desc") + 1]
+        self.assertIn("heap uaf", desc)
+        self.assertIn("Expected flag format: flag{...}", desc)
+        # flag format alone (no description) still produces a desc
+        cmd2 = UiService._build_start_cmd({"challenge_dir": "/x", "flag_format": "CTF{x}"})
+        self.assertEqual(cmd2[cmd2.index("--desc") + 1], "Expected flag format: CTF{x}")
+
     def test_account_profile_flag(self):
         cmd = UiService._build_start_cmd({"challenge_dir": "/x", "agent_backend": "claude-code",
                                           "account": "alice"})

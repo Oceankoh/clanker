@@ -309,6 +309,13 @@ class UiService:
                 if resolved not in (None, ""):
                     spec[key] = resolved
 
+        # flag format folds into the description (which becomes the agent prompt),
+        # so the agent knows the shape of what it's hunting for.
+        flag_format = str(spec.get("flag_format") or "").strip()
+        if flag_format:
+            desc = str(spec.get("description") or "").strip()
+            spec["description"] = (f"{desc}\n\n" if desc else "") + f"Expected flag format: {flag_format}"
+
         cmd = [str(ROOT / "scripts" / "ctfvm"), "start", "--dir", challenge_dir]
         flag_map = {
             "provider": "--provider", "agent_backend": "--agent", "zone": "--zone",

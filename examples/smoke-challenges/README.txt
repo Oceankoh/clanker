@@ -14,6 +14,6 @@ challenge subdir, so it is never uploaded to the VM — the agent can't cheat).
 
 Run one challenge end-to-end against a real VM (provision -> solve -> destroy):
 
-  scripts/smoke.sh --agent claude-code --dir .ctf-work/smoke-challenges/01-strings
+  scripts/smoke.sh --agent claude-code --dir examples/smoke-challenges/01-strings
 
 Fan the whole folder out from the UI: "+ New run" -> tick "deploy folder".

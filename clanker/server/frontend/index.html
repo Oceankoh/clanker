@@ -153,6 +153,7 @@ function prefillSpawn(){
   set('#sp-agent','agent_backend'); set('#sp-model','model'); set('#sp-provider','provider');
   set('#sp-zone','gcp_zone'); set('#sp-project','gcp_project'); set('#sp-machine','gcp_machine_type');
   set('#sp-region','do_region'); set('#sp-size','do_size_slug');
+  try{ const ff=$('#sp-flagfmt'); if(ff) ff.value=localStorage.getItem('clanker.flag_format')||''; }catch(e){}
   set('#sp-variant','toolbox_variant'); set('#sp-timeout','timeout_min');
   providerFields();
 }
@@ -179,6 +180,8 @@ function showSpawn(){
       <div><label>Account / profile</label><select id="sp-account"><option value="">(default credentials)</option>${propts}</select></div>
       <div style="grid-column:span 2"><div class="hint" style="margin-top:28px">Profiles are created with <code>clanker auth codex/claude --name &lt;who&gt;</code>; pick one to run as that subscription.</div></div>
     </div>
+    <label>Flag format <span class="hint">(optional — folded into the prompt so the agent knows the shape; remembered for next time)</span></label>
+    <input type="text" id="sp-flagfmt" placeholder="e.g. flag{...}  or  CTF{[0-9a-f]+}">
     <label>Description</label>
     <textarea id="sp-desc" rows="2" placeholder="what the challenge is (defaults to description.txt in the folder)"></textarea>
     <label>Ideas / hints</label>
@@ -240,6 +243,8 @@ async function submitSpawn(){
   const prov=$('#sp-provider').value;
   put('provider',prov); put('agent_backend',$('#sp-agent').value);
   put('model',$('#sp-model').value); put('account',$('#sp-account').value);
+  put('flag_format',$('#sp-flagfmt').value);
+  try{ localStorage.setItem('clanker.flag_format', $('#sp-flagfmt').value.trim()); }catch(e){}
   put('description',$('#sp-desc').value); put('ideas',$('#sp-ideas').value);
   if(prov==='digitalocean'){ put('zone',$('#sp-region').value); put('size_slug',$('#sp-size').value); }
   else if(prov==='gcp'){ put('zone',$('#sp-zone').value); put('project',$('#sp-project').value); put('machine_type',$('#sp-machine').value); }
