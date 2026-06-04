@@ -113,8 +113,11 @@ web UI or over ngrok — the UI shows status + the exact command instead.
 # one-time: WireGuard tools (macOS also needs bash 4+, both via Homebrew)
 brew install wireguard-tools bash
 
-# provision without VPN (UI spawns default to --no-vpn for this reason), then bring it up locally:
-./scripts/ctfvm vpn --run-id <id> up        # run in a real terminal; prompts for sudo
+# VPN is on by default (CTFVM_VPN). A CLI start from a terminal auto-brings-up the tunnel;
+# a UI/non-interactive spawn defers it (no tty for sudo) and the UI shows the command. Bring up
+# the tunnel(s) locally:
+./scripts/ctfvm vpn up                      # ALL active runs, one sudo session  (← typical)
+./scripts/ctfvm vpn --run-id <id> up        # just one run
 ./scripts/ctfvm vpn --run-id <id> status    # or 'down'
 ```
 

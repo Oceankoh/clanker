@@ -1920,12 +1920,41 @@ cmd_vpn_list() {
   done
 }
 
+# `ctfvm vpn up` with no selector: bring the tunnel up for EVERY active run,
+# reusing a single sudo session (one password prompt for all of them).
+cmd_vpn_up_all() {
+  local rid total=0 ok=0 run_ids
+  run_ids="$( { for f in "${RUNS_DIR}"/*.json; do [[ -e "${f}" ]] && json_get_from_file run_id "${f}" 2>/dev/null; done; } | sort -u | grep -E '^[0-9]{8}-[0-9]{6}$' || true)"
+  if [[ -z "${run_ids}" ]]; then
+    echo "No runs found. Start one with: ctfvm start --dir <challenge-folder>" >&2
+    exit 1
+  fi
+  # prime the sudo timestamp once so each tunnel doesn't re-prompt for a password
+  if [[ -t 0 ]]; then sudo -v 2>/dev/null || true; fi
+  while IFS= read -r rid; do
+    [[ -n "${rid}" ]] || continue
+    total=$((total + 1))
+    echo ""
+    echo "=== VPN up: ${rid} ==="
+    # subshell so a per-run failure (or exit) doesn't abort the loop, and the
+    # selector globals don't leak between runs
+    if ( SEL_PICK=0; SEL_RUN_ID="${rid}"; SEL_INSTANCE=""; SEL_IP=""; SEL_ZONE=""; SEL_PROJECT=""; SEL_PROVIDER=""; cmd_vpn_up "$@" ); then
+      ok=$((ok + 1))
+    else
+      echo "  ${rid}: skipped or failed (continuing)" >&2
+    fi
+  done <<< "${run_ids}"
+  echo ""
+  echo "VPN bring-up: ${ok}/${total} run(s) up."
+}
+
 cmd_vpn() {
   parse_selector_args "$@"
   set -- ${PARSED_SELECTOR_ARGS[@]+"${PARSED_SELECTOR_ARGS[@]}"}
 
   if [[ $# -lt 1 ]]; then
     echo "Usage: ctfvm vpn [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--provider gcp|digitalocean --zone <zone-or-region> --project <project>]] <up|status|down|list> [args...]" >&2
+    echo "  'vpn up' with no selector brings the tunnel up for ALL active runs (one sudo session)." >&2
     exit 1
   fi
 
@@ -1933,7 +1962,12 @@ cmd_vpn() {
   shift
   case "${subcmd}" in
     up)
-      cmd_vpn_up "$@" ;;
+      # no selector -> every active run; with a selector -> just that one
+      if [[ "${SEL_PICK}" == "0" && -z "${SEL_RUN_ID}${SEL_INSTANCE}${SEL_IP}" ]]; then
+        cmd_vpn_up_all "$@"
+      else
+        cmd_vpn_up "$@"
+      fi ;;
     status)
       cmd_vpn_status "$@" ;;
     down)
