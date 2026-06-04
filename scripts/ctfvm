@@ -2923,18 +2923,30 @@ PROMPT
   write_state "${provider}" "${instance}" "${ZONE}" "${project}" "${machine_type}" "${run_id}" "$(cd "${challenge_dir}" && pwd)" "${timeout_min}" "" "${auth_sync}" "${no_auth_sync}" "${ip}" "${boot_image}" "${boot_image_family}" "${boot_image_project}" "${toolbox_image_ref}" "${toolbox_image_source}" "${CONTROL_SCHEME}" "${CONTROL_HOST:-${ip}}" "${CONTROL_PORT}" "${CONTROL_USER}" "${CONTROL_PASSWORD}"
 
   if [[ "${auto_vpn}" == "1" ]]; then
-    local vpn_cidrs_file vpn_name
-    vpn_status="failed"
-    vpn_cidrs_file="$(mktemp)"
-    vpn_name="$(vpn_default_name)"
-    echo "Starting automated local-network VPN (${vpn_name})..."
-    if vpn_split_cidrs "${vpn_cidrs_raw}" "${vpn_cidrs_file}" && vpn_up_loaded "${vpn_name}" "${vpn_port}" "${vpn_cidrs_file}" "${vpn_nat}"; then
-      vpn_status="enabled"
+    # The local tunnel bring-up (wg-quick + pfctl) needs interactive sudo on the
+    # machine that's on the LAN. Run non-interactively (the web UI's spawn job,
+    # CI, ...) there's no tty to prompt on, so DEFER it cleanly instead of
+    # failing: the VM provisions and the operator brings the tunnel up locally
+    # (the UI shows the exact command). VPN stays the default — only the
+    # privileged local step is deferred.
+    if [[ ! -t 0 ]]; then
+      vpn_status="deferred"
+      echo "VPN is enabled but its local bring-up needs a terminal (sudo). After provisioning, run:"
+      echo "  ${SCRIPT_DIR}/ctfvm vpn --run-id ${run_id} up"
     else
-      echo "VPN setup failed. The VM is running, but agents may not reach local-network challenges until you fix the issue and run:" >&2
-      echo "  ${SCRIPT_DIR}/ctfvm vpn --run-id ${run_id} up" >&2
+      local vpn_cidrs_file vpn_name
+      vpn_status="failed"
+      vpn_cidrs_file="$(mktemp)"
+      vpn_name="$(vpn_default_name)"
+      echo "Starting automated local-network VPN (${vpn_name})..."
+      if vpn_split_cidrs "${vpn_cidrs_raw}" "${vpn_cidrs_file}" && vpn_up_loaded "${vpn_name}" "${vpn_port}" "${vpn_cidrs_file}" "${vpn_nat}"; then
+        vpn_status="enabled"
+      else
+        echo "VPN setup failed. The VM is running, but agents may not reach local-network challenges until you fix the issue and run:" >&2
+        echo "  ${SCRIPT_DIR}/ctfvm vpn --run-id ${run_id} up" >&2
+      fi
+      rm -f "${vpn_cidrs_file}"
     fi
-    rm -f "${vpn_cidrs_file}"
   fi
 
   echo "Launching tmux supervisor..."

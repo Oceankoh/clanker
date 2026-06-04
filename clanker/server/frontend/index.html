@@ -201,7 +201,7 @@ function showSpawn(){
       <div><label>Toolbox variant</label><input type="text" id="sp-variant" placeholder="(default)"></div>
       <div><label>Timeout (min)</label><input type="text" id="sp-timeout" placeholder="(default)"></div>
     </div>
-    <label class="chk"><input type="checkbox" id="sp-novpn" checked> --no-vpn (recommended from the UI — bring the VPN up afterward as a local step: <code>ctfvm vpn --run-id &lt;id&gt; up</code>)</label>
+    <label class="chk"><input type="checkbox" id="sp-novpn"> --no-vpn (skip VPN for this run; otherwise it follows <code>CTFVM_VPN</code>. The tunnel is always brought up afterward as a local step: <code>ctfvm vpn --run-id &lt;id&gt; up</code>)</label>
     <label class="chk"><input type="checkbox" id="sp-noauthsync"> skip Codex session sync — use API key / profile creds instead (--no-auth-sync)</label>
     <label class="chk"><input type="checkbox" id="sp-uselocal"> use local toolbox image archive (--use-local-image; tick this if you built one with <code>ctfvm image build-local</code> and haven't pushed to a registry)</label>
     <div class="row" style="margin-top:14px"><button class="primary" onclick="submitSpawn()">Spawn</button>
