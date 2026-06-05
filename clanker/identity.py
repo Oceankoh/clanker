@@ -118,10 +118,15 @@ def run_identity_keys(run: dict | None) -> list[str]:
         keys.append(f"ip:{provider}|{project}|{zone}|{ip}")
     elif ip:
         keys.append(f"ip:{provider}|{ip}")
-    if project and zone and instance:
-        keys.append(f"inst:{provider}|{project}|{zone}|{instance}")
-    elif instance:
+    if instance:
+        # Always emit the provider-qualified instance key so a local record that
+        # lacks zone/project (e.g. a DO run mid-provision, before the region is
+        # filled in) still dedups against the discovered record that has them.
+        # Instance names are globally unique (ctfvm-<slug>-<timestamp>), so this
+        # can never merge two distinct runs. The zone-qualified key is kept too.
         keys.append(f"inst:{provider}|{instance}")
+        if project and zone:
+            keys.append(f"inst:{provider}|{project}|{zone}|{instance}")
     if run_id and not instance:
         keys.append(f"run:{provider}|{run_id}")
     return keys

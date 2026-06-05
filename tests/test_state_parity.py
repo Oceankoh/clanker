@@ -147,6 +147,27 @@ class RunRegistryBehavior(unittest.TestCase):
             self.assertEqual(len(listings), 1)
             self.assertEqual(listings[0].record.challenge_name, "01-strings")
 
+    def test_dedup_when_local_record_lacks_zone(self):
+        # a DO run mid-provision has zone='' locally but zone set in discovery;
+        # they must still dedup to ONE listing (else the run shows twice).
+        with TemporaryDirectory() as tmp:
+            runs_dir = Path(tmp) / "runs"
+            runs_dir.mkdir(parents=True)
+            (runs_dir / "r.json").write_text(json.dumps({
+                "provider": "digitalocean", "run_id": "20260605-070004",
+                "instance": "ctfvm-web-local-20260605-070004", "zone": "",  # not filled yet
+                "project": "digitalocean", "ip": "188.166.186.243",
+                "challenge_name": "lab-challenges-web-local-2",
+            }))
+            disc = RunRecord(provider="digitalocean", run_id="20260605-070004",
+                             instance="ctfvm-web-local-20260605-070004", zone="sgp1",
+                             project="digitalocean", ip="188.166.186.243")
+            reg = RunRegistry(runs_dir=runs_dir, state_file=runs_dir / "none.json",
+                              discover=lambda force: [disc])
+            listings, _ = reg.list_runs()
+            self.assertEqual(len(listings), 1, [l.record.instance for l in listings])
+            self.assertEqual(listings[0].record.challenge_name, "lab-challenges-web-local-2")
+
 
 # --- parity vs the legacy service (skipped if it can't be imported) ---------
 
