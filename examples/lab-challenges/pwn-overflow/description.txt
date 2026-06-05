@@ -1,0 +1,10 @@
+`vuln` is a 64-bit Linux binary that reads attacker input into an undersized
+stack buffer — a classic stack buffer overflow. It contains a function win()
+that prints the flag, but nothing ever calls it.
+
+Overflow the buffer, overwrite the saved return address, and redirect execution
+into win() to make it print the flag (format flag{...}).
+
+The binary is compiled with no PIE and no stack canary. The flag is not stored
+in plaintext, so `strings` won't help — you actually have to drive execution
+into win() (or read it out at runtime with the debugger).
