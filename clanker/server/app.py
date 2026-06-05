@@ -182,7 +182,13 @@ class App:
             force_discovery=_bool(query, "force_discovery"),
             only_live=_bool(query, "only_live"),
         )
-        return ok({"runs": [serialize.run_listing(l) for l in listings], "current_run_id": current})
+        runs = []
+        for l in listings:
+            d = serialize.run_listing(l)
+            # instant pills: last-known challenge_state from the server cache
+            d["challenge_state"] = serialize.challenge_state(self.s.cached_challenge_state(l.record.run_id))
+            runs.append(d)
+        return ok({"runs": runs, "current_run_id": current})
 
     def _snapshot(self, m, query, _b):
         snap = self.s.snapshot(m.group(1), include_artifacts=_bool(query, "include_artifacts", True),

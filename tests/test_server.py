@@ -550,6 +550,19 @@ class RunNaming(unittest.TestCase):
         self.assertEqual(specs[0]["name"], "01-strings")
 
 
+class ChallengeStateCache(unittest.TestCase):
+    """snapshot() caches challenge_state so /runs can render pills with no
+    per-run control-plane call."""
+    def test_snapshot_populates_cache(self):
+        with TemporaryDirectory() as runs:
+            service = _make_service(Path(runs))
+            self.assertIsNone(service.cached_challenge_state("20250101-000000"))
+            service.snapshot("20250101-000000")
+            cs = service.cached_challenge_state("20250101-000000")
+            self.assertIsNotNone(cs)
+            self.assertEqual(cs.state, "progressing")
+
+
 class ProvisioningRelabel(unittest.TestCase):
     """A still-starting run reads as Stopped/Halted from derive_challenge_state;
     while young (or a job is still working it) it should show Provisioning."""

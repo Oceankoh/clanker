@@ -47,6 +47,9 @@ class UiService:
         # injectable so tests can supply a fake control client
         self._client_factory = client_factory or ControlPlaneClient.from_run
         self._started = time.time()
+        # last-known challenge_state per run, so the sidebar (/runs) can render
+        # every pill instantly without a control-plane round trip per run.
+        self._cs_cache: dict[str, "ChallengeState"] = {}
 
     # --- health / runs -----------------------------------------------------
     def health(self) -> dict:
@@ -94,12 +97,22 @@ class UiService:
                 )
                 for j in self.jobs.for_run(record.run_id)
             ]
-            return self._relabel_if_provisioning(snap, record)
+            return self._cache_cs(record, self._relabel_if_provisioning(snap, record))
         snap = snapshot_mod.fetch_snapshot(
             client, record, include_artifacts=include_artifacts, runtime_status=runtime_status,
         )
         snap.subagents = self._subagents_from_snapshot(snap)
-        return self._relabel_if_provisioning(snap, record)
+        return self._cache_cs(record, self._relabel_if_provisioning(snap, record))
+
+    def _cache_cs(self, record: RunRecord, snap):
+        if snap.challenge_state and record.run_id:
+            self._cs_cache[record.run_id] = snap.challenge_state
+        return snap
+
+    def cached_challenge_state(self, run_id: str):
+        """Last-known challenge_state for a run (or None) — no control-plane call.
+        Powers the instant sidebar pills in /runs."""
+        return self._cs_cache.get(run_id)
 
     # A run that's still coming up (no control plane yet, or control plane up but
     # the agent/tmux not launched) otherwise derives to "Stopped"/"Halted" — both

@@ -97,6 +97,12 @@ async function api(path, opts){
   if(!j.ok) throw new Error(j.error||('error '+r.status));
   return j.data;
 }
+// api() with a hard timeout — for background polls, so a slow/unreachable run
+// aborts quickly instead of stalling the poll cycle.
+async function apiTimed(path, ms){
+  const ac = new AbortController(); const t = setTimeout(()=>ac.abort(), ms);
+  try{ return await api(path, {signal:ac.signal}); } finally{ clearTimeout(t); }
+}
 function statePill(cs){
   if(!cs) return '';
   return `<span class="pill s-${cs.state}">${cs.label||cs.state}</span>`;
@@ -131,28 +137,30 @@ function renderFleet(){
   }).join('') || '<div class="muted" style="padding:16px">no runs</div>';
   $('#fleet').innerHTML = html;
 }
-// Continuous round-robin poller: refresh ONE run's status per tick (not all at
-// once), so the sidebar uses minimal bandwidth and stays current. Cached
-// statuses render instantly; each run shows when it was last updated. The
-// focused run is skipped here — its own refresh keeps it fresher.
-const FLEET_POLL_MS = 2000;
-let _pollTimer = null, _pollIdx = 0;
+// Fleet status poller: each cycle refreshes all non-focused runs in PARALLEL
+// (not one-at-a-time), each with a hard timeout, so a slow/unreachable run
+// can't stall the others. Pills render instantly from /runs' cached state; this
+// just keeps them fresh + stamps "updated Ns ago". The focused run is skipped —
+// its own refresh keeps it fresher.
+const FLEET_POLL_MS = 4000, POLL_TIMEOUT_MS = 8000;
+let _pollTimer = null;
 async function pollFleetTick(){
   const runs = STATE.runs.filter(r=>r.run_id!==STATE.current);
-  if(runs.length){
-    if(_pollIdx >= runs.length) _pollIdx = 0;
-    const r = runs[_pollIdx++];
+  await Promise.allSettled(runs.map(async r=>{
     try{
-      const s = await api('/runs/'+encodeURIComponent(r.run_id)+'?include_artifacts=false');
+      const s = await apiTimed('/runs/'+encodeURIComponent(r.run_id)+'?include_artifacts=false', POLL_TIMEOUT_MS);
       if(s.challenge_state){ STATE.statusByRun[r.run_id]=s.challenge_state; }
-    }catch(e){ /* run may be off/unreachable — keep last cached pill */ }
+    }catch(e){ /* timed out / unreachable — keep last cached pill */ }
     STATE.updatedAt[r.run_id]=Date.now();
-    renderFleet();
-  }
+  }));
+  renderFleet();
   _pollTimer = setTimeout(pollFleetTick, FLEET_POLL_MS);
 }
 function startFleetPoll(){ if(_pollTimer===null){ _pollTimer=0; pollFleetTick(); } }
-async function selectRun(id){ STATE.current=id; renderFleet(); await refreshFocus(); }
+async function selectRun(id){
+  STATE.current=id; STATE.snap=null;  // drop the previous run's snapshot so refreshFocus does a FULL render
+  renderFleet(); await refreshFocus();
+}
 
 let AGENTS = [];
 let PROFILES = [];
