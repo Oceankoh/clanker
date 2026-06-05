@@ -629,6 +629,17 @@ class ProvisioningRelabel(unittest.TestCase):
         out = self._svc()._relabel_if_provisioning(snap, rec)
         self.assertEqual(out.challenge_state.state, "progressing")
 
+    def test_young_halted_with_panes_stays_halted(self):
+        # agent launched (tmux pane exists) then died/dropped to a shell -> real
+        # halt, must NOT be masked as Provisioning even while young.
+        from clanker.models import PaneSnapshot
+        from clanker.server.service import _iso_now
+        snap, rec = self._snap("halted", "20260605-125306", started_at=_iso_now())
+        snap.panes = [PaneSnapshot(session="ctf", window_index=0, window_name="supervisor",
+                                   active=True, target="ctf:0", output="claude CLI not found")]
+        out = self._svc()._relabel_if_provisioning(snap, rec)
+        self.assertEqual(out.challenge_state.state, "halted")
+
     def test_failed_job_surfaces_error_not_provisioning(self):
         # a young run whose spawn job ERRORED must show Failed + the reason,
         # not an eternal "Provisioning".

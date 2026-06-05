@@ -127,6 +127,11 @@ class UiService:
         cs = snap.challenge_state
         if not cs or cs.state not in ("stopped", "halted"):
             return snap  # solved/blocked/progressing/stalled are accurate as-is
+        if snap.panes:
+            # The agent's tmux is already up (it launched, then exited or dropped
+            # to a shell). That's a real halt, not "still provisioning" — don't
+            # mask it, even while the run is young.
+            return snap
         jobs = self.jobs.for_run(record.run_id)
         if any(j.state in ("queued", "running") for j in jobs):
             snap.challenge_state = self._provisioning_cs(cs)
