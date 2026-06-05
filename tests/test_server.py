@@ -593,6 +593,23 @@ class ProvisioningRelabel(unittest.TestCase):
         out = self._svc()._relabel_if_provisioning(snap, rec)
         self.assertEqual(out.challenge_state.state, "progressing")
 
+    def test_failed_job_surfaces_error_not_provisioning(self):
+        # a young run whose spawn job ERRORED must show Failed + the reason,
+        # not an eternal "Provisioning".
+        from clanker.server.jobs import SpawnJob, SpawnJobTracker
+        from clanker.server.service import _iso_now
+        tr = SpawnJobTracker(now=lambda: "t")
+        tr._jobs = {"job-0001": SpawnJob(
+            "job-0001", state="error", run_id="20260605-125306",
+            output="Pulling toolbox image: registry.example/ctf-toolbox:lean\n"
+                   "Error: GET .../docker-credentials: 404 registry not configured for user\n")}
+        tr._order = ["job-0001"]
+        snap, rec = self._snap("halted", "20260605-125306", started_at=_iso_now())
+        out = self._svc(tr)._relabel_if_provisioning(snap, rec)
+        self.assertEqual(out.challenge_state.state, "failed")
+        self.assertIn("Provisioning failed:", out.error)
+        self.assertIn("registry not configured", out.error)
+
 
 class ProvisioningSnapshot(unittest.TestCase):
     """A run with no control plane surfaces its spawn jobs' live output instead

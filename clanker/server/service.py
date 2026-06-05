@@ -111,19 +111,39 @@ class UiService:
         cs = snap.challenge_state
         if not cs or cs.state not in ("stopped", "halted"):
             return snap  # solved/blocked/progressing/stalled are accurate as-is
-        active_job = any(
-            j.state in ("queued", "running") for j in self.jobs.for_run(record.run_id)
-        )
-        age = _run_age_seconds(record)
-        young = age is not None and age < self.PROVISION_WINDOW_SEC
-        if active_job or young:
+        jobs = self.jobs.for_run(record.run_id)
+        if any(j.state in ("queued", "running") for j in jobs):
+            snap.challenge_state = self._provisioning_cs(cs)
+            return snap
+        # A spawn job that exited with an error means `ctfvm start` FAILED (e.g.
+        # the toolbox image pull 404'd) — surface that, don't keep showing
+        # "Provisioning" until it ages out. The job output holds the reason.
+        failed = next((j for j in jobs if j.state == "error"), None)
+        if failed:
+            reason = _provision_failure_reason(failed.output)
+            snap.error = f"Provisioning failed: {reason}" if reason else (snap.error or "Provisioning failed.")
             snap.challenge_state = ChallengeState(
-                state="provisioning", label="Provisioning",
-                summary="VM is starting up — control plane and agent are not ready yet.",
+                state="failed", label="Failed",
+                summary="Provisioning failed before the agent started — see the error.",
                 last_activity_age_sec=cs.last_activity_age_sec,
                 last_activity_label=cs.last_activity_label,
             )
+            return snap
+        # No spawn job to consult (e.g. a CLI start) — fall back to age: a young
+        # unreachable run is still coming up, an old one is genuinely stopped.
+        age = _run_age_seconds(record)
+        if age is not None and age < self.PROVISION_WINDOW_SEC:
+            snap.challenge_state = self._provisioning_cs(cs)
         return snap
+
+    @staticmethod
+    def _provisioning_cs(cs) -> ChallengeState:
+        return ChallengeState(
+            state="provisioning", label="Provisioning",
+            summary="VM is starting up — control plane and agent are not ready yet.",
+            last_activity_age_sec=cs.last_activity_age_sec,
+            last_activity_label=cs.last_activity_label,
+        )
 
     @staticmethod
     def _subagents_from_snapshot(snap) -> list[Subagent]:
@@ -488,6 +508,19 @@ class UiService:
 def _iso_now() -> str:
     from datetime import datetime, timezone
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _provision_failure_reason(output: str) -> str:
+    """Pull a one-line reason out of a failed spawn job's output — the last line
+    that looks like an error, else the last non-empty line."""
+    lines = [ln.strip() for ln in (output or "").splitlines() if ln.strip()]
+    if not lines:
+        return ""
+    markers = ("error", "failed", "not configured", "denied", "no such", "not found", "timed out")
+    for ln in reversed(lines):
+        if any(m in ln.lower() for m in markers):
+            return ln[:300]
+    return lines[-1][:300]
 
 
 def _run_age_seconds(record: RunRecord):
