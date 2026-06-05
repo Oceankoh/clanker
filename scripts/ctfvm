@@ -651,7 +651,9 @@ write_state() {
   "machine_type": "$(json_escape "${machine_type}")",
   "agent_backend": "$(json_escape "${START_AGENT_BACKEND:-codex}")",
   "model": "$(json_escape "${START_AGENT_MODEL:-}")",
+  "reasoning_effort": "$(json_escape "${START_AGENT_REASONING_EFFORT:-}")",
   "run_id": "$(json_escape "${run_id}")",
+  "challenge_name": "$(json_escape "${START_CHALLENGE_NAME:-$(basename "${challenge_dir}")}")",
   "challenge_dir": "$(json_escape "${challenge_dir}")",
   "timeout_min": "$(json_escape "${timeout_min}")",
   "workers": "$(json_escape "${workers}")",
@@ -2510,6 +2512,9 @@ cmd_start() {
   local project=""
   local agent="${CTFVM_AGENT:-codex}"
   local model="${CTFVM_MODEL:-}"
+  local start_run_id=""
+  local start_name=""
+  local reasoning_effort="${CTFVM_REASONING_EFFORT:-xhigh}"
   local account=""
   local no_auth_sync="0"
   local force_remote_build="0"
@@ -2582,6 +2587,12 @@ cmd_start() {
         agent="$2"; shift 2 ;;
       --model)
         model="$2"; shift 2 ;;
+      --run-id)
+        start_run_id="$2"; shift 2 ;;
+      --name)
+        start_name="$2"; shift 2 ;;
+      --reasoning-effort)
+        reasoning_effort="$2"; shift 2 ;;
       --account)
         account="$2"; shift 2 ;;
       --no-auth-sync)
@@ -2728,7 +2739,18 @@ cmd_start() {
   local control_port control_user control_password
   local vpn_status="disabled"
   local remote_upload_dir="/tmp/ctfvm-upload"
-  run_id="$(date +%Y%m%d-%H%M%S)"
+  # A caller (the UI/server, when fanning out a folder deploy) may pin the
+  # run_id so parallel runs don't collide on the same-second timestamp; else
+  # mint one here. Must stay YYYYmmdd-HHMMSS — identity/state/selectors assume it.
+  if [[ -n "${start_run_id}" ]]; then
+    if [[ ! "${start_run_id}" =~ ^[0-9]{8}-[0-9]{6}$ ]]; then
+      echo "Invalid --run-id value: ${start_run_id} (expected YYYYmmdd-HHMMSS)" >&2
+      exit 1
+    fi
+    run_id="${start_run_id}"
+  else
+    run_id="$(date +%Y%m%d-%H%M%S)"
+  fi
   challenge_slug="$(instance_slug_from_challenge_dir "${challenge_dir}")"
   instance="ctfvm-${challenge_slug}-${run_id}"
   control_port="${DEFAULT_CONTROL_PORT}"
@@ -2880,8 +2902,31 @@ PROMPT
     ZONE="$(do_region_for_instance "${instance}")"
   fi
 
+  # Persist a recovery state file NOW — the VM exists and its control creds are
+  # known, but the rest of provisioning (control-plane wait, bootstrap, upload,
+  # image pull, container start) is long. If anything below is interrupted
+  # (e.g. the caller is killed), this early write means the run is still in
+  # local state so it can be destroyed/inspected instead of leaking. The final
+  # write_state below overwrites it with the complete record.
+  START_AGENT_BACKEND="${agent}"
+  START_AGENT_MODEL="${model}"
+  START_AGENT_REASONING_EFFORT="${reasoning_effort}"
+  # Display name: the server passes --name (folder name, parent-prefixed on
+  # collision); direct CLI use falls back to the challenge folder's basename.
+  START_CHALLENGE_NAME="${start_name:-$(basename "${challenge_dir}")}"
+  refresh_instance_ip || true
+  write_state "${provider}" "${instance}" "${ZONE}" "${project}" "${machine_type}" "${run_id}" "$(cd "${challenge_dir}" && pwd)" "${timeout_min}" "" "${auth_sync}" "${no_auth_sync}" "${IP:-}" "${boot_image}" "${boot_image_family}" "${boot_image_project}" "${toolbox_image_ref}" "${toolbox_image_source}" "${CONTROL_SCHEME}" "${CONTROL_HOST:-${IP:-}}" "${CONTROL_PORT}" "${CONTROL_USER}" "${CONTROL_PASSWORD}"
+
   echo "Waiting for VM control plane availability..."
   wait_for_control_plane
+
+  # Re-persist now that the control plane is confirmed up and the IP is known.
+  # The first recovery write (above) can land before DigitalOcean has assigned a
+  # public IP, leaving control_host empty -> the UI shows "no control-plane
+  # credentials" for the whole (long) upload/image-load phase. With the IP now
+  # set, the run is usable/selectable in the UI while the rest provisions.
+  refresh_instance_ip || true
+  write_state "${provider}" "${instance}" "${ZONE}" "${project}" "${machine_type}" "${run_id}" "$(cd "${challenge_dir}" && pwd)" "${timeout_min}" "" "${auth_sync}" "${no_auth_sync}" "${IP:-}" "${boot_image}" "${boot_image_family}" "${boot_image_project}" "${toolbox_image_ref}" "${toolbox_image_source}" "${CONTROL_SCHEME}" "${CONTROL_HOST:-${IP:-}}" "${CONTROL_PORT}" "${CONTROL_USER}" "${CONTROL_PASSWORD}"
 
   echo "Waiting for VM bootstrap readiness..."
   wait_for_remote_bootstrap
@@ -2896,10 +2941,12 @@ PROMPT
   cp -R "${REPO_ROOT}/skills" "${upload_tmp}/"
   # Unified agent flow: both codex and claude-code are materialized by
   # `clanker stage-agent` (rendered config + role files + auth + the agent/
-  # control files supervisor.sh reads). The model is chosen here at start.
-  echo "Staging ${agent} agent payload${model:+ (model: ${model})}${account:+ (profile: ${account})}..."
+  # control files supervisor.sh reads). The model + reasoning effort are chosen
+  # here at start (reasoning effort is codex-only; the claude backend ignores it).
+  echo "Staging ${agent} agent payload${model:+ (model: ${model})}${reasoning_effort:+ (effort: ${reasoning_effort})}${account:+ (profile: ${account})}..."
   local -a _stage_args=(--agent "${agent}" --staging-dir "${upload_tmp}/agentstage")
   [[ -n "${model}" ]] && _stage_args+=(--model "${model}")
+  [[ -n "${reasoning_effort}" ]] && _stage_args+=(--reasoning-effort "${reasoning_effort}")
   [[ -n "${account}" ]] && _stage_args+=(--account "${account}")
   if ! ( cd "${REPO_ROOT}" && PYTHONPATH="${REPO_ROOT}" CTFVM_NO_AUTH_SYNC="${no_auth_sync}" \
          python3 -m clanker stage-agent "${_stage_args[@]}" ); then
@@ -2954,6 +3001,7 @@ PROMPT
   # the backend (read by write_state via these globals).
   START_AGENT_BACKEND="${agent}"
   START_AGENT_MODEL="${model}"
+  START_AGENT_REASONING_EFFORT="${reasoning_effort}"
   write_state "${provider}" "${instance}" "${ZONE}" "${project}" "${machine_type}" "${run_id}" "$(cd "${challenge_dir}" && pwd)" "${timeout_min}" "" "${auth_sync}" "${no_auth_sync}" "${ip}" "${boot_image}" "${boot_image_family}" "${boot_image_project}" "${toolbox_image_ref}" "${toolbox_image_source}" "${CONTROL_SCHEME}" "${CONTROL_HOST:-${ip}}" "${CONTROL_PORT}" "${CONTROL_USER}" "${CONTROL_PASSWORD}"
 
   if [[ "${auto_vpn}" == "1" ]]; then

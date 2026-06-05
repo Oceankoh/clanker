@@ -59,6 +59,16 @@ class CodexRender(unittest.TestCase):
         # mode hardening preserved
         self.assertEqual(files[".codex/config.toml"].mode, "600")
 
+    def test_reasoning_effort_defaults_to_xhigh(self):
+        cfg = _staged(self.backend, self.spec)[".codex/config.toml"].content
+        self.assertIn('model_reasoning_effort = "xhigh"', cfg)
+
+    def test_reasoning_effort_override(self):
+        spec = self.backend.build_spec(reasoning_effort="medium")
+        cfg = _staged(self.backend, spec)[".codex/config.toml"].content
+        self.assertIn('model_reasoning_effort = "medium"', cfg)
+        self.assertNotIn('model_reasoning_effort = "xhigh"', cfg)
+
     def test_ida_via_env_only(self):
         spec = self.backend.build_spec(ida_mcp_url="http://10.0.0.5:8745/mcp")
         cfg = _staged(self.backend, spec)[".codex/config.toml"].content

@@ -25,7 +25,7 @@ from ..artifacts import ArtifactError
 from ..commands import agents_info, discover_challenges
 from ..config import ROOT, Settings
 from ..controlclient import ControlPlaneClient, ControlPlaneError
-from ..models import RunRecord, Subagent
+from ..models import ChallengeState, ProvisioningJob, RunRecord, Subagent
 from ..providers import build_provider_registry, build_run_registry
 from ..remote import remote_python
 from .jobs import JobLimitError, SpawnJobTracker
@@ -81,13 +81,48 @@ class UiService:
         try:
             client = self._client_factory(record)
         except ControlPlaneError as exc:
-            # run exists but no control plane -> partial snapshot with error (ok:true)
+            # run exists but no control plane -> partial snapshot with error (ok:true).
+            # If a spawn job is still provisioning this run, surface its output
+            # (e.g. "Waiting for VM control plane availability…") so the UI shows
+            # progress rather than a bare credentials error.
             snap = snapshot_mod._error_snapshot(record, runtime_status, str(exc))
-            return snap
+            snap.provisioning = [
+                ProvisioningJob(
+                    job_id=j.job_id, state=j.state,
+                    started_at=j.started_at, finished_at=j.finished_at,
+                    output_tail=j.output,
+                )
+                for j in self.jobs.for_run(record.run_id)
+            ]
+            return self._relabel_if_provisioning(snap, record)
         snap = snapshot_mod.fetch_snapshot(
             client, record, include_artifacts=include_artifacts, runtime_status=runtime_status,
         )
         snap.subagents = self._subagents_from_snapshot(snap)
+        return self._relabel_if_provisioning(snap, record)
+
+    # A run that's still coming up (no control plane yet, or control plane up but
+    # the agent/tmux not launched) otherwise derives to "Stopped"/"Halted" — both
+    # of which read as failure. While it's young (or a spawn job is still working
+    # it), that's really "Provisioning", not a dead run.
+    PROVISION_WINDOW_SEC = 1200  # 20 min — covers slow image pull/load
+
+    def _relabel_if_provisioning(self, snap, record: RunRecord):
+        cs = snap.challenge_state
+        if not cs or cs.state not in ("stopped", "halted"):
+            return snap  # solved/blocked/progressing/stalled are accurate as-is
+        active_job = any(
+            j.state in ("queued", "running") for j in self.jobs.for_run(record.run_id)
+        )
+        age = _run_age_seconds(record)
+        young = age is not None and age < self.PROVISION_WINDOW_SEC
+        if active_job or young:
+            snap.challenge_state = ChallengeState(
+                state="provisioning", label="Provisioning",
+                summary="VM is starting up — control plane and agent are not ready yet.",
+                last_activity_age_sec=cs.last_activity_age_sec,
+                last_activity_label=cs.last_activity_label,
+            )
         return snap
 
     @staticmethod
@@ -192,7 +227,7 @@ class UiService:
     # config.json). schema-only defaults stay blank so the form shows the
     # built-in default as a placeholder rather than a redundant explicit value.
     _SPAWN_DEFAULT_KEYS = (
-        "agent_backend", "model", "provider",
+        "agent_backend", "model", "reasoning_effort", "provider",
         "gcp_zone", "gcp_project", "gcp_machine_type",
         "do_region", "do_size_slug",
         "toolbox_variant", "timeout_min",
@@ -293,6 +328,13 @@ class UiService:
             raise ApiError("BAD_REQUEST", "batch must be a list", 400)
         specs = batch or [payload]
         expanded = self._expand_specs(specs)
+        # Assign a unique run_id to every run up front. `ctfvm start` would
+        # otherwise mint `date +%Y%m%d-%H%M%S` itself, and a folder deploy
+        # launches its children in the same second -> identical run_ids ->
+        # colliding `.ctfvm/runs/<run_id>.json` (only the instance-keyed copy
+        # survives), so the runs can't be selected/VPN'd individually.
+        self._assign_run_ids(expanded)
+        self._assign_names(expanded)
         job_ids: list[str] = []
         for spec in expanded:
             cmd = self._build_start_cmd(spec)
@@ -302,6 +344,59 @@ class UiService:
                 raise ApiError("JOB_LIMIT", str(exc), 429) from exc
             job_ids.append(job.job_id)
         return job_ids
+
+    @staticmethod
+    def _assign_run_ids(specs: list[dict], *, now=None) -> None:
+        """Give each spec a distinct run_id (``YYYYmmdd-HHMMSS``), preserving any
+        caller-supplied one. Distinct seconds per item keep the rigid run_id
+        format that identity/state/selectors all assume, while guaranteeing a
+        folder fan-out (or two clicks in the same second) never collide."""
+        from datetime import datetime, timedelta, timezone
+        base = (now or (lambda: datetime.now(timezone.utc)))()
+        used: set[str] = {str(s["run_id"]) for s in specs if s.get("run_id")}
+        offset = 0
+        for spec in specs:
+            if spec.get("run_id"):
+                continue
+            rid = (base + timedelta(seconds=offset)).strftime("%Y%m%d-%H%M%S")
+            while rid in used:
+                offset += 1
+                rid = (base + timedelta(seconds=offset)).strftime("%Y%m%d-%H%M%S")
+            spec["run_id"] = rid
+            used.add(rid)
+            offset += 1
+
+    def _assign_names(self, specs: list[dict]) -> None:
+        """Give each run a display name = its challenge folder name. On collision
+        (within this batch or against an existing run), prefix with the parent
+        folder to disambiguate — e.g. ``web/01`` and ``pwn/01`` -> ``web-01`` /
+        ``pwn-01``. Preserves any caller-supplied name."""
+        used: set[str] = set()
+        try:
+            for listing in self.registry.list_runs()[0]:
+                nm = str(getattr(listing.record, "challenge_name", "") or "").strip()
+                if nm:
+                    used.add(nm)
+        except Exception:  # naming is best-effort; never block a spawn on it
+            pass
+        for spec in specs:
+            if spec.get("name"):
+                used.add(str(spec["name"]))
+                continue
+            cdir = str(spec.get("challenge_dir") or "").strip().rstrip("/")
+            if not cdir:
+                continue
+            base = os.path.basename(cdir) or "run"
+            name = base
+            if name in used:
+                parent = os.path.basename(os.path.dirname(cdir))
+                name = f"{parent}-{base}" if parent else base
+                stem, i = name, 2
+                while name in used:  # still colliding -> numeric suffix
+                    name = f"{stem}-{i}"
+                    i += 1
+            spec["name"] = name
+            used.add(name)
 
     @staticmethod
     def _expand_specs(specs: list) -> list[dict]:
@@ -337,7 +432,7 @@ class UiService:
         # spawn that omits them honors .env rather than always using codex.
         settings = Settings()
         spec = dict(spec)
-        for key in ("agent_backend", "model", "provider", "toolbox_variant", "timeout_min"):
+        for key in ("agent_backend", "model", "reasoning_effort", "provider", "toolbox_variant", "timeout_min"):
             if not spec.get(key):
                 resolved = settings.get(key)
                 if resolved not in (None, ""):
@@ -352,9 +447,11 @@ class UiService:
 
         cmd = [str(ROOT / "scripts" / "ctfvm"), "start", "--dir", challenge_dir]
         flag_map = {
+            "run_id": "--run-id", "name": "--name",
             "provider": "--provider", "agent_backend": "--agent", "zone": "--zone",
             "project": "--project", "description": "--desc", "ideas": "--ideas",
-            "model": "--model", "machine_type": "--machine-type", "size_slug": "--size-slug",
+            "model": "--model", "reasoning_effort": "--reasoning-effort",
+            "machine_type": "--machine-type", "size_slug": "--size-slug",
             "toolbox_variant": "--toolbox-variant", "timeout_min": "--timeout-min",
         }
         for key, flag in flag_map.items():
@@ -386,3 +483,20 @@ class UiService:
 def _iso_now() -> str:
     from datetime import datetime, timezone
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _run_age_seconds(record: RunRecord):
+    """Seconds since the run started, from started_at (ISO) or the run_id
+    timestamp. None if neither parses — callers treat None as 'not young'."""
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    started = str(record.started_at or "").strip()
+    for value, fmt in ((started, "%Y-%m-%dT%H:%M:%SZ"), (str(record.run_id or "").strip(), "%Y%m%d-%H%M%S")):
+        if not value:
+            continue
+        try:
+            dt = datetime.strptime(value, fmt).replace(tzinfo=timezone.utc)
+            return max((now - dt).total_seconds(), 0.0)
+        except ValueError:
+            continue
+    return None

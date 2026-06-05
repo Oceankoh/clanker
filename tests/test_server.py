@@ -261,7 +261,7 @@ class ServerTest(unittest.TestCase):
                        b"sp-desc", b"sp-novpn", b"status-note",
                        b"providerFields", b"sp-region", b"sp-do-fields", b"sp-gcp-fields",
                        b"sp-account", b"loadProfiles", b"prefillSpawn", b"loadDefaults", b"spawn-defaults",
-                       b"vpnchip", b"loadVpnStatus"):
+                       b"vpnrow", b"loadVpnStatus"):
             self.assertIn(marker, body, marker)
 
 
@@ -423,6 +423,195 @@ class JobsTracker(unittest.TestCase):
         tr.submit(["bash", "-c", "sleep 5"])
         with self.assertRaises(JobLimitError):
             tr.submit(["bash", "-c", "sleep 5"])
+
+    def test_spawn_is_detached_into_new_session(self):
+        # The provision must survive the server dying: launched in its own
+        # session (start_new_session) with file-backed output, not a pipe.
+        import time as _t
+        from unittest.mock import patch
+        from clanker.server.jobs import SpawnJobTracker
+        captured = {}
+
+        class _FakeProc:
+            returncode = 0
+            def poll(self):
+                return 0
+
+        def fake_popen(cmd, stdout=None, stderr=None, start_new_session=False):
+            captured["new_session"] = start_new_session
+            captured["is_file"] = hasattr(stdout, "write") and not hasattr(stdout, "recv")
+            stdout.write(b"creating run 20250101-000000\n")
+            stdout.flush()
+            return _FakeProc()
+
+        tr = SpawnJobTracker(now=lambda: "t")
+        with patch("clanker.server.jobs.subprocess.Popen", fake_popen):
+            job = tr.submit(["ctfvm", "start"])
+            for _ in range(100):
+                if tr.get(job.job_id).state in ("done", "error"):
+                    break
+                _t.sleep(0.02)
+        self.assertTrue(captured.get("new_session"), "must use start_new_session=True")
+        self.assertTrue(captured.get("is_file"), "output must go to a file, not a pipe")
+        self.assertEqual(tr.get(job.job_id).state, "done")
+        self.assertEqual(tr.get(job.job_id).run_id, "20250101-000000")
+
+    def test_for_run_matches_detected_run_id(self):
+        from clanker.server.jobs import SpawnJob, SpawnJobTracker
+        tr = SpawnJobTracker(now=lambda: "t")
+        tr._jobs = {"job-0001": SpawnJob("job-0001", run_id="20260605-015240", output="waiting"),
+                    "job-0002": SpawnJob("job-0002", run_id="other")}
+        tr._order = ["job-0001", "job-0002"]
+        matched = tr.for_run("20260605-015240")
+        self.assertEqual([j.job_id for j in matched], ["job-0001"])
+        self.assertEqual(tr.for_run(""), [])
+
+
+class RunIdAssignment(unittest.TestCase):
+    """A folder deploy must not collide on a shared second-granularity run_id."""
+    @staticmethod
+    def _fixed_now():
+        from datetime import datetime, timezone
+        return lambda: datetime(2026, 6, 5, 2, 10, 53, tzinfo=timezone.utc)
+
+    def test_fanout_gets_distinct_run_ids(self):
+        specs = [{"challenge_dir": f"/c/{i}"} for i in range(4)]
+        UiService._assign_run_ids(specs, now=self._fixed_now())
+        rids = [s["run_id"] for s in specs]
+        self.assertEqual(len(set(rids)), 4, rids)
+        self.assertEqual(rids[0], "20260605-021053")  # base second
+        self.assertTrue(all(__import__("re").match(r"^\d{8}-\d{6}$", r) for r in rids))
+
+    def test_caller_supplied_run_id_preserved_and_no_collision(self):
+        specs = [{"run_id": "20260605-021053"}, {"challenge_dir": "/c/x"}]
+        UiService._assign_run_ids(specs, now=self._fixed_now())
+        self.assertEqual(specs[0]["run_id"], "20260605-021053")
+        self.assertNotEqual(specs[1]["run_id"], "20260605-021053")
+
+    def test_build_start_cmd_passes_run_id_flag(self):
+        cmd = UiService._build_start_cmd({"challenge_dir": "/c/x", "run_id": "20260605-021053",
+                                          "agent_backend": "codex"})
+        self.assertIn("--run-id", cmd)
+        self.assertEqual(cmd[cmd.index("--run-id") + 1], "20260605-021053")
+
+
+class RunNaming(unittest.TestCase):
+    """Runs are named after the challenge folder; the parent disambiguates dups."""
+    def _svc(self, existing=()):
+        from types import SimpleNamespace
+        from clanker.server.jobs import SpawnJobTracker
+        reg = SimpleNamespace(list_runs=lambda *a, **k: (
+            [SimpleNamespace(record=SimpleNamespace(challenge_name=n)) for n in existing], None))
+        return UiService(registry=reg, providers=object(),
+                         jobs=SpawnJobTracker(now=lambda: "t"), client_factory=lambda r: None)
+
+    def test_distinct_basenames(self):
+        specs = [{"challenge_dir": "/c/01-strings"}, {"challenge_dir": "/c/02-base64"}]
+        self._svc()._assign_names(specs)
+        self.assertEqual([s["name"] for s in specs], ["01-strings", "02-base64"])
+
+    def test_collision_against_existing_uses_parent(self):
+        specs = [{"challenge_dir": "/ctf/web/01"}]
+        self._svc(existing=["01"])._assign_names(specs)
+        self.assertEqual(specs[0]["name"], "web-01")
+
+    def test_within_batch_collision_uses_parent(self):
+        specs = [{"challenge_dir": "/ctf/web/01"}, {"challenge_dir": "/ctf/pwn/01"}]
+        self._svc()._assign_names(specs)
+        self.assertEqual([s["name"] for s in specs], ["01", "pwn-01"])
+
+    def test_caller_supplied_name_preserved(self):
+        specs = [{"challenge_dir": "/c/x", "name": "custom"}]
+        self._svc()._assign_names(specs)
+        self.assertEqual(specs[0]["name"], "custom")
+
+    def test_trailing_slash_handled(self):
+        specs = [{"challenge_dir": "/c/01-strings/"}]
+        self._svc()._assign_names(specs)
+        self.assertEqual(specs[0]["name"], "01-strings")
+
+
+class ProvisioningRelabel(unittest.TestCase):
+    """A still-starting run reads as Stopped/Halted from derive_challenge_state;
+    while young (or a job is still working it) it should show Provisioning."""
+    def _svc(self, tracker=None):
+        from clanker.server.jobs import SpawnJobTracker
+        return UiService(registry=object(), providers=object(),
+                         jobs=tracker or SpawnJobTracker(now=lambda: "t"),
+                         client_factory=lambda r: None)
+
+    def _snap(self, state, run_id, started_at=""):
+        from clanker.models import ChallengeState, RunRecord, Snapshot
+        rec = RunRecord(provider="digitalocean", run_id=run_id, instance=f"ctfvm-x-{run_id}",
+                        zone="sgp1", project="p", started_at=started_at)
+        cs = ChallengeState(state=state, label=state.title(), summary="")
+        return Snapshot(record=rec, challenge_state=cs), rec
+
+    def test_young_halted_becomes_provisioning(self):
+        from clanker.server.service import _iso_now
+        snap, rec = self._snap("halted", "20260605-125306", started_at=_iso_now())
+        out = self._svc()._relabel_if_provisioning(snap, rec)
+        self.assertEqual(out.challenge_state.state, "provisioning")
+        self.assertEqual(out.challenge_state.label, "Provisioning")
+
+    def test_old_halted_stays_halted(self):
+        snap, rec = self._snap("halted", "20200101-000000", started_at="2020-01-01T00:00:00Z")
+        out = self._svc()._relabel_if_provisioning(snap, rec)
+        self.assertEqual(out.challenge_state.state, "halted")
+
+    def test_active_job_forces_provisioning_even_if_old(self):
+        from clanker.server.jobs import SpawnJob, SpawnJobTracker
+        tr = SpawnJobTracker(now=lambda: "t")
+        tr._jobs = {"job-0001": SpawnJob("job-0001", state="running", run_id="20200101-000000")}
+        tr._order = ["job-0001"]
+        snap, rec = self._snap("stopped", "20200101-000000", started_at="2020-01-01T00:00:00Z")
+        out = self._svc(tr)._relabel_if_provisioning(snap, rec)
+        self.assertEqual(out.challenge_state.state, "provisioning")
+
+    def test_progressing_is_untouched(self):
+        from clanker.server.service import _iso_now
+        snap, rec = self._snap("progressing", "20260605-125306", started_at=_iso_now())
+        out = self._svc()._relabel_if_provisioning(snap, rec)
+        self.assertEqual(out.challenge_state.state, "progressing")
+
+
+class ProvisioningSnapshot(unittest.TestCase):
+    """A run with no control plane surfaces its spawn jobs' live output instead
+    of just the bare credentials error."""
+    def test_snapshot_includes_provisioning_output(self):
+        from clanker.controlclient import ControlPlaneError
+        from clanker.server.jobs import SpawnJob, SpawnJobTracker
+        from clanker.state import RunRegistry
+
+        with TemporaryDirectory() as d:
+            tmp = Path(d)
+            runs = tmp / "runs"
+            runs.mkdir(parents=True, exist_ok=True)
+            # a run record with NO control_user/password -> no control plane
+            (runs / "20260605-015240.json").write_text(json.dumps({
+                "provider": "digitalocean", "run_id": "20260605-015240",
+                "instance": "ctfvm-c-01-strings-20260605-015240", "zone": "sgp1",
+                "project": "jloh-containers", "ip": "",
+            }))
+            registry = RunRegistry(runs_dir=runs, state_file=tmp / "current.json",
+                                   status=lambda r: "PROVISIONING")
+            tracker = SpawnJobTracker(now=lambda: "t")
+            tracker._jobs = {"job-0001": SpawnJob(
+                "job-0001", state="running", run_id="20260605-015240",
+                started_at="t", output="Waiting for VM control plane availability...\n")}
+            tracker._order = ["job-0001"]
+
+            def boom(_rec):
+                raise ControlPlaneError("run '20260605-015240' has no control-plane credentials")
+
+            service = UiService(registry=registry, providers=object(),
+                                jobs=tracker, client_factory=boom)
+            snap = service.snapshot("20260605-015240")
+            self.assertIn("has no control-plane credentials", snap.error)
+            self.assertEqual(len(snap.provisioning), 1)
+            self.assertEqual(snap.provisioning[0].job_id, "job-0001")
+            self.assertEqual(snap.provisioning[0].state, "running")
+            self.assertIn("Waiting for VM control plane availability", snap.provisioning[0].output_tail)
 
 
 if __name__ == "__main__":

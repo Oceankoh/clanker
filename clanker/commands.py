@@ -199,7 +199,7 @@ def _read_text(path: Path) -> str:
 
 
 def cmd_fanout(root: str, *, provider: str = "", agent: str = "", model: str = "",
-               service=None, wait: bool = True, sleep=None) -> int:
+               reasoning_effort: str = "", service=None, wait: bool = True, sleep=None) -> int:
     """Deploy a folder of challenges — one VM per immediate subfolder."""
     challenges = discover_challenges(root)
     if not challenges:
@@ -216,6 +216,8 @@ def cmd_fanout(root: str, *, provider: str = "", agent: str = "", model: str = "
         payload["agent_backend"] = agent
     if model:
         payload["model"] = model
+    if reasoning_effort:
+        payload["reasoning_effort"] = reasoning_effort
 
     job_ids = svc.spawn(payload)
     print(f"Spawning {len(job_ids)} run(s): {', '.join(job_ids)}")
@@ -277,10 +279,18 @@ def cmd_config_show(*, settings: Settings | None = None) -> int:
     return 0
 
 
+def _codex_session_present(settings: Settings) -> bool:
+    """Whether a local Codex session (~/.codex/auth.json) exists. expanduser so a
+    tilde'd CTFVM_CODEX_HOME (e.g. ``~/.codex`` from .env, where the parser keeps
+    the literal tilde) resolves — matching the materialize_auth path used by
+    `start`; otherwise this falsely reports "no local session"."""
+    codex_home = Path(str(settings.get("codex_home", default=str(Path.home() / ".codex")))).expanduser()
+    return (codex_home / "auth.json").exists()
+
+
 def cmd_auth_show() -> int:
     settings = Settings()
-    codex_home = Path(str(settings.get("codex_home", default=str(Path.home() / ".codex"))))
-    codex_ok = (codex_home / "auth.json").exists()
+    codex_ok = _codex_session_present(settings)
     claude_token = bool(
         get_secret("claude_oauth_token")
         or settings.get("claude_oauth_token", env_var="CLAUDE_CODE_OAUTH_TOKEN", default="")
@@ -306,6 +316,7 @@ def cmd_stage_agent(
     *,
     settings: Settings | None = None,
     model: str = "",
+    reasoning_effort: str = "",
     ida_mcp_url: str = "",
     account: str = "",
 ) -> int:
@@ -317,7 +328,7 @@ def cmd_stage_agent(
         settings = Settings(profile=profile)
     backend = build_agent_backend(backend_name)
     ida = ida_mcp_url or settings.get("ida_mcp_url", env_var="CTFVM_DEFAULT_IDA_MCP_URL", default="")
-    spec = backend.build_spec(model=model, ida_mcp_url=ida)
+    spec = backend.build_spec(model=model, reasoning_effort=reasoning_effort, ida_mcp_url=ida)
     auth = backend.materialize_auth(settings)
 
     staging = Path(staging_dir)

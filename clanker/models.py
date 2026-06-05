@@ -38,6 +38,7 @@ class RunRecord:
     project: str
     ip: str = ""
     started_at: str = ""
+    challenge_name: str = ""  # display name (challenge folder); see UiService._assign_names
     remote_run_dir: str = DEFAULT_REMOTE_RUN_DIR
     agent_backend: str = DEFAULT_AGENT_BACKEND
     control_scheme: str = ""
@@ -60,6 +61,7 @@ class RunRecord:
             project=str(data.get("project", "") or "").strip(),
             ip=str(data.get("ip", "") or "").strip(),
             started_at=str(data.get("started_at", "") or "").strip(),
+            challenge_name=str(data.get("challenge_name", "") or "").strip(),
             remote_run_dir=str(data.get("remote_run_dir", "") or DEFAULT_REMOTE_RUN_DIR),
             agent_backend=backend,
             control_scheme=str(data.get("control_scheme", "") or "").strip(),
@@ -81,6 +83,7 @@ class RunRecord:
             "project": self.project,
             "ip": self.ip,
             "started_at": self.started_at,
+            "challenge_name": self.challenge_name,
             "remote_run_dir": self.remote_run_dir,
             "control_scheme": self.control_scheme,
             "control_host": self.control_host,
@@ -201,6 +204,18 @@ class SpawnJob:
 
 
 @dataclass
+class ProvisioningJob:
+    """A spawn job still provisioning a run that has no control plane yet —
+    surfaced in the run's snapshot so the UI can show progress
+    ("Waiting for VM control plane availability…") instead of a bare error."""
+    job_id: str
+    state: str = ""
+    started_at: str = ""
+    finished_at: str = ""
+    output_tail: str = ""
+
+
+@dataclass
 class Snapshot:
     record: RunRecord
     runtime_status: str = ""
@@ -213,3 +228,7 @@ class Snapshot:
     challenge_state: ChallengeState | None = None
     subagents: list[Subagent] = field(default_factory=list)
     error: str | None = None
+    # Live provisioning output, surfaced when the run has no control plane yet
+    # (e.g. still "Waiting for VM control plane availability…"). One entry per
+    # spawn job still working on this run_id; empty once the run is reachable.
+    provisioning: list[ProvisioningJob] = field(default_factory=list)

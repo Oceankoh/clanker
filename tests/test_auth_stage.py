@@ -23,6 +23,24 @@ from clanker.config import Settings  # noqa: E402
 from clanker.secretstore import get_secret, set_secret  # noqa: E402
 
 
+class CodexSessionDetection(unittest.TestCase):
+    """`auth show` must expanduser a tilde'd codex_home, else it falsely reports
+    'no local session' even though `start` (materialize_auth) finds the session."""
+    def test_tilde_codex_home_resolves(self):
+        with TemporaryDirectory() as home:
+            (Path(home) / ".codex").mkdir()
+            (Path(home) / ".codex" / "auth.json").write_text("{}")
+            with patch.dict(os.environ, {"HOME": home}):
+                settings = Settings(cli={"codex_home": "~/.codex"})
+                self.assertTrue(commands._codex_session_present(settings))
+
+    def test_absent_session_reports_false(self):
+        with TemporaryDirectory() as home:
+            with patch.dict(os.environ, {"HOME": home}):
+                settings = Settings(cli={"codex_home": "~/.codex"})
+                self.assertFalse(commands._codex_session_present(settings))
+
+
 class SecretStore(unittest.TestCase):
     def test_roundtrip_and_perms(self):
         with TemporaryDirectory() as tmp:

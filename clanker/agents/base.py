@@ -54,7 +54,7 @@ class AgentConfigSpec:
     """Everything needed to render an agent's on-VM configuration."""
 
     model: str = ""
-    reasoning_effort: str = "high"
+    reasoning_effort: str = "xhigh"
     multi_agent: bool = True
     auto_allow: bool = True  # run non-interactively (no approval prompts)
     mcp_servers: list[McpServer] = field(default_factory=list)
@@ -144,10 +144,15 @@ GDB_MCP = McpServer(
 )
 
 
-def default_agent_spec(*, model: str = "", ida_mcp_url: str = "") -> AgentConfigSpec:
+def default_agent_spec(
+    *, model: str = "", reasoning_effort: str = "", ida_mcp_url: str = ""
+) -> AgentConfigSpec:
     """The platform's default agent configuration: the bundled GDB MCP, the two
     standard subagent roles, multi-agent + auto-allow on, and an optional remote
     IDA MCP when configured.
+
+    ``reasoning_effort`` blank -> the spec default (``xhigh``); a non-empty value
+    pins it (mirrors how ``model`` blank means "backend default").
 
     Note: the legacy ``config.toml`` also pinned a hardcoded ``idaPro`` URL — a
     dev leftover (a specific droplet IP). It is intentionally dropped; IDA is
@@ -155,11 +160,10 @@ def default_agent_spec(*, model: str = "", ida_mcp_url: str = "") -> AgentConfig
     mcp = [GDB_MCP]
     if ida_mcp_url:
         mcp.append(McpServer(name="ida", kind="http", url=ida_mcp_url))
-    return AgentConfigSpec(
-        model=model,
-        mcp_servers=mcp,
-        roles=[EXPLOIT_TESTER, DOCS_RESEARCHER],
-    )
+    spec_kwargs: dict = dict(model=model, mcp_servers=mcp, roles=[EXPLOIT_TESTER, DOCS_RESEARCHER])
+    if reasoning_effort:
+        spec_kwargs["reasoning_effort"] = reasoning_effort
+    return AgentConfigSpec(**spec_kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -203,8 +207,14 @@ class AgentBackend(ABC):
         )
         return header + _TRANSCRIPT_BODY
 
-    def build_spec(self, *, model: str = "", ida_mcp_url: str = "") -> AgentConfigSpec:
-        return default_agent_spec(model=model or self.default_model, ida_mcp_url=ida_mcp_url)
+    def build_spec(
+        self, *, model: str = "", reasoning_effort: str = "", ida_mcp_url: str = ""
+    ) -> AgentConfigSpec:
+        return default_agent_spec(
+            model=model or self.default_model,
+            reasoning_effort=reasoning_effort,
+            ida_mcp_url=ida_mcp_url,
+        )
 
     # --- pure, testable surface (Phase 3a) --------------------------------
     @abstractmethod

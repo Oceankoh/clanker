@@ -97,7 +97,8 @@ def _cmd_agents(args: argparse.Namespace) -> int:
 
 
 def _cmd_fanout(args: argparse.Namespace) -> int:
-    return commands.cmd_fanout(args.root, provider=args.provider, agent=args.agent, model=args.model)
+    return commands.cmd_fanout(args.root, provider=args.provider, agent=args.agent,
+                               model=args.model, reasoning_effort=args.reasoning_effort)
 
 
 def _cmd_serve(args: argparse.Namespace) -> int:
@@ -125,7 +126,8 @@ def _cmd_auth(args: argparse.Namespace) -> int:
 
 def _cmd_stage_agent(args: argparse.Namespace) -> int:
     return commands.cmd_stage_agent(
-        args.agent, args.staging_dir, model=args.model, ida_mcp_url=args.ida_mcp_url,
+        args.agent, args.staging_dir, model=args.model,
+        reasoning_effort=args.reasoning_effort, ida_mcp_url=args.ida_mcp_url,
         account=args.account,
     )
 
@@ -134,7 +136,7 @@ def _cmd_render_agent_config(args: argparse.Namespace) -> int:
     backend = build_agent_backend(args.agent)
     settings = Settings()
     ida = args.ida_mcp_url or settings.get("ida_mcp_url", env_var="CTFVM_DEFAULT_IDA_MCP_URL", default="")
-    spec = backend.build_spec(model=args.model, ida_mcp_url=ida)
+    spec = backend.build_spec(model=args.model, reasoning_effort=args.reasoning_effort, ida_mcp_url=ida)
     auth = backend.materialize_auth(settings)
 
     print(f"# backend: {backend.display_name} ({backend.name})")
@@ -170,6 +172,8 @@ def main(argv: list[str] | None = None) -> int:
     fanout.add_argument("--provider", default="")
     fanout.add_argument("--agent", default="")
     fanout.add_argument("--model", default="")
+    fanout.add_argument("--reasoning-effort", dest="reasoning_effort", default="",
+                        help="codex model_reasoning_effort (blank = xhigh)")
     fanout.set_defaults(func=_cmd_fanout)
 
     status = sub.add_parser("status", help="show a run's status")
@@ -195,6 +199,8 @@ def main(argv: list[str] | None = None) -> int:
     render = sub.add_parser("render-agent-config", help="render an agent backend's on-VM config")
     render.add_argument("--agent", default="codex", choices=list(SUPPORTED_BACKENDS))
     render.add_argument("--model", default="")
+    render.add_argument("--reasoning-effort", dest="reasoning_effort", default="",
+                        help="codex model_reasoning_effort (blank = xhigh)")
     render.add_argument("--ida-mcp-url", dest="ida_mcp_url", default="")
     render.set_defaults(func=_cmd_render_agent_config)
 
@@ -232,6 +238,8 @@ def main(argv: list[str] | None = None) -> int:
     stage.add_argument("--agent", default="codex", choices=list(SUPPORTED_BACKENDS))
     stage.add_argument("--staging-dir", dest="staging_dir", required=True)
     stage.add_argument("--model", default="")
+    stage.add_argument("--reasoning-effort", dest="reasoning_effort", default="",
+                       help="codex model_reasoning_effort (blank = xhigh)")
     stage.add_argument("--ida-mcp-url", dest="ida_mcp_url", default="")
     stage.add_argument("--account", default="", help="credential profile to use (see `clanker auth`)")
     stage.set_defaults(func=_cmd_stage_agent)

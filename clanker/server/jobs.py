@@ -8,9 +8,12 @@ service.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
+import tempfile
 import threading
+import time
 from dataclasses import dataclass, field
 
 MAX_JOBS = 12
@@ -34,13 +37,14 @@ class JobLimitError(RuntimeError):
 
 
 class SpawnJobTracker:
-    def __init__(self, *, max_jobs: int = MAX_JOBS, now=None):
+    def __init__(self, *, max_jobs: int = MAX_JOBS, now=None, log_dir=None):
         self._jobs: dict[str, SpawnJob] = {}
         self._order: list[str] = []
         self._lock = threading.RLock()
         self._max = max_jobs
         self._seq = 0
         self._now = now or (lambda: "")
+        self._log_dir = log_dir or os.path.join(tempfile.gettempdir(), "ctfvm-spawn-logs")
 
     def submit(self, command: list[str], *, runner=None) -> SpawnJob:
         """Start ``command`` in a background thread. ``runner`` is an injection
@@ -66,6 +70,15 @@ class SpawnJobTracker:
     def list_all(self) -> list[SpawnJob]:
         with self._lock:
             return [self._jobs[jid] for jid in reversed(self._order) if jid in self._jobs]
+
+    def for_run(self, run_id: str) -> list[SpawnJob]:
+        """Jobs whose detected run_id matches — used to surface live
+        provisioning output on a run that has no control plane yet."""
+        if not run_id:
+            return []
+        with self._lock:
+            return [self._jobs[jid] for jid in reversed(self._order)
+                    if jid in self._jobs and self._jobs[jid].run_id == run_id]
 
     def active_count(self) -> int:
         with self._lock:
@@ -93,13 +106,34 @@ class SpawnJobTracker:
     def _run_subprocess(self, job: SpawnJob, command: list[str]) -> None:
         job.state = "running"
         try:
-            proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-            assert proc.stdout is not None
-            for line in proc.stdout:
-                self._append_output(job, line)
-            rc = proc.wait()
+            os.makedirs(self._log_dir, exist_ok=True)
+            log_path = os.path.join(self._log_dir, f"{job.job_id}.log")
+            # Detach the provision into its own session and stream its output to a
+            # FILE rather than a pipe back to us. Both matter: if the server dies
+            # mid-run (closed terminal, crash, restart), `ctfvm start` must keep
+            # running to write_state + launch the agent instead of being killed
+            # with us — a pipe would break (SIGPIPE) and a shared process group
+            # would take the child down. This is the recurring "half-provisioned,
+            # control plane up but no agent/tmux" failure.
+            wf = open(log_path, "wb")
+            try:
+                proc = subprocess.Popen(
+                    command, stdout=wf, stderr=subprocess.STDOUT, start_new_session=True,
+                )
+            finally:
+                wf.close()  # the child keeps its own dup of the fd
+            with open(log_path, "rb") as rf:
+                while proc.poll() is None:
+                    chunk = rf.read()
+                    if chunk:
+                        self._append_output(job, chunk.decode("utf-8", "replace"))
+                    else:
+                        time.sleep(0.1)
+                chunk = rf.read()  # drain whatever landed after the last poll
+                if chunk:
+                    self._append_output(job, chunk.decode("utf-8", "replace"))
             job.finished_at = self._now()
-            job.state = "done" if rc == 0 else "error"
+            job.state = "done" if proc.returncode == 0 else "error"
         except Exception as exc:  # noqa: BLE001
             self._append_output(job, f"\n[spawn error] {exc}\n")
             job.finished_at = self._now()

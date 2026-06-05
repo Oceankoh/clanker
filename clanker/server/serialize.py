@@ -7,6 +7,7 @@ from ..models import (
     ChallengeState,
     ExplicitStatus,
     PaneSnapshot,
+    ProvisioningJob,
     RunListing,
     Snapshot,
     SnapshotMetrics,
@@ -31,6 +32,7 @@ def run_listing(l: RunListing) -> dict:
     r = l.record
     return {
         "run_id": r.run_id,
+        "name": r.challenge_name,
         "provider": r.provider,
         "agent_backend": r.agent_backend,
         "instance": r.instance,
@@ -89,6 +91,7 @@ def snapshot(snap: Snapshot) -> dict:
     r = snap.record
     return {
         "run_id": r.run_id,
+        "name": r.challenge_name,
         "provider": r.provider,
         "agent_backend": r.agent_backend,
         "instance": r.instance,
@@ -106,6 +109,17 @@ def snapshot(snap: Snapshot) -> dict:
         "challenge_state": challenge_state(snap.challenge_state),
         "subagents": [subagent(s) for s in snap.subagents],
         "error": snap.error,
+        "provisioning": [provisioning_job(p) for p in snap.provisioning],
+    }
+
+
+def provisioning_job(p: ProvisioningJob) -> dict:
+    return {
+        "job_id": p.job_id,
+        "state": p.state,
+        "started_at": p.started_at,
+        "finished_at": p.finished_at,
+        "output_tail": p.output_tail,
     }
 
 

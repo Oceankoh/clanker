@@ -59,6 +59,7 @@ SETTINGS_SCHEMA: list[ConfigKey] = [
     # --- agent backend ---
     ConfigKey("agent_backend", "CTFVM_AGENT", "codex", "agent", "Default agent backend (codex|claude-code)", consumed_by="both"),
     ConfigKey("model", "CTFVM_MODEL", "", "agent", "Default agent model (blank = backend default)", consumed_by="both"),
+    ConfigKey("reasoning_effort", "CTFVM_REASONING_EFFORT", "xhigh", "agent", "Codex model_reasoning_effort (codex only)", consumed_by="both"),
     ConfigKey("codex_home", "CTFVM_CODEX_HOME", str(Path.home() / ".codex"), "agent", "Local Codex session dir to sync"),
     ConfigKey("no_auth_sync", "CTFVM_NO_AUTH_SYNC", "", "agent", "Skip Codex session sync (use API key instead)"),
     ConfigKey("openai_api_key", "OPENAI_API_KEY", "", "agent", "Codex API key (alternative to session sync)", secret=True),

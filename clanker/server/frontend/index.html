@@ -22,7 +22,7 @@
   .run .meta { color:var(--muted); font-size:12px; }
   .pill { display:inline-block; padding:1px 8px; border-radius:10px; font-size:11px; border:1px solid var(--line); }
   .s-solved{color:var(--ok);border-color:var(--ok)} .s-blocked,.s-halted,.s-stopped{color:var(--bad);border-color:var(--bad)}
-  .s-stalled{color:var(--warn);border-color:var(--warn)} .s-progressing{color:var(--accent);border-color:var(--accent)}
+  .s-stalled,.s-provisioning{color:var(--warn);border-color:var(--warn)} .s-progressing{color:var(--accent);border-color:var(--accent)}
   #focus { padding:16px; overflow:auto; }
   .muted { color:var(--muted); }
   .tabs { display:flex; gap:6px; margin:12px 0; flex-wrap:wrap; }
@@ -37,6 +37,11 @@
   .pane-out{ max-height:46vh; }
   img.art{ max-width:100%; border:1px solid var(--line); border-radius:6px; }
   .hint{ color:var(--muted); font-size:12px; }
+  .banner{ margin:6px 0; padding:8px 12px; border-radius:8px; border:1px solid var(--line); font-size:13px; line-height:1.6; }
+  .banner.warn{ border-color:var(--warn); color:var(--warn); background:rgba(210,153,34,.08); }
+  .banner.ok{ border-color:var(--ok); color:var(--ok); background:rgba(63,185,80,.08); }
+  .banner code{ color:var(--fg); background:#0b0d11; padding:1px 6px; border-radius:4px; }
+  .banner button{ margin-left:6px; }
   .spawn{ max-width:640px; }
   .spawn h2{ margin:0 0 4px; }
   .spawn label{ display:block; margin:12px 0 4px; color:var(--muted); font-size:13px; }
@@ -116,8 +121,8 @@ function renderFleet(){
     const st = STATE.statusByRun[r.run_id] || r.challenge_state;
     return `
       <div class="run ${r.run_id===STATE.current?'sel':''}" onclick="selectRun('${r.run_id}')">
-        <div class="id">${r.run_id||r.instance} ${statePill(st)}</div>
-        <div class="meta">${r.provider} · ${r.agent_backend} · ${r.runtime_status||'?'} · ${r.ip||'—'}</div>
+        <div class="id">${esc(r.name)||r.run_id||r.instance} ${statePill(st)}</div>
+        <div class="meta">${r.name?esc(r.run_id)+' · ':''}${r.provider} · ${r.agent_backend} · ${r.runtime_status||'?'} · ${r.ip||'—'}</div>
       </div>`;
   }).join('') || '<div class="muted" style="padding:16px">no runs</div>';
   $('#fleet').innerHTML = html;
@@ -150,7 +155,7 @@ async function loadDefaults(){ try{ const d=await api('/spawn-defaults'); DEFAUL
 // value that would actually be used), incl. built-in schema defaults
 function prefillSpawn(){
   const set=(id,k)=>{ const el=$(id), d=DEFAULTS[k]; if(el && d && d.value) el.value=d.value; };
-  set('#sp-agent','agent_backend'); set('#sp-model','model'); set('#sp-provider','provider');
+  set('#sp-agent','agent_backend'); set('#sp-model','model'); set('#sp-effort','reasoning_effort'); set('#sp-provider','provider');
   set('#sp-zone','gcp_zone'); set('#sp-project','gcp_project'); set('#sp-machine','gcp_machine_type');
   set('#sp-region','do_region'); set('#sp-size','do_size_slug');
   try{ const ff=$('#sp-flagfmt'); if(ff) ff.value=localStorage.getItem('clanker.flag_format')||''; }catch(e){}
@@ -175,6 +180,7 @@ function showSpawn(){
       <div><label>Provider</label><select id="sp-provider" onchange="providerFields()"><option value="">(default)</option><option value="gcp">gcp</option><option value="digitalocean">digitalocean</option></select></div>
       <div><label>Agent</label><select id="sp-agent"><option value="">(default)</option>${opts}</select></div>
       <div><label>Model</label><input type="text" id="sp-model" placeholder="(backend default)"></div>
+      <div><label>Reasoning effort</label><input type="text" id="sp-effort" placeholder="xhigh (codex only)"></div>
     </div>
     <div class="cols">
       <div><label>Account / profile</label><select id="sp-account"><option value="">(default credentials)</option>${propts}</select></div>
@@ -243,7 +249,7 @@ async function submitSpawn(){
   const put=(k,v)=>{ v=(v||'').trim(); if(v) body[k]=v; };
   const prov=$('#sp-provider').value;
   put('provider',prov); put('agent_backend',$('#sp-agent').value);
-  put('model',$('#sp-model').value); put('account',$('#sp-account').value);
+  put('model',$('#sp-model').value); put('reasoning_effort',$('#sp-effort').value); put('account',$('#sp-account').value);
   put('flag_format',$('#sp-flagfmt').value);
   try{ localStorage.setItem('clanker.flag_format', $('#sp-flagfmt').value.trim()); }catch(e){}
   put('description',$('#sp-desc').value); put('ideas',$('#sp-ideas').value);
@@ -346,11 +352,15 @@ function renderFocus(){
   }
   const cs=s.challenge_state;
   $('#focus').innerHTML = `
-    <div class="row"><h2 style="margin:0">${s.run_id} ${statePill(cs)}</h2>
-      <span class="muted">${s.provider} · ${s.agent_backend} · ${s.runtime_status}</span></div>
-    ${cs?`<div class="muted">${esc(cs.summary)} — ${cs.last_activity_label||''}</div>`:''}
-    ${s.error?`<div class="err">⚠ ${esc(s.error)}</div>`:''}
-    <div class="row" id="vpnrow"><span id="vpnchip" class="hint">VPN: …</span></div>
+    <div class="row"><h2 style="margin:0">${esc(s.name)||s.run_id} ${statePill(cs)}</h2>
+      <span class="muted">${s.name?esc(s.run_id)+' · ':''}${s.provider} · ${s.agent_backend} · ${s.runtime_status}</span></div>
+    ${cs?`<div class="muted">${esc(cs.summary)}${(cs.last_activity_label && cs.last_activity_label!=='unknown')?' — '+esc(cs.last_activity_label):''}</div>`:''}
+    ${(s.error && !(cs&&cs.state==='provisioning'))?`<div class="err">⚠ ${esc(s.error)}</div>`:''}
+    ${(s.provisioning&&s.provisioning.length)?
+      `<div class="hint" style="margin-top:8px">Provisioning (control plane not up yet):</div>`
+      +s.provisioning.map(p=>`<div class="muted">${p.job_id} · ${p.state}</div><pre class="pane-out">${esc(p.output_tail)||'(no output yet)'}</pre>`).join('')
+      :''}
+    <div id="vpnrow"></div>
     <div class="row">
       <button onclick="setStatus('solved')">Mark solved</button>
       <button onclick="setStatus('blocked')">Mark blocked</button>
@@ -365,22 +375,33 @@ function renderFocus(){
   document.querySelectorAll('.pane-out').forEach(el=>{ el.scrollTop = el.scrollHeight; });
 }
 // VPN bring-up is a LOCAL privileged step (sudo on this machine), so the UI
-// reports status + the exact command rather than doing it itself.
+// reports status + the exact command rather than doing it itself. The warning
+// is gated on run readiness so a still-provisioning run isn't flagged as if VPN
+// were the problem (it can only be brought up once the run is reachable).
 async function loadVpnStatus(){
-  const el=$('#vpnchip'); if(!el||!STATE.current) return;
+  const row=$('#vpnrow'); if(!row||!STATE.current) return;
+  // a run with no control plane yet (provisioning) reports an error in its snapshot
+  const ready = !(STATE.snap && STATE.snap.error);
   try{
     const d=await api('/runs/'+encodeURIComponent(STATE.current)+'/vpn');
     if(d.connected){
-      el.className='pill s-solved';
-      el.title='Routed: '+(d.cidrs||[]).join(', ');
-      el.textContent='VPN connected · '+(d.interface||'wg')+' → '+((d.cidrs||[]).join(', ')||'(no cidrs)');
-    }else{
-      el.className='';
-      el.innerHTML='<span class="muted">VPN not set up — run in a terminal: </span>'
-        +'<code>'+esc(d.up_command)+'</code> '
-        +'<button onclick="navigator.clipboard.writeText(\''+esc(d.up_command).replace(/'/g,"\\'")+'\')">copy</button>';
+      row.innerHTML='<div class="banner ok">✓ VPN connected · '+esc(d.interface||'wg')
+        +' → '+esc((d.cidrs||[]).join(', ')||'(no routed CIDRs)')+'</div>';
+      return;
     }
-  }catch(e){ el.className='hint'; el.textContent=''; }
+    if(!ready){
+      row.innerHTML='<div class="hint">VPN: not set up — bring it up once the run finishes provisioning and the control plane is reachable.</div>';
+      return;
+    }
+    const cmdJs=(d.up_command||'').replace(/'/g,"\\'");
+    row.innerHTML='<div class="banner warn">⚠ <b>VPN not connected.</b> The agent can only reach the '
+      +'challenge\'s networked services once the tunnel is up — local-only challenges don\'t need it. '
+      +'Bring it up on <i>this machine</i> (needs sudo):'
+      +'<br><code>'+esc(d.up_command)+'</code>'
+      +'<button onclick="navigator.clipboard.writeText(\''+cmdJs+'\')">copy</button>'
+      +'<br><span class="muted">Or bring up every active run in one go: </span><code>./scripts/ctfvm vpn up</code>'
+      +'</div>';
+  }catch(e){ row.innerHTML=''; }
 }
 
 async function loadTranscript(){
