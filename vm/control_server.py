@@ -121,9 +121,13 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
         self._log(status, f"{len(payload)}B")
 
     def _unauthorized(self) -> None:
+        # We reject before reading the request body; on an HTTP/1.1 keep-alive
+        # connection those unread bytes would desync the next request. Close it.
+        self.close_connection = True
         self.send_response(HTTPStatus.UNAUTHORIZED)
         self.send_header("WWW-Authenticate", 'Basic realm="ctfvm-control"')
         self.send_header("Content-Length", "0")
+        self.send_header("Connection", "close")
         self.end_headers()
         self._log(HTTPStatus.UNAUTHORIZED)
 

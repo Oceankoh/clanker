@@ -124,7 +124,7 @@ if [[ -f "${AGENT_DIR}/container.env" ]]; then
   done < "${AGENT_DIR}/container.env"
 fi
 
-if ! docker exec ctf-toolbox bash -c "command -v ${AGENT_BIN} >/dev/null 2>&1"; then
+if ! docker exec ctf-toolbox bash -c 'command -v "$1" >/dev/null 2>&1' _ "${AGENT_BIN}"; then
   echo "${AGENT_BIN} CLI not found in ctf-toolbox container." | tee -a "${RUN_DIR}/logs/supervisor.log"
   echo "Install it in the container and rerun supervisor." | tee -a "${RUN_DIR}/logs/supervisor.log"
   exec bash
