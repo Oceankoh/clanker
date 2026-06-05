@@ -49,8 +49,9 @@ python -m clanker auth claude     # Claude (stores a setup-token; never copies c
     --dir ./challenge --use-local-image --no-vpn
 ```
 
-`--agent` / `--model` default from `.env` (`CTFVM_AGENT` / `CTFVM_MODEL`). A challenge dir may contain
-`description.txt` and `ideas.txt`, which are picked up automatically.
+`--agent` / `--model` / `--reasoning-effort` default from `.env` (`CTFVM_AGENT` / `CTFVM_MODEL` /
+`CTFVM_REASONING_EFFORT`, default `xhigh`, Codex only). `description.txt` / `ideas.txt` in the dir are
+picked up automatically.
 
 ## 3. Watch & steer it
 
@@ -62,11 +63,10 @@ python -m clanker status --run-id <id>  # one run's status
 ./scripts/ctfvm attach                  # raw tmux (break-glass)
 ```
 
-In the UI: **Transcript** is the default tab (the agent's real chat — messages, tool calls, results).
-The **Panes** tab has a steer box that types into the selected target — the supervisor or any subagent
-(Enter sends, Shift+Enter is a newline); if the agent is mid-turn its own CLI queues your message.
-Buttons cover Ctrl-C / Trust / Approve / Deny; the header has mark-solved/blocked, artifact
-preview/download, and a per-run **VPN status** chip.
+In the UI: **Transcript** (default) is the agent's real chat. **Panes** has a steer box that types into
+any target — supervisor or subagent (Enter sends, Shift+Enter newline; mid-turn input queues). Buttons:
+Ctrl-C / Trust / Approve / Deny. The header shows the run name + state, mark-solved/blocked (with note),
+artifact preview/download, and **VPN status**. The sidebar pills auto-refresh with a freshness stamp.
 
 ## 4. Get results / tear down
 
@@ -87,11 +87,19 @@ scripts/smoke.sh --agent claude-code --dir examples/smoke-challenges/01-strings
 scripts/smoke.sh --agent codex       --dir examples/smoke-challenges/04-hidden   # flag in a dotfile
 ```
 
-Runs the agent on a committed sample challenge, asserts the expected flag lands in findings, then
-**auto-destroys** the VM. Costs a few cents / a few minutes. Good first check that auth + image +
-provisioning all work. Sample challenges live in [`examples/smoke-challenges/`](examples/smoke-challenges/).
+Runs the agent on a committed sample, asserts the flag lands in findings, then **auto-destroys** the VM.
+Good first check that auth + image + provisioning work. Samples: [`examples/smoke-challenges/`](examples/smoke-challenges/).
 
-**Fan out a folder of challenges — one VM each** (each immediate subfolder is a challenge):
+**Exercise VPN + the gdb MCP** — heavier fixtures in [`examples/lab-challenges/`](examples/lab-challenges/):
+
+```bash
+# web-local: agent reaches a service on YOUR laptop, only over the VPN
+scripts/ctfvm start --dir examples/lab-challenges/web-local --use-local-image   # then: vpn up + run web-local-serve.py
+# pwn-overflow: x86-64 ret2win binary — exercises the gdb MCP + pwntools
+scripts/ctfvm start --dir examples/lab-challenges/pwn-overflow --use-local-image
+```
+
+**Fan out a folder of challenges — one VM each** (each immediate subfolder is a challenge, named after it):
 
 ```bash
 python -m clanker fanout ./ctf-challenges --provider digitalocean --agent codex
@@ -116,17 +124,14 @@ python -m clanker config profiles
 # or  ./scripts/ctfvm start --account alice --dir ./challenge
 ```
 
-> Codex note: a `codex login` subscription token is short-lived and **rotates** — copying it to a VM
-> works but can expire mid-run, and one subscription can't safely fan out across many concurrent VMs.
-> For unattended/parallel Codex, an `--api-key` profile (`OPENAI_API_KEY`, doesn't rotate) is sturdier.
+> Codex note: a `codex login` token rotates and can expire mid-run, and one sub can't safely fan out
+> across many VMs. For unattended/parallel Codex, an `--api-key` profile (`OPENAI_API_KEY`) is sturdier.
 
 **Reach a LAN / internal challenge network from the agent's VM (WireGuard VPN):**
 
-The agent runs on a cloud VM that can't see the competition LAN. clanker tunnels the VM to **your
-laptop** (which *is* on the LAN) and NATs the routed subnets out your laptop's interface — so the agent
-reaches internal services as if it were you. Bringing the tunnel up is a **local privileged step** (it
-needs `sudo` for `wg-quick`/`pfctl` on the machine that's on the LAN), so it does **not** run from the
-web UI or over ngrok — the UI shows status + the exact command instead.
+The agent's cloud VM can't see the competition LAN. clanker tunnels it to **your laptop** (on the LAN)
+and NATs the routed subnets out — so the agent reaches internal services as if it were you. Bring-up
+needs **local `sudo`** (`wg-quick`/`pfctl`), so it runs from the CLI, not the UI (the UI shows the command).
 
 ```bash
 # one-time: WireGuard tools (macOS also needs bash 4+, both via Homebrew)
@@ -152,8 +157,8 @@ brew install wireguard-tools bash
 python -m clanker share        # prints https://<public>.ngrok.app/?token=...  (sets a cookie; just open it)
 ```
 
-**Add an IDA MCP server / pick a model / change the control port:** all in `.env`
-(`CTFVM_DEFAULT_IDA_MCP_URL`, `CTFVM_MODEL`, `CTFVM_CONTROL_PORT`); `config show` confirms it took.
+**IDA MCP / model / reasoning effort / control port:** all in `.env` (`CTFVM_DEFAULT_IDA_MCP_URL`,
+`CTFVM_MODEL`, `CTFVM_REASONING_EFFORT`, `CTFVM_CONTROL_PORT`); `config show` confirms it took.
 
 **Continue manually then resume the agent:**
 
