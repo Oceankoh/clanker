@@ -192,17 +192,9 @@ class Subagent:
     steerable: bool = True
 
 
-@dataclass
-class SpawnJob:
-    job_id: str
-    state: str = "queued"  # queued | running | done | error
-    run_id: str | None = None
-    started_at: str = ""
-    finished_at: str = ""
-    stdout_tail: str = ""
-    stderr_tail: str = ""
-
-
+# NB: the live spawn-job shape lives in clanker/server/jobs.py (SpawnJob) — that's
+# what /api/v1/jobs serializes. A duplicate dataclass here was unused and only bred
+# confusion, so it was removed; ProvisioningJob below is the model-layer job shape.
 @dataclass
 class ProvisioningJob:
     """A spawn job still provisioning a run that has no control plane yet —

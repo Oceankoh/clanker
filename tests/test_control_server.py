@@ -84,5 +84,18 @@ class ControlServerTest(unittest.TestCase):
         self.assertEqual((r.getheader("Connection") or "").lower(), "close")
 
 
+class ControlClientDecode(unittest.TestCase):
+    """The typed control client must surface a malformed /exec payload as a
+    ControlPlaneError, not an uncaught binascii.Error."""
+    def test_bad_base64_raises_control_plane_error(self):
+        sys.path.insert(0, str(REPO_ROOT))
+        from clanker.controlclient import ControlPlaneClient, ControlPlaneError
+        c = ControlPlaneClient("http://x", "u", "p")
+        # 5 base64 chars is an invalid length -> b64decode raises
+        c._request = lambda *a, **k: (200, b'{"returncode":0,"stdout_b64":"AAAAA","stderr_b64":""}')
+        with self.assertRaises(ControlPlaneError):
+            c.exec("echo hi")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

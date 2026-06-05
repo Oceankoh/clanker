@@ -98,19 +98,27 @@ if [[ -f "${AGENT_DIR}/backend" ]]; then
   AGENT_BACKEND="$(tr -d '[:space:]' < "${AGENT_DIR}/backend" 2>/dev/null || echo codex)"
 fi
 
-# Default to the historical Codex argv, then override from launch.cmd only if it
-# parses to a non-empty command (guards against an empty/whitespace launch.cmd).
+# Default argv PER BACKEND, then override from launch.cmd if it parses to a
+# non-empty command. The default is only a guard against a missing/empty
+# launch.cmd (a partial stage); it follows AGENT_BACKEND so a Claude run doesn't
+# silently launch Codex while the logs claim Claude.
 CODEX_AUTO_ALLOW="${CODEX_AUTO_ALLOW:-1}"
-AGENT_ARGS=(codex --no-alt-screen --enable multi_agent)
-if [[ "${CODEX_AUTO_ALLOW}" == "1" ]]; then
-  AGENT_ARGS+=(--ask-for-approval never --sandbox danger-full-access)
-fi
+case "${AGENT_BACKEND}" in
+  claude*)
+    AGENT_ARGS=(claude)
+    [[ "${CODEX_AUTO_ALLOW}" == "1" ]] && AGENT_ARGS+=(--dangerously-skip-permissions)
+    ;;
+  *)
+    AGENT_ARGS=(codex --no-alt-screen --enable multi_agent)
+    [[ "${CODEX_AUTO_ALLOW}" == "1" ]] && AGENT_ARGS+=(--ask-for-approval never --sandbox danger-full-access)
+    ;;
+esac
 if [[ -f "${AGENT_DIR}/launch.cmd" ]]; then
   read -r -a _staged_args < "${AGENT_DIR}/launch.cmd" || true
   if [[ ${#_staged_args[@]} -gt 0 ]]; then
     AGENT_ARGS=("${_staged_args[@]}")
   else
-    echo "agent/launch.cmd is empty; falling back to Codex defaults." | tee -a "${RUN_DIR}/logs/supervisor.log"
+    echo "agent/launch.cmd is empty; falling back to ${AGENT_BACKEND} defaults." | tee -a "${RUN_DIR}/logs/supervisor.log"
   fi
 fi
 AGENT_BIN="${AGENT_ARGS[0]:-codex}"

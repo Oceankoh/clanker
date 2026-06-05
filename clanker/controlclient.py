@@ -14,6 +14,7 @@ raw bodies for file transfer), but this client:
 from __future__ import annotations
 
 import base64
+import binascii
 import json
 import socket
 import urllib.error
@@ -140,8 +141,13 @@ class ControlPlaneClient:
             raise ControlPlaneError(f"/exec failed: {message}")
         if not data:
             raise ControlPlaneError("/exec returned a non-JSON body")
-        stdout = base64.b64decode((data.get("stdout_b64") or "").encode("ascii"), validate=False)
-        stderr = base64.b64decode((data.get("stderr_b64") or "").encode("ascii"), validate=False)
+        try:
+            stdout = base64.b64decode((data.get("stdout_b64") or "").encode("ascii"), validate=False)
+            stderr = base64.b64decode((data.get("stderr_b64") or "").encode("ascii"), validate=False)
+        except (ValueError, binascii.Error) as exc:
+            # a truncated/garbled payload (proxy, partial read) must surface as a
+            # typed control-plane error, not an uncaught binascii.Error
+            raise ControlPlaneError(f"/exec returned undecodable base64 output: {exc}") from exc
         return ExecResult(
             returncode=int(data.get("returncode", 1) or 0),
             stdout=stdout,
