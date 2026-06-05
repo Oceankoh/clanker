@@ -292,17 +292,22 @@ function cacheFocusStatus(){
   }
   renderFleet();
 }
-async function refreshFocus(){
+async function refreshFocus(force){
   if(!STATE.current){ $('#focus').innerHTML='<div class="muted">Select a run.</div>'; return; }
+  // The partial-update fast paths below are ONLY safe when the focus pane is
+  // already rendered for THIS run — otherwise switching runs would update just
+  // the panes/transcript and leave the header (name, tab, state) showing the
+  // previous run. On a run switch (or forced refresh) always do a full render.
+  const sameRun = !force && STATE.focusRenderedFor === STATE.current;
   // on the transcript tab, refresh just the chat (keeps the shell + scroll)
-  if(STATE.tab==='transcript' && STATE.snap){ loadTranscript(); return; }
+  if(sameRun && STATE.tab==='transcript' && STATE.snap){ loadTranscript(); return; }
   try{ STATE.snap = await api('/runs/'+encodeURIComponent(STATE.current)); }
   catch(e){ $('#focus').innerHTML='<div class="err">'+e.message+'</div>'; return; }
   cacheFocusStatus();
   // on the panes tab, if the steer box exists and the pane set is unchanged,
   // update only the pane outputs — never re-render (would clobber what you're
   // typing + steal focus + reset the mode radio).
-  if(STATE.tab==='panes' && $('#steer') && paneSetMatches()){ updatePaneOutputs(); return; }
+  if(sameRun && STATE.tab==='panes' && $('#steer') && paneSetMatches()){ updatePaneOutputs(); return; }
   renderFocus();
   if(STATE.tab==='transcript') loadTranscript();
 }
@@ -341,6 +346,7 @@ function esc(s){ return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>'
 
 function renderFocus(){
   const s = STATE.snap; if(!s){ return; }
+  STATE.focusRenderedFor = STATE.current;  // the focus pane now reflects this run (gates fast paths)
   // preserve any in-progress input across a re-render (steer text/target/mode,
   // status note) so a periodic refresh never eats what you're typing
   const keep={}; ['#steer','#steer-target','#status-note'].forEach(id=>{const el=$(id); if(el) keep[id]=el.value;});
