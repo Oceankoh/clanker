@@ -127,6 +127,26 @@ class RunRegistryBehavior(unittest.TestCase):
             listings, _ = reg.list_runs()
             self.assertEqual(listings[0].record.agent_backend, "codex")
 
+    def test_challenge_name_surfaces_in_list_runs(self):
+        # list_runs must carry challenge_name from local state (the sidebar uses
+        # it), and a discovered record without it must not clobber the name.
+        with TemporaryDirectory() as tmp:
+            runs_dir = Path(tmp) / "runs"
+            runs_dir.mkdir(parents=True)
+            (runs_dir / "r.json").write_text(json.dumps({
+                "provider": "digitalocean", "run_id": "20260605-053716",
+                "instance": "ctfvm-c-01-strings-20260605-053716", "zone": "sgp1",
+                "project": "p", "ip": "1.2.3.4", "challenge_name": "01-strings",
+            }))
+            disc = RunRecord(provider="digitalocean", run_id="20260605-053716",
+                             instance="ctfvm-c-01-strings-20260605-053716", zone="sgp1",
+                             project="p", ip="1.2.3.4")  # no challenge_name
+            reg = RunRegistry(runs_dir=runs_dir, state_file=runs_dir / "none.json",
+                              discover=lambda force: [disc])
+            listings, _ = reg.list_runs()
+            self.assertEqual(len(listings), 1)
+            self.assertEqual(listings[0].record.challenge_name, "01-strings")
+
 
 # --- parity vs the legacy service (skipped if it can't be imported) ---------
 

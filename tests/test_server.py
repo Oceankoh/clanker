@@ -286,6 +286,25 @@ class VpnStatus(unittest.TestCase):
         self.assertIn("192.168.0.0/16", d["cidrs"])
         self.assertTrue(d["nat"])
 
+    def test_vpn_requested_intent(self):
+        with TemporaryDirectory() as runs:
+            runs_dir = Path(runs) / "runs"
+            runs_dir.mkdir(parents=True)
+            common = {"provider": "digitalocean", "zone": "sgp1", "project": "p"}
+            (runs_dir / "novpn.json").write_text(json.dumps(
+                {**common, "run_id": "novpn", "instance": "ctfvm-x-novpn", "vpn_requested": "0"}))
+            (runs_dir / "withvpn.json").write_text(json.dumps(
+                {**common, "run_id": "withvpn", "instance": "ctfvm-x-withvpn", "vpn_requested": "1"}))
+            (runs_dir / "legacy.json").write_text(json.dumps(
+                {**common, "run_id": "legacy", "instance": "ctfvm-x-legacy"}))  # no field
+            reg = RunRegistry(runs_dir=runs_dir, state_file=Path(runs) / "cur.json",
+                              status=lambda r: "RUNNING")
+            service = UiService(registry=reg, providers=object(),
+                                jobs=_FakeTracker(now=lambda: "t"), client_factory=lambda r: FakeClient())
+            self.assertFalse(service.vpn_status("novpn")["requested"])
+            self.assertTrue(service.vpn_status("withvpn")["requested"])
+            self.assertTrue(service.vpn_status("legacy")["requested"])  # defaults on
+
 
 class SpawnDefaultsResolve(unittest.TestCase):
     def test_configured_vs_default(self):

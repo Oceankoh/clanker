@@ -250,6 +250,10 @@ class UiService:
         (`ctfvm vpn up`, needs sudo on the operator's machine), so the UI reports
         status + the command to run rather than doing it itself."""
         up_cmd = f"./scripts/ctfvm vpn --run-id {run_id} up"
+        # Was VPN requested for this run? (vs --no-vpn). Default True for older
+        # runs / VPN-on default, so the UI errs toward prompting.
+        raw = self.registry.load_raw(run_id) or {}
+        requested = str(raw.get("vpn_requested", "1")).strip() not in ("0", "false", "False", "")
         state = None
         vpn_dir = ROOT / ".ctfvm" / "vpn"
         if vpn_dir.is_dir():
@@ -267,9 +271,10 @@ class UiService:
                 if state:
                     break
         if not state:
-            return {"connected": False, "up_command": up_cmd}
+            return {"connected": False, "requested": requested, "up_command": up_cmd}
         return {
             "connected": True,
+            "requested": requested,
             "interface": state.get("local_interface") or state.get("name"),
             "local_ip": state.get("local_ip"),
             "remote_ip": state.get("remote_ip"),

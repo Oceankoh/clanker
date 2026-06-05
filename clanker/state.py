@@ -185,6 +185,7 @@ class RunRegistry:
                             "ip": state.get("ip", ""),
                             "started_at": state.get("started_at", ""),
                             "agent_backend": state.get("agent_backend", ""),
+                            "challenge_name": state.get("challenge_name", ""),
                             "__source": "local",
                         }
                     )
@@ -203,6 +204,7 @@ class RunRegistry:
                         "ip": cs["ip"],
                         "started_at": cs["started_at"],
                         "agent_backend": cs["agent_backend"],
+                        "challenge_name": cs.get("challenge_name", ""),
                         "__source": "current",
                     }
                 )

@@ -654,6 +654,7 @@ write_state() {
   "reasoning_effort": "$(json_escape "${START_AGENT_REASONING_EFFORT:-}")",
   "run_id": "$(json_escape "${run_id}")",
   "challenge_name": "$(json_escape "${START_CHALLENGE_NAME:-$(basename "${challenge_dir}")}")",
+  "vpn_requested": "$(json_escape "${START_VPN_REQUESTED:-1}")",
   "challenge_dir": "$(json_escape "${challenge_dir}")",
   "timeout_min": "$(json_escape "${timeout_min}")",
   "workers": "$(json_escape "${workers}")",
@@ -2914,6 +2915,9 @@ PROMPT
   # Display name: the server passes --name (folder name, parent-prefixed on
   # collision); direct CLI use falls back to the challenge folder's basename.
   START_CHALLENGE_NAME="${start_name:-$(basename "${challenge_dir}")}"
+  # Record whether VPN was requested for this run (vs --no-vpn) so the UI can
+  # alert only when the tunnel is actually expected for networked challenges.
+  START_VPN_REQUESTED="${auto_vpn}"
   refresh_instance_ip || true
   write_state "${provider}" "${instance}" "${ZONE}" "${project}" "${machine_type}" "${run_id}" "$(cd "${challenge_dir}" && pwd)" "${timeout_min}" "" "${auth_sync}" "${no_auth_sync}" "${IP:-}" "${boot_image}" "${boot_image_family}" "${boot_image_project}" "${toolbox_image_ref}" "${toolbox_image_source}" "${CONTROL_SCHEME}" "${CONTROL_HOST:-${IP:-}}" "${CONTROL_PORT}" "${CONTROL_USER}" "${CONTROL_PASSWORD}"
 
