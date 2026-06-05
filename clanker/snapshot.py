@@ -245,10 +245,11 @@ def derive_challenge_state(
                               last_activity_age_sec=age, last_activity_label=age_label)
 
     estate = (explicit_status.state.strip().lower() if explicit_status and explicit_status.state else "")
+    enote = (explicit_status.note.strip() if explicit_status and explicit_status.note else "")
     if estate == "solved":
-        return cs("solved", "Solved", "Marked solved explicitly for this run.")
+        return cs("solved", "Solved", f"Marked solved. {enote}".strip() if enote else "Marked solved explicitly for this run.")
     if estate == "blocked":
-        return cs("blocked", "Blocked", "Marked blocked explicitly for this run.")
+        return cs("blocked", "Blocked", f"Marked blocked. {enote}".strip() if enote else "Marked blocked explicitly for this run.")
 
     if not _runtime_active(runtime_status):
         label = str(runtime_status or "UNKNOWN").strip() or "UNKNOWN"

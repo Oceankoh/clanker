@@ -101,6 +101,12 @@ class ChallengeState(unittest.TestCase):
                                         explicit_status=ExplicitStatus(state="solved"), **base)
         self.assertEqual(solved.state, "solved")
 
+        # the operator's status note must surface in the summary (else it's invisible)
+        noted = derive_challenge_state(runtime_status="RUNNING", metrics={},
+                                       explicit_status=ExplicitStatus(state="blocked", note="waiting on VPN"), **base)
+        self.assertEqual(noted.state, "blocked")
+        self.assertIn("waiting on VPN", noted.summary)
+
         stopped = derive_challenge_state(runtime_status="TERMINATED", metrics={}, explicit_status=None, **base)
         self.assertEqual(stopped.state, "stopped")
 
