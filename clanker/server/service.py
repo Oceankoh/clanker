@@ -50,6 +50,9 @@ class UiService:
         # last-known challenge_state per run, so the sidebar (/runs) can render
         # every pill instantly without a control-plane round trip per run.
         self._cs_cache: dict[str, "ChallengeState"] = {}
+        # run_ids handed out this process — to dedup across concurrent batches
+        # whose state isn't persisted yet (see _assign_run_ids).
+        self._assigned_run_ids: set[str] = set()
 
     # --- health / runs -----------------------------------------------------
     def health(self) -> dict:
@@ -383,18 +386,29 @@ class UiService:
             job_ids.append(job.job_id)
         return job_ids
 
-    @staticmethod
-    def _assign_run_ids(specs: list[dict], *, now=None) -> None:
+    def _assign_run_ids(self, specs: list[dict], *, now=None) -> None:
         """Give each spec a distinct run_id (``YYYYmmdd-HHMMSS``), preserving any
         caller-supplied one. Distinct seconds per item keep the rigid run_id
-        format that identity/state/selectors all assume, while guaranteeing a
-        folder fan-out (or two clicks in the same second) never collide."""
+        format that identity/state/selectors all assume. Dedup is GLOBAL — against
+        this server's already-assigned ids (in-flight runs whose state isn't
+        written yet) and the registry — so two separate batches in the same
+        second (e.g. the same folder for codex then claude) never collide, which
+        would otherwise give them the same instance name + clobber each other's
+        state (and lose the codex run's challenge_name)."""
         from datetime import datetime, timedelta, timezone
         base = (now or (lambda: datetime.now(timezone.utc)))()
-        used: set[str] = {str(s["run_id"]) for s in specs if s.get("run_id")}
+        used: set[str] = set(self._assigned_run_ids)
+        try:
+            for listing in self.registry.list_runs()[0]:
+                if listing.record.run_id:
+                    used.add(listing.record.run_id)
+        except Exception:  # never block a spawn on a listing hiccup
+            pass
+        used |= {str(s["run_id"]) for s in specs if s.get("run_id")}
         offset = 0
         for spec in specs:
             if spec.get("run_id"):
+                self._assigned_run_ids.add(str(spec["run_id"]))
                 continue
             rid = (base + timedelta(seconds=offset)).strftime("%Y%m%d-%H%M%S")
             while rid in used:
@@ -402,6 +416,7 @@ class UiService:
                 rid = (base + timedelta(seconds=offset)).strftime("%Y%m%d-%H%M%S")
             spec["run_id"] = rid
             used.add(rid)
+            self._assigned_run_ids.add(rid)
             offset += 1
 
     def _assign_names(self, specs: list[dict]) -> None:

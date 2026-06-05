@@ -493,9 +493,17 @@ class RunIdAssignment(unittest.TestCase):
         from datetime import datetime, timezone
         return lambda: datetime(2026, 6, 5, 2, 10, 53, tzinfo=timezone.utc)
 
+    def _svc(self, existing=()):
+        from types import SimpleNamespace
+        from clanker.server.jobs import SpawnJobTracker
+        reg = SimpleNamespace(list_runs=lambda *a, **k: (
+            [SimpleNamespace(record=SimpleNamespace(run_id=r)) for r in existing], None))
+        return UiService(registry=reg, providers=object(),
+                         jobs=SpawnJobTracker(now=lambda: "t"), client_factory=lambda r: None)
+
     def test_fanout_gets_distinct_run_ids(self):
         specs = [{"challenge_dir": f"/c/{i}"} for i in range(4)]
-        UiService._assign_run_ids(specs, now=self._fixed_now())
+        self._svc()._assign_run_ids(specs, now=self._fixed_now())
         rids = [s["run_id"] for s in specs]
         self.assertEqual(len(set(rids)), 4, rids)
         self.assertEqual(rids[0], "20260605-021053")  # base second
@@ -503,9 +511,24 @@ class RunIdAssignment(unittest.TestCase):
 
     def test_caller_supplied_run_id_preserved_and_no_collision(self):
         specs = [{"run_id": "20260605-021053"}, {"challenge_dir": "/c/x"}]
-        UiService._assign_run_ids(specs, now=self._fixed_now())
+        self._svc()._assign_run_ids(specs, now=self._fixed_now())
         self.assertEqual(specs[0]["run_id"], "20260605-021053")
         self.assertNotEqual(specs[1]["run_id"], "20260605-021053")
+
+    def test_concurrent_batches_dont_collide(self):
+        # same folder for codex then claude, same second -> distinct run_ids
+        svc = self._svc()
+        a = [{"challenge_dir": "/c/01"}, {"challenge_dir": "/c/02"}]
+        svc._assign_run_ids(a, now=self._fixed_now())
+        b = [{"challenge_dir": "/c/01"}, {"challenge_dir": "/c/02"}]
+        svc._assign_run_ids(b, now=self._fixed_now())  # same base time
+        allrids = [s["run_id"] for s in a + b]
+        self.assertEqual(len(set(allrids)), 4, allrids)
+
+    def test_dedups_against_existing_runs(self):
+        specs = [{"challenge_dir": "/c/01"}]
+        self._svc(existing=["20260605-021053"])._assign_run_ids(specs, now=self._fixed_now())
+        self.assertNotEqual(specs[0]["run_id"], "20260605-021053")
 
     def test_build_start_cmd_passes_run_id_flag(self):
         cmd = UiService._build_start_cmd({"challenge_dir": "/c/x", "run_id": "20260605-021053",
