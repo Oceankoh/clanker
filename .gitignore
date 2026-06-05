@@ -1,3 +1,4 @@
 .ctfvm/
 .env
 __pycache__/
+.ctf-work/

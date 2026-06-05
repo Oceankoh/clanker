@@ -1,3 +1,0 @@
-Decoy line 1
-flag{clanker_live_smoke_ok}
-Decoy line 2

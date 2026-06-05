@@ -59,6 +59,12 @@ class ControlServerTest(unittest.TestCase):
         # body wasn't drained -> must close the connection to avoid keep-alive desync
         self.assertEqual((r.getheader("Connection") or "").lower(), "close")
 
+    def test_exec_rejects_non_object_json(self):
+        # a valid-but-non-object body (e.g. a bare number) must 400, not crash
+        c = self._conn()
+        c.request("POST", "/exec", "5", {"Content-Type": "application/json", "Authorization": AUTH})
+        self.assertEqual(c.getresponse().status, 400)
+
     def test_exec_runs_command(self):
         c = self._conn()
         c.request("POST", "/exec", json.dumps({"command": "echo hi"}),

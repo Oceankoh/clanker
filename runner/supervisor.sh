@@ -140,7 +140,7 @@ fi
 
 cat <<BANNER | tee -a "${RUN_DIR}/logs/supervisor.log"
 ========================================================
-Codex supervisor launching in ctf-toolbox container.
+${AGENT_BACKEND} supervisor launching in ctf-toolbox container.
 Challenge dir: /workspace/challenge
 Artifacts dir: /workspace/artifacts
 Findings file: /workspace/findings.md
@@ -157,7 +157,9 @@ echo "Supervisor skill available: \$gdb-mcp" | tee -a "${RUN_DIR}/logs/superviso
 echo "Subagent roles: exploit_tester, docs_researcher" | tee -a "${RUN_DIR}/logs/supervisor.log"
 echo "Supervisor skill available: \$webhook-site-callbacks" | tee -a "${RUN_DIR}/logs/supervisor.log"
 echo "Bundled MCP server available: gdb" | tee -a "${RUN_DIR}/logs/supervisor.log"
-echo "Codex multi-agent mode is enabled; spawn subagents from supervisor when needed." | tee -a "${RUN_DIR}/logs/supervisor.log"
+if [[ "${AGENT_BACKEND}" == codex* ]]; then
+  echo "Codex multi-agent mode is enabled; spawn subagents from supervisor when needed." | tee -a "${RUN_DIR}/logs/supervisor.log"
+fi
 echo "Spawned subagents are auto-mirrored to tmux sessions by subagent-tmux-bridge." | tee -a "${RUN_DIR}/logs/supervisor.log"
 
 echo "Agent backend: ${AGENT_BACKEND} (launch: ${AGENT_ARGS[*]})." | tee -a "${RUN_DIR}/logs/supervisor.log"
@@ -174,8 +176,8 @@ set -e
 stop_subagent_bridge
 trap - EXIT
 
-echo "Codex supervisor session exited with code ${rc} at $(date -u +%Y-%m-%dT%H:%M:%SZ)." | tee -a "${RUN_DIR}/logs/supervisor.log"
+echo "${AGENT_BACKEND} supervisor session exited with code ${rc} at $(date -u +%Y-%m-%dT%H:%M:%SZ)." | tee -a "${RUN_DIR}/logs/supervisor.log"
 echo "If this was unexpected (auth/session issue), run inside this shell:" | tee -a "${RUN_DIR}/logs/supervisor.log"
-echo "  docker exec -it ctf-toolbox bash -c 'cd /workspace && codex'" | tee -a "${RUN_DIR}/logs/supervisor.log"
+echo "  docker exec -it ctf-toolbox bash -c 'cd /workspace && ${AGENT_BIN}'" | tee -a "${RUN_DIR}/logs/supervisor.log"
 
 exec bash

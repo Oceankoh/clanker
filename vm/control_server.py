@@ -161,10 +161,16 @@ class ControlPlaneHandler(BaseHTTPRequestHandler):
         if body is None:
             return None
         try:
-            return json.loads(body.decode("utf-8") or "{}")
+            data = json.loads(body.decode("utf-8") or "{}")
         except Exception:
             self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "invalid json"})
             return None
+        if not isinstance(data, dict):
+            # a valid-but-non-object body (number/string/array) would crash the
+            # downstream .get() calls — reject it as a bad request instead.
+            self._send_json(HTTPStatus.BAD_REQUEST, {"ok": False, "error": "json body must be an object"})
+            return None
+        return data
 
     def do_GET(self) -> None:
         self._t0 = time.time()

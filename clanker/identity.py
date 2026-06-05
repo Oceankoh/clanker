@@ -152,6 +152,15 @@ def merge_run_entries(old: dict | None, new: dict | None) -> dict:
             merged[field] = new_val
         elif not old_val and new_val:
             merged[field] = new_val
+    # Sticky metadata: a discovered record doesn't know these (agent_backend
+    # defaults to codex, challenge_name is blank), so keep whatever we already
+    # have and only fill from `new` when it's currently empty — never let a
+    # cloud-discovered entry blank out a local run's backend/name.
+    for field in ("agent_backend", "challenge_name"):
+        if not str(merged.get(field, "") or "").strip():
+            new_val = str((new or {}).get(field, "") or "").strip()
+            if new_val:
+                merged[field] = new_val
     merged["__source"] = new_src if prefer_new else old_src
     merged["run_key"] = run_selector(merged)
     return merged

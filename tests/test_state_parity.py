@@ -169,6 +169,32 @@ class RunRegistryBehavior(unittest.TestCase):
             self.assertEqual(listings[0].record.challenge_name, "lab-challenges-web-local-2")
 
 
+class MergeMetadata(unittest.TestCase):
+    """merge_run_entries must carry agent_backend/challenge_name, and a discovered
+    record (no name, default backend) must not blank a local run's metadata."""
+    def test_local_metadata_survives_discovered_merge(self):
+        from clanker.identity import merge_run_entries
+        local = {"provider": "digitalocean", "run_id": "20260605-070004",
+                 "instance": "ctfvm-web-local-20260605-070004", "project": "p",
+                 "agent_backend": "claude-code", "challenge_name": "web-local", "__source": "local"}
+        disc = {"provider": "digitalocean", "run_id": "20260605-070004",
+                "instance": "ctfvm-web-local-20260605-070004", "project": "p",
+                "zone": "sgp1", "agent_backend": "codex", "__source": "discovered"}
+        merged = merge_run_entries(local, disc)  # local first (as list_runs orders)
+        self.assertEqual(merged["challenge_name"], "web-local")
+        self.assertEqual(merged["agent_backend"], "claude-code")
+        self.assertEqual(merged["zone"], "sgp1")  # zone still taken from discovery
+
+    def test_fills_metadata_from_new_when_missing(self):
+        from clanker.identity import merge_run_entries
+        old = {"provider": "gcp", "instance": "ctfvm-x-20260101-000000", "zone": "z", "project": "p"}
+        new = {"provider": "gcp", "instance": "ctfvm-x-20260101-000000", "zone": "z", "project": "p",
+               "challenge_name": "x", "agent_backend": "claude-code"}
+        merged = merge_run_entries(old, new)
+        self.assertEqual(merged["challenge_name"], "x")
+        self.assertEqual(merged["agent_backend"], "claude-code")
+
+
 # --- parity vs the legacy service (skipped if it can't be imported) ---------
 
 class ParityWithLegacy(unittest.TestCase):

@@ -1,1 +1,0 @@
-The flag is hidden in chal.txt in this directory. Read it and report the flag.
