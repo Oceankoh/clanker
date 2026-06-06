@@ -60,7 +60,32 @@ class UiService:
             "uptime_sec": int(time.time() - self._started),
             "known_runs": len(self.registry.list_runs()[0]),
             "active_jobs": self.jobs.active_count(),
+            "dns_proxy": self.dns_proxy_status(),
         }
+
+    def dns_proxy_status(self) -> dict:
+        """For each VPN tunnel that started a DNS forwarder (a ``*-dns.pid`` next
+        to the tunnel state), is the forwarder process still alive? Powers the
+        top-bar indicator so a crashed/killed proxy is obvious. ``expected`` is
+        how many tunnels should have a proxy; ``running`` how many do."""
+        expected = running = 0
+        vpn_dir = ROOT / ".ctfvm" / "vpn"
+        if vpn_dir.is_dir():
+            for sub in vpn_dir.iterdir():
+                if not sub.is_dir() or not any(sub.glob("*.json")):
+                    continue  # only count dirs that still have a live tunnel state
+                for pid_f in sub.glob("*-dns.pid"):
+                    expected += 1
+                    try:
+                        os.kill(int(pid_f.read_text().strip()), 0)
+                        running += 1
+                    except ProcessLookupError:
+                        pass  # dead
+                    except PermissionError:
+                        running += 1  # alive but root-owned (forwarder runs via sudo)
+                    except (ValueError, OSError):
+                        pass
+        return {"expected": expected, "running": running}
 
     def list_runs(self, *, include_status=False, force_discovery=False, only_live=False):
         return self.registry.list_runs(

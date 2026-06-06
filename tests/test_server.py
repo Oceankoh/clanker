@@ -306,6 +306,34 @@ class VpnStatus(unittest.TestCase):
             self.assertTrue(service.vpn_status("legacy")["requested"])  # defaults on
 
 
+class DnsProxyStatus(unittest.TestCase):
+    """The top-bar chip reads dns_proxy_status: count tunnels with a forwarder
+    pidfile, and how many of those processes are alive."""
+    def test_counts_running_vs_expected(self):
+        import os
+        import subprocess
+        import clanker.server.service as svc
+        from unittest.mock import patch
+        from clanker.server.jobs import SpawnJobTracker
+        with TemporaryDirectory() as root:
+            vpn = Path(root) / ".ctfvm" / "vpn"
+            a = vpn / "runA"; a.mkdir(parents=True)
+            (a / "wgA.json").write_text("{}")
+            (a / "wgA-dns.pid").write_text(str(os.getpid()))            # alive (this process)
+            b = vpn / "runB"; b.mkdir(parents=True)
+            (b / "wgB.json").write_text("{}")
+            dead = subprocess.Popen(["true"]); dead.wait()              # reaped -> dead pid
+            (b / "wgB-dns.pid").write_text(str(dead.pid))
+            c = vpn / "runC"; c.mkdir(parents=True)                     # tunnel down (no .json) -> ignored
+            (c / "wgC-dns.pid").write_text(str(os.getpid()))
+            service = UiService(registry=object(), providers=object(),
+                                jobs=SpawnJobTracker(now=lambda: "t"), client_factory=lambda r: None)
+            with patch.object(svc, "ROOT", Path(root)):
+                st = service.dns_proxy_status()
+        self.assertEqual(st["expected"], 2)   # runA + runB; runC ignored (no tunnel state)
+        self.assertEqual(st["running"], 1)    # only runA alive
+
+
 class SpawnDefaultsResolve(unittest.TestCase):
     def test_configured_vs_default(self):
         import clanker.server.service as svc

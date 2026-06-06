@@ -112,7 +112,13 @@ async function refreshHealth(){
   try{
     const r=await fetch('/health'); const j=await r.json();
     if(!j.ok) throw 0;
-    const h=j.data; $('#health').textContent=`${h.known_runs} runs · ${h.active_jobs} jobs · up ${h.uptime_sec}s`;
+    const h=j.data; let s=`${h.known_runs} runs · ${h.active_jobs} jobs · up ${h.uptime_sec}s`;
+    const dp=h.dns_proxy;   // show a colored chip only when a tunnel expects a DNS forwarder
+    if(dp && dp.expected>0){
+      const ok = dp.running>=dp.expected;
+      s += ` · <span title="VPN DNS forwarder(s) running / expected" style="color:${ok?'var(--ok)':'var(--bad)'};font-weight:600">${ok?'● ':'⚠ '}DNS proxy ${dp.running}/${dp.expected}</span>`;
+    }
+    $('#health').innerHTML=s;
   }catch(e){ $('#health').textContent='offline'; }
 }
 async function refreshFleet(force){

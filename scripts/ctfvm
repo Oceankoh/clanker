@@ -1772,8 +1772,8 @@ vpn_up_loaded() {
 # public). DHCP can't cross a routed WireGuard tunnel, so this is the way to get
 # internal hostname resolution. Off unless CTFVM_VPN_DNS is set.
 vpn_dns_enabled() {
-  case "${CTFVM_VPN_DNS:-off}" in
-    off|0|false|no|"") return 1 ;;
+  case "${CTFVM_VPN_DNS:-auto}" in
+    off|0|false|no) return 1 ;;
     *) return 0 ;;
   esac
 }
@@ -1792,12 +1792,26 @@ vpn_dns_up() {
     auto|on|1|true|yes) : ;;
     *) local IFS=','; for u in ${CTFVM_VPN_DNS}; do [[ -n "$u" ]] && upstream_args+=(--upstream "$u"); done ;;
   esac
-  echo "Starting tunnel DNS forwarder on ${local_ip}:53 (CTFVM_VPN_DNS=${CTFVM_VPN_DNS})..."
+  echo "Starting tunnel DNS forwarder on ${local_ip}:53 (CTFVM_VPN_DNS=${CTFVM_VPN_DNS:-auto})..."
+  rm -f "${pidfile}"
   ${sudo_cmd} nohup python3 "${REPO_ROOT}/scripts/vpn_dns_forwarder.py" \
     --bind "${local_ip}" --port 53 --pidfile "${pidfile}" \
     ${upstream_args[@]+"${upstream_args[@]}"} >/dev/null 2>&1 &
   disown 2>/dev/null || true
-  sleep 1
+  # verify it actually came up (port 53 free, python3 present) before relying on it
+  local fpid="" _t
+  for _t in 1 2 3 4 5; do
+    sleep 0.5
+    [[ -f "${pidfile}" ]] && fpid="$(cat "${pidfile}" 2>/dev/null)"
+    [[ -n "${fpid}" ]] && ps -p "${fpid}" >/dev/null 2>&1 && break
+    fpid=""
+  done
+  if [[ -z "${fpid}" ]]; then
+    echo "  WARNING: DNS forwarder did not start (is :53 already bound, or python3 missing?)." >&2
+    echo "           Internal hostname resolution won't work; reach targets by IP, or set CTFVM_VPN_DNS=off." >&2
+    return 0
+  fi
+  echo "  DNS forwarder running (pid ${fpid})."
   # point the agent container's resolver at the forwarder (+ a public fallback),
   # base64'd to avoid nested-quoting hell through the control plane
   resolv="$(printf 'nameserver %s\nnameserver 1.1.1.1\n' "${local_ip}")"
