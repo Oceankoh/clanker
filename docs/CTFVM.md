@@ -431,6 +431,21 @@ Operational notes:
 - Set `CTFVM_VPN=0` or pass `--no-vpn` to skip automatic VPN startup.
 - Set `CTFVM_VPN_CIDRS` or pass `--vpn-local-cidrs` to change the default routes.
 - Set `CTFVM_VPN_EGRESS_IF` if automatic local egress-interface detection picks the wrong interface.
+- Set `CTFVM_VPN_DNS` to resolve internal hostnames over the tunnel (see below).
+
+### Resolving internal hostnames (DNS)
+The VPN routes **IP traffic** for the configured CIDRs — it does **not** touch DNS. The VM keeps using its own (cloud) resolver, so it can reach LAN hosts by **IP** but can't resolve LAN-only **hostnames** (e.g. `target.ctf`). DHCP can't help here: WireGuard is a routed (L3) tunnel and carries no broadcast.
+
+`CTFVM_VPN_DNS` fixes this by running `scripts/vpn_dns_forwarder.py` on your laptop, bound to the tunnel's local gateway IP, and pointing the agent's container resolver at it. The VM then resolves **whatever this laptop can** — LAN/internal names, a loopback proxy (dnscrypt / a corporate client), and public names — because the forwarder runs where those resolvers are valid.
+
+```bash
+CTFVM_VPN_DNS=auto         ./scripts/ctfvm vpn --run-id <id> up   # forward via this laptop's own resolvers
+CTFVM_VPN_DNS=10.0.0.53    ./scripts/ctfvm vpn --run-id <id> up   # or pin explicit upstream(s), comma-separated
+```
+
+- Default is **off** (most challenges use IPs). `vpn down` stops the forwarder.
+- The forwarder binds `:53` (privileged), which the already-sudo `vpn up` covers; the container resolver is set over the control plane, with a public fallback.
+- Only useful for **hostname-based** internal targets; IP-only challenges need nothing.
 
 ## Legacy TCP bridges
 `ctfvm bridge` remains available for older TCP-only workflows, but the preferred path is the managed VPN above.

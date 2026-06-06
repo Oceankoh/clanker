@@ -1759,6 +1759,65 @@ vpn_up_loaded() {
     echo "           Usually UDP ${port} isn't reaching the VM. Check the provider firewall," >&2
     echo "           or that the laptop has outbound UDP. The VM/agent can still run locally." >&2
   fi
+
+  if vpn_dns_enabled; then
+    vpn_dns_up "${vpn_name}" "${local_ip}"
+  fi
+}
+
+# --- tunnel-side DNS forwarder (CTFVM_VPN_DNS) ------------------------------
+# Optional: run scripts/vpn_dns_forwarder.py on this laptop, bound to the
+# tunnel's local gateway IP, and point the VM's agent container at it — so the
+# agent resolves whatever this laptop can (LAN/internal names, a loopback proxy,
+# public). DHCP can't cross a routed WireGuard tunnel, so this is the way to get
+# internal hostname resolution. Off unless CTFVM_VPN_DNS is set.
+vpn_dns_enabled() {
+  case "${CTFVM_VPN_DNS:-off}" in
+    off|0|false|no|"") return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+vpn_dns_pidfile() { printf '%s/%s-dns.pid' "$(vpn_state_dir)" "$1"; }
+
+vpn_dns_up() {
+  local vpn_name="$1" local_ip="$2"
+  local pidfile sudo_cmd resolv b64 u
+  local -a upstream_args=()
+  pidfile="$(vpn_dns_pidfile "${vpn_name}")"
+  sudo_cmd="$(vpn_sudo_prefix)"
+  # CTFVM_VPN_DNS=auto|on -> detect this laptop's resolvers; anything else is a
+  # comma-separated explicit upstream list (e.g. CTFVM_VPN_DNS=10.0.0.53).
+  case "${CTFVM_VPN_DNS}" in
+    auto|on|1|true|yes) : ;;
+    *) local IFS=','; for u in ${CTFVM_VPN_DNS}; do [[ -n "$u" ]] && upstream_args+=(--upstream "$u"); done ;;
+  esac
+  echo "Starting tunnel DNS forwarder on ${local_ip}:53 (CTFVM_VPN_DNS=${CTFVM_VPN_DNS})..."
+  ${sudo_cmd} nohup python3 "${REPO_ROOT}/scripts/vpn_dns_forwarder.py" \
+    --bind "${local_ip}" --port 53 --pidfile "${pidfile}" \
+    ${upstream_args[@]+"${upstream_args[@]}"} >/dev/null 2>&1 &
+  disown 2>/dev/null || true
+  sleep 1
+  # point the agent container's resolver at the forwarder (+ a public fallback),
+  # base64'd to avoid nested-quoting hell through the control plane
+  resolv="$(printf 'nameserver %s\nnameserver 1.1.1.1\n' "${local_ip}")"
+  b64="$(printf '%s' "${resolv}" | base64 | tr -d '\n')"
+  if gcloud_ssh "sudo -u ctf bash -lc 'printf %s ${b64} | base64 -d | docker exec -i -u root ctf-toolbox sh -c \"cat > /etc/resolv.conf\"'" >/dev/null 2>&1; then
+    echo "  Agent container DNS -> ${local_ip} (resolves what this laptop can)."
+  else
+    echo "  NOTE: agent container not reachable yet; rerun 'ctfvm vpn ... up' once it's running to set DNS." >&2
+  fi
+}
+
+vpn_dns_down() {
+  local vpn_name="$1" pidfile pid sudo_cmd
+  pidfile="$(vpn_dns_pidfile "${vpn_name}")"
+  [[ -f "${pidfile}" ]] || return 0
+  sudo_cmd="$(vpn_sudo_prefix)"
+  pid="$(cat "${pidfile}" 2>/dev/null || true)"
+  [[ -n "${pid}" ]] && ${sudo_cmd} kill "${pid}" >/dev/null 2>&1 || true
+  rm -f "${pidfile}"
+  echo "Stopped tunnel DNS forwarder."
 }
 
 cmd_vpn_up() {
@@ -1898,6 +1957,7 @@ cmd_vpn_down() {
     sudo "${local_nat_script}" down "${local_interface}" >/dev/null 2>&1 || true
   fi
 
+  vpn_dns_down "${vpn_name}"
   gcloud_ssh "sudo bash -lc 'timeout 20 wg-quick down ${remote_interface} >/dev/null 2>&1 || true; rm -f /etc/wireguard/${remote_interface}.conf ${REMOTE_VPN_DIR}/${remote_interface}.env ${REMOTE_VPN_DIR}/${remote_interface}.json'" >/dev/null 2>&1 || true
   rm -f "${local_config}" "${local_nat_script}" "${state_file}"
   rmdir "$(dirname "${state_file}")" >/dev/null 2>&1 || true

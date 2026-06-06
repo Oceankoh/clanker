@@ -146,6 +146,9 @@ brew install wireguard-tools bash
 ```
 
 - Default routed CIDRs are all RFC1918 (`CTFVM_VPN_CIDRS`); the VM's own subnets are safe (longest-prefix).
+- The tunnel routes **IPs, not DNS** — the VM reaches LAN hosts by IP but won't resolve LAN-only *hostnames*
+  by default. For those, `CTFVM_VPN_DNS=auto ./scripts/ctfvm vpn --run-id <id> up` runs a forwarder on your
+  laptop so the agent resolves whatever you can (LAN/internal + public). See [docs/CTFVM.md](docs/CTFVM.md#resolving-internal-hostnames-dns).
 - **At a venue where the LAN is on Ethernet but internet is on Wi-Fi**, the NAT egress auto-detects the
   *default-route* interface (usually Wi-Fi). Override it to the Ethernet one:
   `CTFVM_VPN_EGRESS_IF=enX ./scripts/ctfvm vpn --run-id <id> up` (find `enX` via `ifconfig`/`ipconfig getifaddr enX`).
