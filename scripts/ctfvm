@@ -642,7 +642,8 @@ write_state() {
   local control_password="${22}"
 
   ensure_state_dir
-  cat > "${STATE_FILE}" <<JSON
+  local _tmp; _tmp="$(mktemp "$(dirname "${STATE_FILE}")/.write-XXXXXX")"
+  cat > "${_tmp}" <<JSON
 {
   "provider": "$(json_escape "${provider}")",
   "instance": "$(json_escape "${instance}")",
@@ -676,8 +677,13 @@ write_state() {
   "remote_run_dir": "/home/ctf/run"
 }
 JSON
-  cp "${STATE_FILE}" "${RUNS_DIR}/${run_id}.json"
-  cp "${STATE_FILE}" "${RUNS_DIR}/${instance}.json"
+  # Atomic, per-process placement: build into a unique temp, then rename into
+  # each target (mv is an atomic same-filesystem rename). Concurrent spawns
+  # (e.g. `worker spawn --count N`) can no longer leave a half-written/0-byte or
+  # interleaved double-JSON state file, and a reader never catches a partial one.
+  cp -f "${_tmp}" "${RUNS_DIR}/${run_id}.json.$$.tmp"  && mv -f "${RUNS_DIR}/${run_id}.json.$$.tmp"  "${RUNS_DIR}/${run_id}.json"
+  cp -f "${_tmp}" "${RUNS_DIR}/${instance}.json.$$.tmp" && mv -f "${RUNS_DIR}/${instance}.json.$$.tmp" "${RUNS_DIR}/${instance}.json"
+  mv -f "${_tmp}" "${STATE_FILE}"
 }
 
 load_state_required() {
