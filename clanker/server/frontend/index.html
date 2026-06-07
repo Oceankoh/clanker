@@ -30,7 +30,7 @@
   .tab.active { border-color:var(--accent); color:var(--accent); }
   pre { background:#0b0d11; border:1px solid var(--line); border-radius:6px; padding:12px; overflow:auto; max-height:52vh; white-space:pre-wrap; word-break:break-word; }
   .row { display:flex; gap:8px; align-items:center; margin:8px 0; flex-wrap:wrap; }
-  input[type=text]{ flex:1; min-width:200px; background:#0b0d11; border:1px solid var(--line); color:var(--fg); padding:7px 10px; border-radius:6px; }
+  input[type=text], input[type=number]{ flex:1; min-width:200px; background:#0b0d11; border:1px solid var(--line); color:var(--fg); padding:7px 10px; border-radius:6px; }
   textarea{ width:100%; background:#0b0d11; border:1px solid var(--line); color:var(--fg); padding:8px 10px; border-radius:6px; font:13px/1.45 ui-monospace,Menlo,monospace; resize:vertical; }
   textarea:focus,input:focus{ outline:none; border-color:var(--accent); }
   label.mode{ display:inline-flex; align-items:center; gap:5px; cursor:pointer; }
@@ -45,7 +45,7 @@
   .spawn{ max-width:640px; }
   .spawn h2{ margin:0 0 4px; }
   .spawn label{ display:block; margin:12px 0 4px; color:var(--muted); font-size:13px; }
-  .spawn input[type=text], .spawn select{ width:100%; background:#0b0d11; border:1px solid var(--line); color:var(--fg); padding:8px 10px; border-radius:6px; }
+  .spawn input[type=text], .spawn input[type=number], .spawn select{ width:100%; background:#0b0d11; border:1px solid var(--line); color:var(--fg); padding:8px 10px; border-radius:6px; }
   .spawn select{ height:36px; }
   .spawn .cols{ display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px; }
   .spawn .chk{ display:flex; align-items:center; gap:6px; margin:10px 0; color:var(--fg); }
@@ -187,8 +187,13 @@ function showSpawnWorkers(){
       <button onclick="refreshFleet()">Cancel</button>
       <span id="sw-result" class="hint"></span></div>
   </div>`;
+  // prefill from the operator's RESOLVED config (.env/env/config), like New run —
+  // so fields show real values (e.g. your CTFVM_DO_SIZE_SLUG), not generic hints.
   const set=(id,k)=>{ const el=$(id), d=DEFAULTS[k]; if(el && d && d.value) el.value=d.value; };
-  set('#sw-provider','provider'); swProviderFields();
+  set('#sw-provider','provider');
+  set('#sw-region','do_region'); set('#sw-size','do_size_slug');
+  set('#sw-zone','gcp_zone'); set('#sw-project','gcp_project'); set('#sw-machine','gcp_machine_type');
+  swProviderFields();
 }
 function swProviderFields(){
   const p=($('#sw-provider')||{}).value||'';
@@ -305,7 +310,7 @@ async function pollFleetTick(){
 }
 function startFleetPoll(){ if(_pollTimer===null){ _pollTimer=0; pollFleetTick(); } }
 async function selectRun(id){
-  STATE.current=id; STATE.snap=null;  // drop the previous run's snapshot so refreshFocus does a FULL render
+  STATE.current=id; STATE.snap=null; STATE.steerTarget='';  // drop prev snapshot + steer target so the new run defaults to its own session
   renderFleet(); await refreshFocus();
 }
 
@@ -611,13 +616,16 @@ function renderEvent(e){
 }
 // the steer box: a target picker (supervisor + any subagent pane) + key buttons; sends to the agent pane
 function steerBox(panes){
-  const tgt = STATE.steerTarget || 'ctf:supervisor';
+  // Default to THIS run's supervisor session (ctf:supervisor for normal runs,
+  // <slug>:supervisor for a challenge on a worker) — not a hardcoded ctf:.
+  const sup = (STATE.snap && STATE.snap.tmux_session) || 'ctf:supervisor';
+  const tgt = STATE.steerTarget || sup;
   const seen = new Set();
   let opts = '';
   (panes||[]).forEach(p=>{ if(seen.has(p.target)) return; seen.add(p.target);
     const sub = (p.session||'').startsWith('subagent-');
     opts += `<option value="${esc(p.target)}"${p.target===tgt?' selected':''}>${esc(p.target)}${sub?' · subagent':''}</option>`; });
-  if(!seen.has('ctf:supervisor')) opts = `<option value="ctf:supervisor"${tgt==='ctf:supervisor'?' selected':''}>ctf:supervisor</option>`+opts;
+  if(!seen.has(sup)) opts = `<option value="${esc(sup)}"${tgt===sup?' selected':''}>${esc(sup)}</option>`+opts;
   opts += `<option value="__custom__">custom…</option>`;
   return `
     <textarea id="steer" rows="2" onkeydown="steerKey(event)" placeholder="message to the agent — Enter to send · Shift+Enter for newline"></textarea>
@@ -639,7 +647,7 @@ function onSteerTargetChange(){ const c=$('#steer-target-custom'); if(c) c.style
 function steerTarget(){
   const el=$('#steer-target');
   if(el && el.value==='__custom__'){ return ($('#steer-target-custom')||{}).value || 'ctf:supervisor'; }
-  return (el&&el.value) || STATE.steerTarget || 'ctf:supervisor';
+  return (el&&el.value) || STATE.steerTarget || (STATE.snap && STATE.snap.tmux_session) || 'ctf:supervisor';
 }
 function steerSubagent(t){ STATE.steerTarget=t; STATE.tab='panes'; renderFocus(); }
 // Build a ustar tar archive in the browser (no deps) from [{name, bytes:Uint8Array}].

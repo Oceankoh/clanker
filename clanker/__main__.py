@@ -162,6 +162,28 @@ def _cmd_worker(args: argparse.Namespace) -> int:
             res = svc.remove_challenge(args.worker, args.slug)
             print(f"Removed {res['slug']} from {res['worker_id']} (run_id={res['removed_run_id']})")
             return 0
+        if args.worker_cmd == "harvest":
+            from pathlib import Path as _P
+            grp = next((g for g in svc.list_workers()
+                        if args.worker in (g["worker"].record.run_id, g["worker"].record.instance,
+                                           g["worker"].record.challenge_name)), None)
+            if not grp:
+                sys.stderr.write(f"worker not found: {args.worker}\n")
+                return 1
+            wname = grp["worker"].record.challenge_name or grp["worker"].record.run_id
+            challenges = grp["challenges"]
+            if not challenges:
+                print(f"{wname}: no challenges to harvest")
+                return 0
+            out_base = _P(args.out or f"./worker-output-{wname}")
+            reg = build_run_registry()
+            rc = 0
+            for c in challenges:
+                slug = (c.record.tmux_session or "").split(":")[0] or c.record.challenge_name or c.record.run_id
+                print(f"harvesting {slug} -> {out_base/slug}")
+                rc |= commands.cmd_fetch(reg, run_id=c.record.run_id, out_dir=str(out_base / slug))
+            print(f"Saved {len(challenges)} challenge(s) under {out_base.resolve()}")
+            return 1 if rc else 0
     except ApiError as exc:
         sys.stderr.write(f"{exc.message}\n")
         return 1
@@ -357,6 +379,9 @@ def main(argv: list[str] | None = None) -> int:
     w_rm = worker_sub.add_parser("rm-challenge", help="stop a challenge on a worker")
     w_rm.add_argument("worker", help="worker run_id / instance / name")
     w_rm.add_argument("slug", help="challenge slug (see `worker show`)")
+    w_harvest = worker_sub.add_parser("harvest", help="download every challenge's output (findings/artifacts/logs)")
+    w_harvest.add_argument("worker", help="worker run_id / instance / name")
+    w_harvest.add_argument("--out", default="", help="output dir (default: ./worker-output-<worker>)")
     worker.set_defaults(func=_cmd_worker)
 
     image = sub.add_parser("image", help="golden VM image: status / bake / record")

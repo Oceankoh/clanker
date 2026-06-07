@@ -1,0 +1,49 @@
+Supervisor starting. Logs: /home/ctf/run/03-caesar/logs/supervisor.log
+Runtime: direct host (no Docker).
+========================================================
+codex supervisor launching (direct host (no Docker)).
+Challenge dir: /home/ctf/run/03-caesar/challenge
+Artifacts dir: /home/ctf/run/03-caesar/artifacts
+Findings file: /home/ctf/run/03-caesar/findings.md
+Injection queue: /home/ctf/run/03-caesar/inject.queue
+Prompt file: /home/ctf/run/03-caesar/challenge_prompt.txt
+========================================================
+No worker windows are spawned by default.
+Spawn subagents only if/when needed from inside this VM session.
+Supervisor skill available: $ctf-exploit-subagent
+Supervisor skill available: $ctf-docs-subagent
+Supervisor skill available: $gdb-mcp
+Subagent roles: exploit_tester, docs_researcher
+Supervisor skill available: $webhook-site-callbacks
+Bundled MCP server available: gdb
+Codex multi-agent mode is enabled; spawn subagents from supervisor when needed.
+Spawned subagents are auto-mirrored to tmux sessions by subagent-tmux-bridge.
+Agent backend: codex (launch: codex --no-alt-screen --enable multi_agent --ask-for-approval never --sandbox danger-full-access).
+Starting subagent tmux bridge (log: /home/ctf/run/03-caesar/logs/subagent-bridge.log, prefix: subagent-03-caesar).
+Launching interactive codex session...
+Stopped subagent tmux bridge (pid=5286).
+Supervisor starting. Logs: /home/ctf/run/03-caesar/logs/supervisor.log
+Runtime: direct host (no Docker).
+Supervisor starting. Logs: /home/ctf/run/03-caesar/logs/supervisor.log
+Runtime: direct host (no Docker).
+========================================================
+codex supervisor launching (direct host (no Docker)).
+Challenge dir: /home/ctf/run/03-caesar/challenge
+Artifacts dir: /home/ctf/run/03-caesar/artifacts
+Findings file: /home/ctf/run/03-caesar/findings.md
+Injection queue: /home/ctf/run/03-caesar/inject.queue
+Prompt file: /home/ctf/run/03-caesar/challenge_prompt.txt
+========================================================
+No worker windows are spawned by default.
+Spawn subagents only if/when needed from inside this VM session.
+Supervisor skill available: $ctf-exploit-subagent
+Supervisor skill available: $ctf-docs-subagent
+Supervisor skill available: $gdb-mcp
+Subagent roles: exploit_tester, docs_researcher
+Supervisor skill available: $webhook-site-callbacks
+Bundled MCP server available: gdb
+Codex multi-agent mode is enabled; spawn subagents from supervisor when needed.
+Spawned subagents are auto-mirrored to tmux sessions by subagent-tmux-bridge.
+Agent backend: codex (launch: codex --no-alt-screen --enable multi_agent --ask-for-approval never --sandbox danger-full-access).
+Starting subagent tmux bridge (log: /home/ctf/run/03-caesar/logs/subagent-bridge.log, prefix: subagent-03-caesar).
+Launching interactive codex session...

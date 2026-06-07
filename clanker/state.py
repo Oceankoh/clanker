@@ -281,10 +281,20 @@ class RunRegistry:
         # enrich with runtime status
         if include_status or only_live:
             for entry in merged:
+                if entry.get("parent_worker_id"):
+                    continue  # a hosted challenge has no VM of its own — inherit the worker's status below
                 record = self._entry_to_record(entry)
                 status = self.get_status_cached(record, force=force_status) if record else "UNKNOWN"
                 entry["runtime_status"] = status
                 entry["is_runtime_active"] = _runtime_status_is_active(status)
+            # challenges share the worker's VM: take the worker's status, not a
+            # dead provider lookup of their synthetic instance name (-> UNKNOWN).
+            by_run_id = {e.get("run_id"): e for e in merged if not e.get("parent_worker_id")}
+            for entry in merged:
+                pw = str(entry.get("parent_worker_id") or "").strip()
+                if pw and pw in by_run_id:
+                    entry["runtime_status"] = by_run_id[pw].get("runtime_status", "")
+                    entry["is_runtime_active"] = by_run_id[pw].get("is_runtime_active", False)
 
         if only_live:
             live: list[dict] = []

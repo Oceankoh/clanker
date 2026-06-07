@@ -183,6 +183,18 @@ class ListWorkersTest(unittest.TestCase):
             self.assertEqual(groups[0]["challenges"][0].record.parent_worker_id, "20250101-000000")
 
 
+class ChallengeRuntimeStatusTest(unittest.TestCase):
+    def test_challenge_inherits_worker_status(self):
+        with TemporaryDirectory() as d:
+            svc, fake, registry = _service(Path(d))   # worker status fn returns "active"
+            svc._stage_agent_remote = lambda *a, **k: None
+            svc.add_challenge("20250101-000000", {"name": "pwn-01"}, archive=b"T")
+            listings, _ = registry.list_runs(include_status=True)
+            ch = next(l for l in listings if l.record.parent_worker_id == "20250101-000000")
+            self.assertEqual(ch.runtime_status, "active")    # not UNKNOWN
+            self.assertTrue(ch.is_runtime_active)
+
+
 class ChallengeSnapshotFilterTest(unittest.TestCase):
     def test_panes_filtered_to_own_session(self):
         with TemporaryDirectory() as d:

@@ -157,6 +157,22 @@ if [[ "${USE_DOCKER}" == "1" ]]; then
   fi
 else
   export PATH="${RUN_DIR}/.venv/bin:${HOST_NPM_BIN}:${PATH}"
+  # The staged agent config (e.g. .codex/config.toml trusted-projects path) was
+  # rendered for the container's /workspace HOME. On the host the workspace IS
+  # RUN_DIR, so remap /workspace -> RUN_DIR in the config files, or the agent
+  # blocks on a directory-trust prompt. (Worker challenges are already remapped
+  # before upload; this makes normal dockerless runs correct too — no-op there.)
+  if [[ "${RUN_DIR}" != "/workspace" ]]; then
+    # NOTE: under `set -euo pipefail`, a grep over a missing dir (.claude absent
+    # on codex runs) exits non-zero and would kill the supervisor before the
+    # agent launches — so iterate only existing dirs and neutralize every exit.
+    for _d in "${RUN_DIR}/.codex" "${RUN_DIR}/.claude" "${RUN_DIR}/agent"; do
+      [[ -d "${_d}" ]] || continue
+      while IFS= read -r _cf; do
+        [[ -n "${_cf}" ]] && sed -i "s#/workspace#${RUN_DIR}#g" "${_cf}" 2>/dev/null || true
+      done < <(grep -rIl '/workspace' "${_d}" 2>/dev/null || true)
+    done
+  fi
   if ! command -v "${AGENT_BIN}" >/dev/null 2>&1; then
     echo "${AGENT_BIN} CLI not found on host (looked in ${HOST_NPM_BIN})." | tee -a "${RUN_DIR}/logs/supervisor.log"
     echo "Rebuild the golden image (clanker image bake) or install the agent CLI." | tee -a "${RUN_DIR}/logs/supervisor.log"

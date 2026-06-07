@@ -1,0 +1,13 @@
+/usr/bin/python3
+/usr/local/bin/uv
+/usr/bin/gcc
+/usr/bin/gdb
+/usr/bin/file
+/usr/bin/readelf
+/usr/bin/objdump
+/usr/bin/strings
+/usr/bin/nc
+/usr/bin/curl
+/usr/bin/wget
+/usr/bin/tar
+/usr/bin/unzip

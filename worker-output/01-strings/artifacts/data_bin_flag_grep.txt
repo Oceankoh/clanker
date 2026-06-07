@@ -1,0 +1,1 @@
+601:flag{str1ngs_4lways_w0rk}

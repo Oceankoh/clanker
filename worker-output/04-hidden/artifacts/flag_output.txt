@@ -1,0 +1,3 @@
+
+[flag]
+flag{h1dd3n_d0tf1l3s_upl04d3d}

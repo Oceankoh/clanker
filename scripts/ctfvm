@@ -1866,6 +1866,15 @@ cmd_vpn_up() {
   done
 
   resolve_target_required
+  # A challenge hosted on a worker has no VM/IP of its own — VPN is a per-VM
+  # tunnel, so point the operator at the worker instead of failing on a blank IP.
+  local _pw
+  _pw="$(json_get_from_file parent_worker_id "${SELECTED_STATE_FILE}" 2>/dev/null || true)"
+  if [[ -n "${_pw}" ]]; then
+    echo "This run is a challenge hosted on worker ${_pw}; challenges share the worker's VM + tunnel." >&2
+    echo "Bring the VPN up on the worker instead:  ${SCRIPT_DIR}/ctfvm vpn --run-id ${_pw} up" >&2
+    exit 1
+  fi
   if [[ -z "${vpn_name}" ]]; then
     vpn_name="$(vpn_default_name)"
   fi
@@ -2002,7 +2011,13 @@ cmd_vpn_list() {
 # reusing a single sudo session (one password prompt for all of them).
 cmd_vpn_up_all() {
   local rid total=0 ok=0 run_ids
-  run_ids="$( { for f in "${RUNS_DIR}"/*.json; do [[ -e "${f}" ]] && json_get_from_file run_id "${f}" 2>/dev/null; done; } | sort -u | grep -E '^[0-9]{8}-[0-9]{6}$' || true)"
+  # Skip challenges hosted on a worker: they have no VM/IP of their own and
+  # share the worker's single tunnel, so only the worker run gets a VPN.
+  run_ids="$( { for f in "${RUNS_DIR}"/*.json; do
+      [[ -e "${f}" ]] || continue
+      [[ -n "$(json_get_from_file parent_worker_id "${f}" 2>/dev/null || true)" ]] && continue
+      json_get_from_file run_id "${f}" 2>/dev/null
+    done; } | sort -u | grep -E '^[0-9]{8}-[0-9]{6}$' || true)"
   if [[ -z "${run_ids}" ]]; then
     echo "No runs found. Start one with: ctfvm start --dir <challenge-folder>" >&2
     exit 1
@@ -2597,6 +2612,11 @@ cmd_start() {
   local use_local_image="0"
   local local_image_archive
   local worker_mode="0"
+  # dockerless: run the agent directly on the host (golden image has the tools),
+  # no toolbox container. Set when booting the golden image (unless the operator
+  # explicitly asked for the legacy container via --use-local-image), and always
+  # for workers. Docker is now the fallback for the stock image only.
+  local dockerless="0"
   local toolbox_variant="${CTFVM_TOOLBOX_VARIANT:-lean}"
   local toolbox_image_ref=""
   local toolbox_location=""
@@ -2747,6 +2767,7 @@ cmd_start() {
       boot_image="$( cd "${REPO_ROOT}" && PYTHONPATH="${REPO_ROOT}" python3 -m clanker image id --provider gcp 2>/dev/null || true )"
       if [[ -n "${boot_image}" ]]; then
         echo "Using golden image: ${boot_image}"
+        [[ "${use_local_image}" == "1" ]] || dockerless=1
       else
         boot_image="$(env_first_set CTFVM_GCP_BOOT_IMAGE)"
         if [[ -z "${boot_image}" ]]; then
@@ -2765,6 +2786,7 @@ cmd_start() {
       boot_image="$( cd "${REPO_ROOT}" && PYTHONPATH="${REPO_ROOT}" python3 -m clanker image id --provider digitalocean 2>/dev/null || true )"
       if [[ -n "${boot_image}" ]]; then
         echo "Using golden image: ${boot_image}"
+        [[ "${use_local_image}" == "1" ]] || dockerless=1
       else
         boot_image="${CTFVM_DO_BOOT_IMAGE:-ubuntu-24-04-x64}"
       fi
@@ -2792,6 +2814,7 @@ cmd_start() {
   # empty and the supervisor launch is skipped below.
   if [[ "${worker_mode}" == "1" ]]; then
     export START_RUNNER_TYPE="worker"
+    dockerless=1   # workers never run the toolbox container
     if [[ -z "${challenge_dir}" ]]; then
       challenge_dir="$(mktemp -d)"
       : > "${challenge_dir}/.worker"
@@ -2869,9 +2892,9 @@ cmd_start() {
   toolbox_image_source="artifact-registry"
   render_startup_script "${provider}" "${timeout_min}" "${control_port}" "${control_user}" "${control_password}" "${startup_tmp}"
 
-  # Worker mode boots the golden image and runs the agent directly on the host —
+  # Dockerless (golden image / worker) runs the agent directly on the host —
   # no toolbox container, so skip all toolbox-image resolution / pull / run.
-  if [[ "${worker_mode}" != "1" ]]; then
+  if [[ "${dockerless}" != "1" ]]; then
   if [[ "${force_remote_build}" == "1" ]]; then
     echo "--force-remote-build is disabled. Use Artifact Registry or --use-local-image." >&2
     exit 1
@@ -2934,7 +2957,7 @@ cmd_start() {
         ;;
     esac
   fi
-  fi  # end worker-mode toolbox guard
+  fi  # end dockerless toolbox guard
 
   {
     echo "Challenge description:"
@@ -3089,8 +3112,8 @@ PROMPT
   echo "Installing staged ${agent} agent config on the VM..."
   gcloud_ssh "sudo cp -R ${remote_upload_dir}/agentstage/. /home/ctf/run/ && sudo chown -R ctf:ctf /home/ctf/run && { sudo chmod 600 /home/ctf/run/agent/container.env 2>/dev/null || true; } && { sudo find /home/ctf/run -name auth.json -exec chmod 600 {} + 2>/dev/null || true; }"
 
-  if [[ "${worker_mode}" == "1" ]]; then
-    echo "Worker mode: skipping toolbox container (agent runs dockerless on the host)."
+  if [[ "${dockerless}" == "1" ]]; then
+    echo "Dockerless: agent runs directly on the host (golden image) — no toolbox container."
   elif [[ "${use_local_image}" == "1" ]]; then
     if ! gcloud_ssh "test -f ${remote_upload_dir}/ctf-toolbox.tar.gz"; then
       echo "Local archive missing on VM after upload; aborting." >&2

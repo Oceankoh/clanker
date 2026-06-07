@@ -4,9 +4,10 @@ Spin up a disposable cloud VM, drop an AI coding agent (**Codex** or **Claude Co
 a CTF challenge, and watch/steer it from a local web UI — then throw the VM away.
 
 - Pluggable **cloud providers** (GCP, DigitalOcean) and **agent backends** (Codex, Claude Code).
-- A small HTTP **control plane** on each VM — no SSH on the hot path.
-- A web UI with a live **chat transcript**, steering (any pane/subagent), per-run **VPN status**, and
-  artifact browsing.
+- A pre-baked **golden image** → fast boots, agent runs **directly on the host** (no Docker).
+- **One VM per challenge**, or a reusable **worker** VM that hosts many — same setup either way.
+- A small HTTP **control plane** on each VM (no SSH on the hot path) + a web UI with a live **chat
+  transcript**, steering, per-run **VPN status**, and artifact browsing.
 
 > **Two commands, one system.** It's a strangler migration: the two CLIs share the same `.ctfvm/`
 > state, config, and agent/provider abstractions — they just split by job. Use whichever the table
@@ -36,22 +37,29 @@ python -m clanker config show     # verify what resolved, and from where
 codex login                       # Codex (syncs ~/.codex to the VM)
 python -m clanker auth claude     # Claude (stores a setup-token; never copies creds)
 
-# d) get a toolbox image onto the provider (once; rebuild when the Dockerfile changes)
-./scripts/ctfvm image push-registry --provider digitalocean   # …or build a local archive:
-./scripts/ctfvm image build-local                             # then use --use-local-image
+# d) bake the golden VM image once (tools + agent CLIs pre-installed, no Docker, no creds)
+python -m clanker image bake --provider digitalocean    # ~12-15 min; reused by every run/worker
+python -m clanker image status                          # when it was built; re-bake to update tools
 ```
 
-## 2. Start a run
+> After this, runs boot the golden image and run the agent **directly on the host** (no Docker). Blank
+> golden image ⇒ stock distro + a slow per-boot install; `--use-local-image` forces the legacy container.
+
+## 2. Start work — two models, same setup
 
 ```bash
+# A) one VM per challenge (own VM, torn down when done)
 ./scripts/ctfvm start --dir ./challenge --desc "heap UAF chal" --agent codex
-./scripts/ctfvm start --provider digitalocean --zone nyc3 --agent claude-code \
-    --dir ./challenge --use-local-image --no-vpn
+
+# B) a worker — one reusable VM that hosts many challenges, added on demand
+python -m clanker worker spawn --count 3 --provider digitalocean
+python -m clanker worker add worker-01 --dir ./challenge --agent codex
 ```
 
-`--agent` / `--model` / `--reasoning-effort` default from `.env` (`CTFVM_AGENT` / `CTFVM_MODEL` /
-`CTFVM_REASONING_EFFORT`, default `xhigh`, Codex only). `description.txt` / `ideas.txt` in the dir are
-picked up automatically.
+Both build the same prompt (`description.txt` + `ideas.txt` from the dir + shared instructions) and run
+the agent dockerless on the golden image. `--agent` / `--model` / `--reasoning-effort` default from
+`.env`. A worker hosts challenges in isolated sessions; `worker harvest <w>` saves every challenge's
+output before you destroy it.
 
 ## 3. Watch & steer it
 
@@ -94,46 +102,30 @@ Good first check that auth + image + provisioning work. Samples: [`examples/smok
 
 ```bash
 # web-local: agent reaches a service on YOUR laptop, only over the VPN
-scripts/ctfvm start --dir examples/lab-challenges/web-local --use-local-image   # then: vpn up + run web-local-serve.py
+scripts/ctfvm start --dir examples/lab-challenges/web-local      # then: vpn up + run web-local-serve.py
 # pwn-overflow: x86-64 ret2win binary — exercises the gdb MCP + pwntools
-scripts/ctfvm start --dir examples/lab-challenges/pwn-overflow --use-local-image
+scripts/ctfvm start --dir examples/lab-challenges/pwn-overflow
 ```
 
-**Fan out a folder of challenges — one VM each** (each immediate subfolder is a challenge, named after it):
+**Manage workers** (spawn empty VMs in §2, then):
+
+```bash
+python -m clanker worker ls                              # workers + hosted-challenge counts
+python -m clanker worker show worker-01                  # its challenges
+python -m clanker worker rm-challenge worker-01 pwn-01   # stop one challenge
+python -m clanker worker harvest worker-01 --out ./out   # save every challenge's output BEFORE destroying
+```
+
+Each challenge is its own focusable run in the UI, grouped under its worker. Trade-off: challenges on
+one worker share ports/packages (no container isolation) — see
+[docs/PROPOSAL_BOOT_WORKERS_UPLOADS.md](docs/PROPOSAL_BOOT_WORKERS_UPLOADS.md).
+
+**Fan out a folder — one VM per subfolder:**
 
 ```bash
 python -m clanker fanout ./ctf-challenges --provider digitalocean --agent codex
-# or from the web UI: "+ New run" -> tick "deploy folder — each subfolder is its own run"
+# or in the UI: "+ New run" -> tick "deploy folder"
 ```
-
-**Bake a golden image once — fast boots, no Docker** (tools + agent CLIs pre-installed; **no
-credentials baked** — those are injected per challenge at launch):
-
-```bash
-python -m clanker image bake --provider digitalocean   # attended; spins up a builder VM, snapshots it
-python -m clanker image status                          # when it was built + agent versions
-#  digitalocean  clanker-toolbox-20260606-164056 — built 3 days ago
-#                codex codex-cli 0.137.0, claude-code 2.1.167
-```
-
-Built once, reused for every run/worker (read from `.ctfvm/golden-image.json`, or set
-`CTFVM_GOLDEN_IMAGE_DO`). Blank ⇒ stock distro + the slow per-boot install. Re-bake only to
-update the toolset/CLIs. GCP: `--provider gcp` (mirrors DO; the stock-image fallback covers it).
-
-**Worker pool — N reusable VMs, add challenges on demand** (one VM hosts many challenges, each
-in its own session + workspace; runs the agent directly on the host, no Docker):
-
-```bash
-python -m clanker worker spawn --count 5 --provider digitalocean   # 5 empty workers (--count required)
-python -m clanker worker ls                                        # workers + hosted-challenge counts
-python -m clanker worker add worker-01 --dir ./challenges/pwn-01 --agent codex   # upload + launch
-python -m clanker worker show worker-01                            # its hosted challenges
-python -m clanker worker rm-challenge worker-01 pwn-01             # stop one challenge
-```
-
-Each challenge is its own focusable run in the UI, grouped under its worker; credentials are
-injected per challenge at launch. Trade-off: challenges on one worker share ports/packages (no
-container isolation) — see [docs/PROPOSAL_BOOT_WORKERS_UPLOADS.md](docs/PROPOSAL_BOOT_WORKERS_UPLOADS.md).
 
 **List the agent backends + readiness:**
 

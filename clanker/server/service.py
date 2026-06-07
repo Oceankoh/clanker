@@ -118,7 +118,13 @@ class UiService:
     # --- snapshot ----------------------------------------------------------
     def snapshot(self, run_id: str, *, include_artifacts=True, force_status=False):
         record = self._record(run_id)
-        runtime_status = self.registry.get_status_cached(record, force=force_status)
+        # A hosted challenge shares the worker's VM — use the worker's runtime
+        # status, not a dead lookup of the challenge's synthetic instance.
+        if record.parent_worker_id:
+            worker = self.registry.resolve(record.parent_worker_id)
+            runtime_status = self.registry.get_status_cached(worker, force=force_status) if worker else "active"
+        else:
+            runtime_status = self.registry.get_status_cached(record, force=force_status)
         try:
             client = self._client_factory(record)
         except ControlPlaneError as exc:

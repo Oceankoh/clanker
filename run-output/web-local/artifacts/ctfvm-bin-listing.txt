@@ -1,0 +1,12 @@
+/opt/ctfvm:
+total 12
+drwxr-xr-x 3 root root 4096 Jun  7 14:27 .
+drwxr-xr-x 1 root root 4096 Jun  7 14:27 ..
+drwxr-xr-x 4 root root 4096 Jun  7 12:37 npm-global
+
+/opt/ctfvm/npm-global/bin:
+total 12
+drwxr-xr-x 2 root root 4096 Jun  7 14:27 .
+drwxr-xr-x 4 root root 4096 Jun  7 12:37 ..
+lrwxrwxrwx 1 root root   60 Jun  7 14:27 claude -> ../lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe
+lrwxrwxrwx 1 root root   46 Jun  7 14:27 codex -> ../lib/node_modules/@openai/codex/bin/codex.js
