@@ -15,11 +15,15 @@ import sys
 import tempfile
 from pathlib import Path
 
+import io
+import posixpath
+import tarfile
+
 from .agents import build_agent_backend, list_backends
-from .config import RUNS_DIR, STATE_FILE, Settings, load_json, state_valid
+from .config import MAX_UPLOAD_BYTES, ROOT, RUNS_DIR, STATE_FILE, Settings, load_json, state_valid
 from .controlclient import ControlPlaneClient, ControlPlaneError
-from .identity import normalize_instance_name, provider_from_state
-from .models import RunRecord
+from .identity import normalize_instance_name, normalize_provider, provider_from_state
+from .models import DEFAULT_REMOTE_RUN_DIR, RunRecord
 from .secretstore import get_profile, get_secret, list_profiles, set_profile, set_secret
 from .providers.base import (
     PROVIDER_LABELS,
@@ -57,6 +61,61 @@ def _client_or_error(record: RunRecord) -> ControlPlaneClient:
         raise ControlPlaneError(
             f"{exc}. Use a break-glass command (attach/shell) for runs without a control plane."
         ) from exc
+
+
+_PROMPT_FALLBACK = """Objectives:
+- Solve the challenge safely and document reproducible steps.
+- Prefer solving the challenge locally inside `/workspace/challenge` as far as possible before interacting with any remote target or service.
+- Save important outputs to /workspace/artifacts.
+- Keep a concise running summary in /workspace/findings.md.
+- If blocked, produce concrete next-step hypotheses.
+"""
+
+
+def build_challenge_prompt(description: str = "", ideas: str = "", *, root: Path = ROOT) -> str:
+    """The agent's initial prompt — the SAME shape a normal `ctfvm start` builds:
+    description + ideas + prompts/supervisor/instructions.txt (so a challenge on a
+    worker behaves identically to a regular run). Single source of truth shared by
+    the worker path; mirrors the block in scripts/ctfvm cmd_start."""
+    try:
+        instructions = (Path(root) / "prompts" / "supervisor" / "instructions.txt").read_text()
+    except OSError:
+        instructions = _PROMPT_FALLBACK
+    return (
+        "Challenge description:\n"
+        f"{description.strip() or '(none provided)'}\n\n"
+        "Initial ideas:\n"
+        f"{ideas.strip() or '(none provided)'}\n\n"
+        f"{instructions}"
+    )
+
+
+def confine_remote_path(run_dir: str, dest: str, *, allow_abs: bool = False) -> str:
+    """Resolve an operator-supplied upload destination against a run's workspace.
+
+    Relative paths join the workspace; absolute paths must stay inside it unless
+    ``allow_abs`` (the explicit escape hatch). Raises ``ValueError`` on escape.
+    Single source of truth shared by the CLI (`clanker upload`) and the API
+    (`UiService.upload`). Operates on POSIX remote paths.
+    """
+    run_dir = (run_dir or DEFAULT_REMOTE_RUN_DIR).rstrip("/") or "/"
+    dest = (dest or "").strip()
+    if not dest:
+        raise ValueError("destination path is empty")
+    if dest.startswith("/"):
+        norm = posixpath.normpath(dest)
+        if allow_abs:
+            return norm
+        if norm != run_dir and not norm.startswith(run_dir + "/"):
+            raise ValueError(
+                f"absolute path {dest} is outside the run workspace {run_dir} "
+                f"(pass --allow-abs / allow_abs to override)"
+            )
+        return norm
+    norm = posixpath.normpath(posixpath.join(run_dir, dest))
+    if norm != run_dir and not norm.startswith(run_dir + "/"):
+        raise ValueError(f"path {dest} escapes the run workspace {run_dir}")
+    return norm
 
 
 def _extract_tar(archive: Path, dest: Path, *, gzip: bool) -> None:
@@ -611,4 +670,138 @@ def cmd_sync_down(
         pass
 
     print(f"Synced remote {remote_path} -> {out.resolve()}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# upload  (operator -> running run)
+# ---------------------------------------------------------------------------
+
+def cmd_upload(
+    registry: RunRegistry,
+    *,
+    run_id: str = "",
+    instance: str = "",
+    local_path: str = "",
+    remote_path: str = "",
+    as_tar: bool = False,
+    allow_abs: bool = False,
+    mode: str = "",
+) -> int:
+    record = _resolve(registry, run_id=run_id, instance=instance)
+    if not record:
+        sys.stderr.write("No matching run found.\n")
+        return 1
+    src = Path(local_path).expanduser()
+    run_dir = record.remote_run_dir or DEFAULT_REMOTE_RUN_DIR
+    client = _client_or_error(record)
+
+    if as_tar:
+        if not src.is_dir():
+            sys.stderr.write(f"--tar requires a local directory: {src}\n")
+            return 1
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as tf:
+            tf.add(str(src), arcname=".")  # extract contents into dest dir
+        body = buf.getvalue()
+        if len(body) > MAX_UPLOAD_BYTES:
+            sys.stderr.write(f"archive is {len(body)} bytes; exceeds {MAX_UPLOAD_BYTES} limit\n")
+            return 1
+        try:
+            dest = confine_remote_path(run_dir, remote_path or run_dir, allow_abs=allow_abs)
+        except ValueError as exc:
+            sys.stderr.write(f"{exc}\n")
+            return 1
+        client.upload_tar(dest, body)
+        print(f"Uploaded {src}/ -> {dest} ({len(body)} bytes, tar)")
+        return 0
+
+    if not src.is_file():
+        sys.stderr.write(f"Local file not found: {src}\n")
+        return 1
+    body = src.read_bytes()
+    if len(body) > MAX_UPLOAD_BYTES:
+        sys.stderr.write(f"file is {len(body)} bytes; exceeds {MAX_UPLOAD_BYTES} limit\n")
+        return 1
+    try:
+        dest = confine_remote_path(run_dir, remote_path or src.name, allow_abs=allow_abs)
+    except ValueError as exc:
+        sys.stderr.write(f"{exc}\n")
+        return 1
+    client.upload_file(dest, body, mode=mode)
+    print(f"Uploaded {src} -> {dest} ({len(body)} bytes)")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# golden image  (status / bake / record)
+# ---------------------------------------------------------------------------
+
+def cmd_image_status(*, now=None) -> int:
+    from .goldenimage import KNOWN_PROVIDERS, human_age, is_stale, load_golden_images
+    data = load_golden_images()
+    print("Golden VM image (toolbox + agent CLIs pre-baked; credentials injected "
+          "per-challenge, never baked):\n")
+    for prov in KNOWN_PROVIDERS:
+        entry = data.get(prov) or {}
+        if not entry.get("image_id"):
+            print(f"  {prov:<13} not built — bake with:  clanker image bake --provider {prov}")
+            continue
+        name = entry.get("image_name") or entry.get("image_id")
+        built = entry.get("built_at", "")
+        stale = "  ⚠ STALE — consider rebuilding" if is_stale(built, now=now) else ""
+        vers = entry.get("agent_versions") or {}
+        vstr = ", ".join(f"{k} {v}" for k, v in sorted(vers.items())) or "agent versions unrecorded"
+        print(f"  {prov:<13} {name} — built {human_age(built, now=now)}{stale}")
+        print(f"  {'':<13} {vstr}")
+        print(f"  {'':<13} rebuild:  clanker image bake --provider {prov}")
+    return 0
+
+
+def cmd_image_id(provider: str) -> int:
+    """Print the effective golden image id for a provider (env override wins, else
+    the recorded bake), or nothing. The bash provisioner reads this to pick the
+    boot image; empty output means 'fall back to the stock distro image'."""
+    from .goldenimage import get_golden_image
+    prov = normalize_provider(provider)
+    key = "golden_image_do" if prov == "digitalocean" else "golden_image_gcp"
+    val = str(Settings().get(key) or "").strip()
+    if not val:
+        val = str(get_golden_image(prov).get("image_id") or "").strip()
+    if val:
+        print(val)
+    return 0
+
+
+def cmd_image_bake(provider: str) -> int:
+    prov = normalize_provider(provider)
+    script = ROOT / "images" / "golden" / "bake.sh"
+    if not script.exists():
+        sys.stderr.write(f"bake script not found: {script}\n")
+        return 1
+    print(f"Baking golden image for {prov} via {script} (attended — provisions a builder VM)…")
+    return subprocess.call(["bash", str(script), "--provider", prov])
+
+
+def cmd_image_record(
+    provider: str,
+    *,
+    image_id: str,
+    image_name: str = "",
+    built_at: str = "",
+    codex_version: str = "",
+    claude_version: str = "",
+) -> int:
+    """Persist golden-image metadata. Invoked by images/golden/bake.sh after a
+    successful bake; rarely run by hand."""
+    from .goldenimage import record_golden_image
+    versions = {}
+    if codex_version:
+        versions["codex"] = codex_version
+    if claude_version:
+        versions["claude-code"] = claude_version
+    entry = record_golden_image(provider, image_id=image_id, image_name=image_name,
+                                built_at=built_at, agent_versions=versions)
+    print(f"Recorded golden image for {normalize_provider(provider)}: "
+          f"{entry['image_name'] or entry['image_id']} (built {entry['built_at']})")
     return 0

@@ -12,6 +12,7 @@ from ..models import (
     Snapshot,
     SnapshotMetrics,
     Subagent,
+    UploadResult,
 )
 from .jobs import SpawnJob
 
@@ -41,7 +42,18 @@ def run_listing(l: RunListing) -> dict:
         "ip": r.ip,
         "started_at": r.started_at,
         "runtime_status": l.runtime_status,
+        "runner_type": r.runner_type,
+        "parent_worker_id": r.parent_worker_id,
+        "tmux_session": r.tmux_session,
         "challenge_state": None,
+    }
+
+
+def worker_group(group: dict) -> dict:
+    """A worker plus the challenges hosted on it (see UiService.list_workers)."""
+    return {
+        "worker": run_listing(group["worker"]),
+        "challenges": [run_listing(c) for c in group["challenges"]],
     }
 
 
@@ -121,6 +133,10 @@ def provisioning_job(p: ProvisioningJob) -> dict:
         "finished_at": p.finished_at,
         "output_tail": p.output_tail,
     }
+
+
+def upload_result(u: UploadResult) -> dict:
+    return {"path": u.path, "size_bytes": u.size_bytes, "mode": u.mode, "as_tar": u.as_tar}
 
 
 def job(j: SpawnJob) -> dict:

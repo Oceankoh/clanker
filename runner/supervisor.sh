@@ -44,8 +44,16 @@ start_subagent_bridge() {
     fi
   fi
 
-  echo "Starting subagent tmux bridge (log: ${BRIDGE_LOG})." | tee -a "${RUN_DIR}/logs/supervisor.log"
-  "${BRIDGE_SCRIPT}" --run-dir "${RUN_DIR}" --poll-sec "${SUBAGENT_BRIDGE_POLL_SEC}" >> "${BRIDGE_LOG}" 2>&1 &
+  # Namespace subagent sessions per challenge so multiple challenges on one worker
+  # don't collide (and the snapshot can filter by "subagent-<slug>"). The legacy
+  # single-run workspace keeps the bare "subagent" prefix.
+  local bridge_prefix="subagent"
+  local base; base="$(basename "${RUN_DIR}")"
+  if [[ "${RUN_DIR}" != "/home/ctf/run" && -n "${base}" ]]; then
+    bridge_prefix="subagent-${base}"
+  fi
+  echo "Starting subagent tmux bridge (log: ${BRIDGE_LOG}, prefix: ${bridge_prefix})." | tee -a "${RUN_DIR}/logs/supervisor.log"
+  "${BRIDGE_SCRIPT}" --run-dir "${RUN_DIR}" --poll-sec "${SUBAGENT_BRIDGE_POLL_SEC}" --session-prefix "${bridge_prefix}" >> "${BRIDGE_LOG}" 2>&1 &
   echo "$!" > "${BRIDGE_PID_FILE}"
 }
 
@@ -68,7 +76,7 @@ trap stop_subagent_bridge EXIT
   echo "# CTF Run Findings"
   echo
   echo "Started: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  echo "Workspace: /workspace/challenge"
+  echo "Workspace: ${RUN_DIR}/challenge"
   echo
   echo "## Initial Prompt"
   cat "${PROMPT_FILE}" || true
@@ -78,14 +86,15 @@ trap stop_subagent_bridge EXIT
 
 echo "Supervisor starting. Logs: ${RUN_DIR}/logs/supervisor.log" | tee -a "${RUN_DIR}/logs/supervisor.log"
 
-if ! command -v docker >/dev/null 2>&1; then
-  echo "docker not found; dropping to shell" | tee -a "${RUN_DIR}/logs/supervisor.log"
-  exec bash
-fi
-
-if ! docker ps --format '{{.Names}}' | grep -q '^ctf-toolbox$'; then
-  echo "ctf-toolbox container not running; dropping to shell" | tee -a "${RUN_DIR}/logs/supervisor.log"
-  exec bash
+# Runtime mode: use the ctf-toolbox container when it's present (legacy Docker
+# path), otherwise run the agent directly on the host (golden-image / worker
+# path — Docker is being retired; see docs/PROPOSAL_BOOT_WORKERS_UPLOADS.md).
+USE_DOCKER=0
+if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^ctf-toolbox$'; then
+  USE_DOCKER=1
+  echo "Runtime: ctf-toolbox container (Docker)." | tee -a "${RUN_DIR}/logs/supervisor.log"
+else
+  echo "Runtime: direct host (no Docker)." | tee -a "${RUN_DIR}/logs/supervisor.log"
 fi
 
 # --- agent backend selection (backend-aware; defaults to Codex) -------------
@@ -123,29 +132,47 @@ if [[ -f "${AGENT_DIR}/launch.cmd" ]]; then
 fi
 AGENT_BIN="${AGENT_ARGS[0]:-codex}"
 
-# Per-agent container env (e.g. CLAUDE_CODE_OAUTH_TOKEN), staged as KEY=VALUE.
+# Per-agent env (e.g. CLAUDE_CODE_OAUTH_TOKEN), staged as KEY=VALUE. Injected
+# per-challenge at launch — never baked into the image. Built in both forms:
+# docker `-e` flags, and a host env array for the direct-host path.
 ENV_FLAGS=()
+HOST_ENV=()
 if [[ -f "${AGENT_DIR}/container.env" ]]; then
   while IFS= read -r env_line; do
     [[ -z "${env_line}" || "${env_line}" == \#* ]] && continue
     ENV_FLAGS+=(-e "${env_line}")
+    # The staged env was authored for the container (HOME=/workspace). On the
+    # host the workspace IS the run dir, so remap /workspace -> RUN_DIR (fixes
+    # e.g. CODEX_HOME=/workspace/.codex pointing at a path that doesn't exist).
+    HOST_ENV+=("${env_line//\/workspace/${RUN_DIR}}")
   done < "${AGENT_DIR}/container.env"
 fi
 
-if ! docker exec ctf-toolbox bash -c 'command -v "$1" >/dev/null 2>&1' _ "${AGENT_BIN}"; then
-  echo "${AGENT_BIN} CLI not found in ctf-toolbox container." | tee -a "${RUN_DIR}/logs/supervisor.log"
-  echo "Install it in the container and rerun supervisor." | tee -a "${RUN_DIR}/logs/supervisor.log"
-  exec bash
+# On the host path, the agent CLIs live under the golden-image npm prefix.
+HOST_NPM_BIN="${CTFVM_NPM_PREFIX:-/opt/ctfvm/npm-global}/bin"
+if [[ "${USE_DOCKER}" == "1" ]]; then
+  if ! docker exec ctf-toolbox bash -c 'command -v "$1" >/dev/null 2>&1' _ "${AGENT_BIN}"; then
+    echo "${AGENT_BIN} CLI not found in ctf-toolbox container." | tee -a "${RUN_DIR}/logs/supervisor.log"
+    exec bash
+  fi
+else
+  export PATH="${RUN_DIR}/.venv/bin:${HOST_NPM_BIN}:${PATH}"
+  if ! command -v "${AGENT_BIN}" >/dev/null 2>&1; then
+    echo "${AGENT_BIN} CLI not found on host (looked in ${HOST_NPM_BIN})." | tee -a "${RUN_DIR}/logs/supervisor.log"
+    echo "Rebuild the golden image (clanker image bake) or install the agent CLI." | tee -a "${RUN_DIR}/logs/supervisor.log"
+    exec bash
+  fi
 fi
 
+RUNTIME_LABEL="direct host (no Docker)"; [[ "${USE_DOCKER}" == "1" ]] && RUNTIME_LABEL="ctf-toolbox container"
 cat <<BANNER | tee -a "${RUN_DIR}/logs/supervisor.log"
 ========================================================
-${AGENT_BACKEND} supervisor launching in ctf-toolbox container.
-Challenge dir: /workspace/challenge
-Artifacts dir: /workspace/artifacts
-Findings file: /workspace/findings.md
-Injection queue: /workspace/inject.queue
-Prompt file: /workspace/challenge_prompt.txt
+${AGENT_BACKEND} supervisor launching (${RUNTIME_LABEL}).
+Challenge dir: ${RUN_DIR}/challenge
+Artifacts dir: ${RUN_DIR}/artifacts
+Findings file: ${RUN_DIR}/findings.md
+Injection queue: ${RUN_DIR}/inject.queue
+Prompt file: ${RUN_DIR}/challenge_prompt.txt
 ========================================================
 BANNER
 
@@ -169,15 +196,25 @@ start_subagent_bridge
 echo "Launching interactive ${AGENT_BACKEND} session..." | tee -a "${RUN_DIR}/logs/supervisor.log"
 set +e
 initial_prompt="$(cat "${PROMPT_FILE}")"
-docker exec -it ${ENV_FLAGS[@]+"${ENV_FLAGS[@]}"} ctf-toolbox bash -c 'cd /workspace && "$@"' _ "${AGENT_ARGS[@]}" "${initial_prompt}"
-rc=$?
+if [[ "${USE_DOCKER}" == "1" ]]; then
+  docker exec -it ${ENV_FLAGS[@]+"${ENV_FLAGS[@]}"} ctf-toolbox bash -c 'cd /workspace && "$@"' _ "${AGENT_ARGS[@]}" "${initial_prompt}"
+  rc=$?
+else
+  # Direct host: HOME=RUN_DIR so the agent finds its staged .codex/.claude config;
+  # env carries the per-challenge credentials.
+  ( cd "${RUN_DIR}" && HOME="${RUN_DIR}" env ${HOST_ENV[@]+"${HOST_ENV[@]}"} "${AGENT_ARGS[@]}" "${initial_prompt}" )
+  rc=$?
+fi
 set -e
 
 stop_subagent_bridge
 trap - EXIT
 
 echo "${AGENT_BACKEND} supervisor session exited with code ${rc} at $(date -u +%Y-%m-%dT%H:%M:%SZ)." | tee -a "${RUN_DIR}/logs/supervisor.log"
-echo "If this was unexpected (auth/session issue), run inside this shell:" | tee -a "${RUN_DIR}/logs/supervisor.log"
-echo "  docker exec -it ctf-toolbox bash -c 'cd /workspace && ${AGENT_BIN}'" | tee -a "${RUN_DIR}/logs/supervisor.log"
+if [[ "${USE_DOCKER}" == "1" ]]; then
+  echo "If unexpected, debug with:  docker exec -it ctf-toolbox bash -c 'cd /workspace && ${AGENT_BIN}'" | tee -a "${RUN_DIR}/logs/supervisor.log"
+else
+  echo "If unexpected, debug with:  cd ${RUN_DIR} && HOME=${RUN_DIR} ${AGENT_BIN}" | tee -a "${RUN_DIR}/logs/supervisor.log"
+fi
 
 exec bash

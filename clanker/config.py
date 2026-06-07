@@ -32,6 +32,7 @@ MAX_PANE_TAIL_BYTES = 30_000
 MAX_FINDINGS_TAIL_BYTES = 24_000
 MAX_SUPERVISOR_TAIL_BYTES = 16_000
 RUN_BUNDLE_MAX_BYTES = 32_000_000
+MAX_UPLOAD_BYTES = 1_073_741_824  # 1 GiB — mirrors control_server.py MAX_REQUEST_BYTES
 MAX_SPAWN_JOBS = 12
 MAX_SPAWN_OUTPUT_BYTES = 64_000
 
@@ -73,6 +74,9 @@ SETTINGS_SCHEMA: list[ConfigKey] = [
     ConfigKey("gcp_machine_type", "CTFVM_GCP_MACHINE_TYPE", "e2-standard-4", "cloud", "GCP machine type", consumed_by="bash"),
     ConfigKey("do_region", "CTFVM_DO_REGION", "", "cloud", "DigitalOcean region", consumed_by="bash"),
     ConfigKey("do_size_slug", "CTFVM_DO_SIZE_SLUG", "s-4vcpu-8gb", "cloud", "DigitalOcean droplet size", consumed_by="bash"),
+    # --- golden image (pre-baked VM image; blank -> stock distro + slow boot) ---
+    ConfigKey("golden_image_do", "CTFVM_GOLDEN_IMAGE_DO", "", "cloud", "DigitalOcean golden image id/slug (blank = stock + slow boot)", consumed_by="bash"),
+    ConfigKey("golden_image_gcp", "CTFVM_GOLDEN_IMAGE_GCP", "", "cloud", "GCP golden image name (blank = stock + slow boot)", consumed_by="bash"),
     # --- control plane / run ---
     ConfigKey("control_port", "CTFVM_CONTROL_PORT", "443", "control", "Control-plane port", consumed_by="both"),
     ConfigKey("timeout_min", "CTFVM_TIMEOUT_MIN", "1440", "control", "VM self-destruct timeout (minutes)", consumed_by="both"),

@@ -143,6 +143,12 @@ vm/
 └── control_server.py       # HTTP control plane (exec, upload, upload-tar, download, healthz)
 ```
 
+> **Migrating off Docker (platform-v2.1):** the agent is moving to run **directly on the
+> VM host** from a pre-baked **golden image** (`images/golden/`), with the toolbox kept
+> only as a fallback. `runner/supervisor.sh` + the subagent bridge already run in both
+> modes (container if `ctf-toolbox` is up, else host). This also enables **worker** VMs
+> that host many challenges. See docs/PROPOSAL_BOOT_WORKERS_UPLOADS.md.
+
 ### 5.3 Container side — `images/ctf-toolbox/`
 
 ```

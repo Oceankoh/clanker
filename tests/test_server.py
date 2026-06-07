@@ -69,6 +69,12 @@ class FakeClient:
     def download_file(self, remote_path, *, timeout=60):
         return b"BUNDLE"
 
+    def upload_file(self, remote_path, body, *, mode="", timeout=60):
+        self.commands.append(("upload_file", remote_path, len(body), mode))
+
+    def upload_tar(self, remote_dir, body, *, timeout=120):
+        self.commands.append(("upload_tar", remote_dir, len(body)))
+
 
 def _make_service(tmp: Path) -> UiService:
     runs = tmp / "runs"
@@ -114,6 +120,15 @@ class ServerTest(unittest.TestCase):
         data = json.dumps(body).encode() if body is not None else None
         req = urllib.request.Request(f"http://127.0.0.1:{self.port}{path}", data=data, method=method,
                                      headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req) as r:
+                return r.status, json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read())
+
+    def _post_raw(self, path, data: bytes):
+        req = urllib.request.Request(f"http://127.0.0.1:{self.port}{path}", data=data, method="POST",
+                                     headers={"Content-Type": "application/octet-stream"})
         try:
             with urllib.request.urlopen(req) as r:
                 return r.status, json.loads(r.read())
@@ -169,6 +184,63 @@ class ServerTest(unittest.TestCase):
         # the dead inject.queue endpoint was removed (no VM consumer; CLIs queue natively)
         st, j = self._req("POST", "/api/v1/runs/20250101-000000/inject", {"text": "hint"})
         self.assertEqual(st, 404)
+
+    RUN = "20250101-000000"
+
+    def test_upload_relative_confined(self):
+        st, j = self._post_raw(f"/api/v1/runs/{self.RUN}/upload?path=notes.txt", b"hello")
+        self.assertEqual(st, 200)
+        self.assertEqual(j["data"]["path"], "/home/ctf/run/notes.txt")
+        self.assertEqual(j["data"]["size_bytes"], 5)
+        self.assertFalse(j["data"]["as_tar"])
+
+    def test_upload_tar(self):
+        st, j = self._post_raw(f"/api/v1/runs/{self.RUN}/upload-tar?dest=sub", b"TARBYTES")
+        self.assertEqual(st, 200)
+        self.assertEqual(j["data"]["path"], "/home/ctf/run/sub")
+        self.assertTrue(j["data"]["as_tar"])
+
+    def test_upload_traversal_rejected(self):
+        st, j = self._post_raw(f"/api/v1/runs/{self.RUN}/upload?path=../../etc/x", b"x")
+        self.assertEqual(st, 400)
+        self.assertEqual(j["code"], "INVALID_PATH")
+
+    def test_upload_abs_rejected_without_optin(self):
+        st, j = self._post_raw(f"/api/v1/runs/{self.RUN}/upload?path=/etc/passwd", b"x")
+        self.assertEqual(st, 400)
+        self.assertEqual(j["code"], "INVALID_PATH")
+
+    def test_upload_abs_allowed_with_optin(self):
+        st, j = self._post_raw(f"/api/v1/runs/{self.RUN}/upload?path=/etc/cron.d/x&allow_abs=true", b"x")
+        self.assertEqual(st, 200)
+        self.assertEqual(j["data"]["path"], "/etc/cron.d/x")
+
+    def test_upload_empty_body_rejected(self):
+        st, j = self._post_raw(f"/api/v1/runs/{self.RUN}/upload?path=notes.txt", b"")
+        self.assertEqual(st, 400)
+        self.assertEqual(j["code"], "BAD_REQUEST")
+
+    # --- worker routes (HTTP layer) ----------------------------------------
+    def test_workers_list_empty(self):
+        st, body, _ = self._get("/api/v1/workers")
+        d = json.loads(body)
+        self.assertTrue(d["ok"])
+        self.assertEqual(d["data"]["workers"], [])   # the fixture run is a regular run
+
+    def test_spawn_workers_route(self):
+        st, j = self._req("POST", "/api/v1/workers", {"count": 2, "provider": "digitalocean"})
+        self.assertEqual(st, 200)
+        self.assertEqual(len(j["data"]["job_ids"]), 2)
+
+    def test_spawn_workers_requires_count(self):
+        st, j = self._req("POST", "/api/v1/workers", {"provider": "digitalocean"})
+        self.assertEqual(st, 400)
+        self.assertEqual(j["code"], "BAD_REQUEST")
+
+    def test_add_challenge_to_non_worker_400(self):
+        # the fixture run is a regular run, not a worker
+        st, j = self._post_raw(f"/api/v1/workers/{self.RUN}/challenges?name=x", b"TAR")
+        self.assertEqual(st, 400)
 
     def test_status_set_clear(self):
         st, j = self._req("POST", "/api/v1/runs/20250101-000000/status", {"state": "solved"})

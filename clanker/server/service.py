@@ -22,10 +22,20 @@ from .. import steering as steering_mod
 from .. import transcript as transcript_mod
 from ..agents import build_agent_backend
 from ..artifacts import ArtifactError
-from ..commands import agents_info, discover_challenges
-from ..config import ROOT, Settings
+from ..commands import agents_info, confine_remote_path, discover_challenges
+from ..config import MAX_SPAWN_JOBS, MAX_UPLOAD_BYTES, ROOT, Settings
 from ..controlclient import ControlPlaneClient, ControlPlaneError
-from ..models import ChallengeState, ProvisioningJob, RunRecord, Subagent
+from ..models import (
+    DEFAULT_AGENT_BACKEND,
+    DEFAULT_REMOTE_RUN_DIR,
+    RUNNER_CHALLENGE,
+    RUNNER_WORKER,
+    ChallengeState,
+    ProvisioningJob,
+    RunRecord,
+    Subagent,
+    UploadResult,
+)
 from ..providers import build_provider_registry, build_run_registry
 from ..remote import remote_python
 from .jobs import JobLimitError, SpawnJobTracker
@@ -129,6 +139,13 @@ class UiService:
         snap = snapshot_mod.fetch_snapshot(
             client, record, include_artifacts=include_artifacts, runtime_status=runtime_status,
         )
+        # A challenge hosted on a worker shares the VM (and its tmux server) with
+        # other challenges. Keep only this challenge's session + its subagents so
+        # the snapshot doesn't leak sibling challenges' panes.
+        if record.parent_worker_id:
+            sess = self._slug_of(record)
+            snap.panes = [p for p in snap.panes
+                          if p.session == sess or p.session.startswith(f"subagent-{sess}")]
         snap.subagents = self._subagents_from_snapshot(snap)
         return self._cache_cs(record, self._relabel_if_provisioning(snap, record))
 
@@ -284,6 +301,291 @@ class UiService:
             raise ApiError("INVALID_PATH", msg, 400) from exc
         except ControlPlaneError as exc:
             raise ApiError("REMOTE_ERROR", str(exc), 502) from exc
+
+    # --- upload (operator -> running run) ----------------------------------
+    def upload(self, run_id: str, dest: str, body: bytes, *, mode: str = "",
+               as_tar: bool = False, allow_abs: bool = False) -> UploadResult:
+        """Push operator-supplied bytes to a running run. Default-confined to the
+        run's workspace (``allow_abs`` is the explicit escape hatch); size-capped."""
+        record = self._record(run_id)
+        if not isinstance(body, (bytes, bytearray)) or len(body) == 0:
+            raise ApiError("BAD_REQUEST", "upload body is empty", 400)
+        if len(body) > MAX_UPLOAD_BYTES:
+            raise ApiError("BAD_REQUEST", f"upload exceeds {MAX_UPLOAD_BYTES} byte limit", 413)
+        try:
+            target = confine_remote_path(record.remote_run_dir, dest, allow_abs=allow_abs)
+        except ValueError as exc:
+            raise ApiError("INVALID_PATH", str(exc), 400) from exc
+        client = self._client(record)
+        body = bytes(body)
+        try:
+            if as_tar:
+                client.upload_tar(target, body)
+            else:
+                client.upload_file(target, body, mode=mode)
+        except ControlPlaneError as exc:
+            raise ApiError("REMOTE_ERROR", str(exc), 502) from exc
+        return UploadResult(path=target, size_bytes=len(body), mode=mode, as_tar=as_tar)
+
+    # --- workers -----------------------------------------------------------
+    def spawn_workers(self, payload: dict) -> list[str]:
+        """Provision N empty worker VMs (golden image, control plane up, no agent).
+        Challenges are added later via add_challenge."""
+        try:
+            count = int(payload.get("count"))
+        except (TypeError, ValueError):
+            raise ApiError("BAD_REQUEST", "count is required (integer >= 1)", 400)
+        if count < 1:
+            raise ApiError("BAD_REQUEST", "count must be >= 1", 400)
+        if count > MAX_SPAWN_JOBS:
+            raise ApiError("BAD_REQUEST", f"count must be <= {MAX_SPAWN_JOBS}", 400)
+        base = {k: v for k, v in payload.items() if k != "count"}
+        specs = [dict(base) for _ in range(count)]
+        self._assign_run_ids(specs)
+        self._assign_worker_names(specs)
+        job_ids: list[str] = []
+        for spec in specs:
+            try:
+                job = self.jobs.submit(self._build_worker_start_cmd(spec))
+            except JobLimitError as exc:
+                raise ApiError("JOB_LIMIT", str(exc), 429) from exc
+            job_ids.append(job.job_id)
+        return job_ids
+
+    def worker_start_commands(self, payload: dict) -> list[list[str]]:
+        """Build the `ctfvm start --worker` commands without submitting them — for
+        the CLI, which runs them synchronously rather than via the job tracker."""
+        count = max(1, int(payload.get("count") or 1))
+        base = {k: v for k, v in payload.items() if k != "count"}
+        specs = [dict(base) for _ in range(count)]
+        self._assign_run_ids(specs)
+        self._assign_worker_names(specs)
+        return [self._build_worker_start_cmd(s) for s in specs]
+
+    def _assign_worker_names(self, specs: list[dict]) -> None:
+        used: set[str] = set()
+        try:
+            for listing in self.registry.list_runs()[0]:
+                nm = str(getattr(listing.record, "challenge_name", "") or "").strip()
+                if nm:
+                    used.add(nm)
+        except Exception:
+            pass
+        i = 1
+        for spec in specs:
+            if spec.get("name"):
+                used.add(str(spec["name"]))
+                continue
+            while f"worker-{i:02d}" in used:
+                i += 1
+            spec["name"] = f"worker-{i:02d}"
+            used.add(spec["name"])
+            i += 1
+
+    @staticmethod
+    def _build_worker_start_cmd(spec: dict) -> list[str]:
+        settings = Settings()
+        spec = dict(spec)
+        for key in ("provider", "toolbox_variant", "timeout_min"):
+            if not spec.get(key):
+                resolved = settings.get(key)
+                if resolved not in (None, ""):
+                    spec[key] = resolved
+        cmd = [str(ROOT / "scripts" / "ctfvm"), "start", "--worker"]
+        flag_map = {
+            "run_id": "--run-id", "name": "--name", "provider": "--provider",
+            "zone": "--zone", "project": "--project", "machine_type": "--machine-type",
+            "size_slug": "--size-slug", "toolbox_variant": "--toolbox-variant",
+            "timeout_min": "--timeout-min",
+        }
+        for key, flag in flag_map.items():
+            val = spec.get(key)
+            if val not in (None, ""):
+                cmd += [flag, str(val)]
+        if spec.get("no_vpn"):
+            cmd.append("--no-vpn")
+        return cmd
+
+    def _worker_record(self, worker_id: str) -> RunRecord:
+        """Resolve a worker by run_id / instance / run_key, or by its display name
+        (e.g. ``worker-01``) — the name is what `worker ls` shows."""
+        rec = self.registry.resolve(worker_id)
+        if not rec:
+            for listing in self.registry.list_runs()[0]:
+                if (listing.record.runner_type == RUNNER_WORKER
+                        and listing.record.challenge_name == worker_id):
+                    rec = listing.record
+                    break
+        if not rec:
+            raise ApiError("NOT_FOUND", f"Worker not found: {worker_id}", 404)
+        return rec
+
+    def add_challenge(self, worker_id: str, payload: dict, archive: bytes = b"") -> dict:
+        """Place a challenge on a worker: create its workspace, upload the
+        challenge + agent config + (per-challenge) credentials, launch the agent
+        in its own tmux session, and register a challenge run record sharing the
+        worker's control endpoint. Control-plane only (Invariant 1)."""
+        worker = self._worker_record(worker_id)
+        if worker.runner_type != RUNNER_WORKER:
+            raise ApiError("BAD_REQUEST", f"run {worker_id} is not a worker", 400)
+        name = str(payload.get("name") or "").strip()
+        if not name and payload.get("challenge_dir"):
+            name = os.path.basename(str(payload["challenge_dir"]).rstrip("/"))
+        existing = {self._slug_of(l.record) for l in self.registry.list_runs()[0]
+                    if l.record.parent_worker_id == worker.run_id}
+        slug = _unique_slug(_slugify(name or "challenge"), existing)
+        workspace = f"{DEFAULT_REMOTE_RUN_DIR}/{slug}"
+        session = f"{slug}:supervisor"
+        backend = str(payload.get("agent_backend") or worker.agent_backend or DEFAULT_AGENT_BACKEND)
+        # Build the SAME initial prompt a normal run gets (description + ideas +
+        # the shared instructions), fold in flag format exactly like spawn does,
+        # then remap /workspace -> the dockerless workspace.
+        from ..commands import build_challenge_prompt
+        description = str(payload.get("description") or "")
+        flag_format = str(payload.get("flag_format") or "").strip()
+        if flag_format:
+            description = (f"{description}\n\n" if description.strip() else "") + f"Expected flag format: {flag_format}"
+        prompt = build_challenge_prompt(description, str(payload.get("ideas") or "")).replace("/workspace", workspace)
+        client = self._client(worker)
+        try:
+            client.exec(
+                f"sudo -u ctf mkdir -p {workspace}/challenge {workspace}/logs "
+                f"{workspace}/artifacts {workspace}/agent {workspace}/.codex/skills", timeout=60)
+            if archive:
+                client.upload_tar(f"{workspace}/challenge", bytes(archive))
+            client.upload_file(f"{workspace}/challenge_prompt.txt", prompt.encode("utf-8"), mode="0644")
+            # ship the same prompts/ + skills the normal run flow does
+            self._upload_local_dir(client, ROOT / "prompts", f"{workspace}/prompts")
+            self._upload_local_dir(client, ROOT / "skills", f"{workspace}/.codex/skills")
+            self._stage_agent_remote(client, workspace, backend, payload)
+            self._launch_challenge_session(client, workspace, slug, session)
+        except ControlPlaneError as exc:
+            raise ApiError("REMOTE_ERROR", str(exc), 502) from exc
+        rec = self._make_challenge_record(worker, slug, workspace, session, backend)
+        self.registry.save_record(rec)
+        return {"run_id": rec.run_id, "slug": slug, "tmux_session": session,
+                "workspace": workspace, "parent_worker_id": worker.run_id}
+
+    @staticmethod
+    def _upload_local_dir(client, local_dir, remote_dir: str) -> None:
+        """Tar a local dir's contents and extract it into remote_dir over the
+        control plane (no-op if the dir is missing). Used to ship prompts/ + skills/."""
+        import io
+        import tarfile
+        from pathlib import Path as _Path
+        local_dir = _Path(local_dir)
+        if not local_dir.is_dir():
+            return
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as tf:
+            tf.add(str(local_dir), arcname=".")
+        client.upload_tar(remote_dir, buf.getvalue())
+
+    def _stage_agent_remote(self, client, workspace: str, backend_name: str, payload: dict) -> None:
+        """Render the agent config + inject this challenge's credentials into its
+        workspace over the control plane. Creds are injected here, at challenge
+        launch — never baked into the image (see docs/PROPOSAL §1.5)."""
+        from ..secretstore import get_profile
+        account = str(payload.get("account") or "").strip()
+        profile = get_profile(account) if account else None
+        if account and not profile:
+            raise ApiError("BAD_REQUEST", f"unknown credential profile: {account!r}", 400)
+        settings = Settings(profile=profile)
+        backend = build_agent_backend(backend_name)
+        spec = backend.build_spec(
+            model=str(payload.get("model") or ""),
+            reasoning_effort=str(payload.get("reasoning_effort") or ""),
+            ida_mcp_url=settings.get("ida_mcp_url", default=""))
+        auth = backend.materialize_auth(settings)
+        if not auth.authenticated:
+            raise ApiError("AUTH_REQUIRED", auth.note or "no agent credentials", 400)
+        from pathlib import Path as _Path
+        # Rendered config assumes the container workspace (/workspace, where
+        # HOME lived in Docker). Dockerless workers run from the per-challenge
+        # dir, so remap /workspace -> the real workspace (fixes e.g. the codex
+        # trusted-projects path so the agent doesn't block on a trust prompt).
+        for sf in backend.render_config(spec):
+            content = sf.content.replace("/workspace", workspace)
+            client.upload_file(f"{workspace}/{sf.remote_relpath}", content.encode("utf-8"), mode=sf.mode or "")
+        for af in auth.local_files:  # e.g. Codex auth.json — per-challenge cred injection
+            client.upload_file(f"{workspace}/{af.remote_relpath}", _Path(af.local_path).read_bytes(), mode=af.mode or "")
+        client.upload_file(f"{workspace}/agent/backend", (backend.name + "\n").encode("utf-8"))
+        client.upload_file(f"{workspace}/agent/launch.cmd", (backend.supervisor_launch_cmd(spec) + "\n").encode("utf-8"))
+        env_lines = "".join(f"{k}={v}\n" for k, v in sorted(auth.container_env.items()))
+        client.upload_file(f"{workspace}/agent/container.env", env_lines.encode("utf-8"), mode="600")
+
+    def _launch_challenge_session(self, client, workspace: str, slug: str, session: str) -> None:
+        from pathlib import Path as _Path
+        for fname in ("supervisor.sh", "subagent-tmux-bridge.sh"):
+            p = ROOT / "runner" / fname
+            try:
+                client.upload_file(f"{workspace}/{fname}", _Path(p).read_bytes(), mode="0755")
+            except OSError:
+                pass
+        client.exec(f"sudo chown -R ctf:ctf {workspace}", timeout=60)
+        sess = session.split(":")[0]
+        sup = f"{workspace}/supervisor.sh --run-dir {workspace} --prompt-file {workspace}/challenge_prompt.txt"
+        client.exec(
+            f"sudo -u ctf bash -lc 'tmux has-session -t {sess} 2>/dev/null && tmux kill-session -t {sess} || true; "
+            f"tmux new-session -d -s {sess} -n supervisor \"{sup}\"'",
+            timeout=60)
+
+    def _make_challenge_record(self, worker: RunRecord, slug: str, workspace: str,
+                               session: str, backend: str) -> RunRecord:
+        # ip is left blank so the challenge does NOT dedup against the worker on the
+        # shared-IP identity key; control_host carries the endpoint instead.
+        return RunRecord(
+            provider=worker.provider, run_id=self._fresh_run_id(),
+            instance=f"{worker.instance}-{slug}" if worker.instance else slug,
+            zone=worker.zone, project=worker.project, ip="",
+            started_at=_iso_now(), challenge_name=slug,
+            remote_run_dir=workspace, agent_backend=backend,
+            control_scheme=worker.control_scheme,
+            control_host=worker.control_host or worker.ip,
+            control_port=worker.control_port,
+            control_user=worker.control_user, control_password=worker.control_password,
+            runner_type=RUNNER_CHALLENGE, parent_worker_id=worker.run_id, tmux_session=session,
+        )
+
+    def _fresh_run_id(self) -> str:
+        spec = [{}]
+        self._assign_run_ids(spec)
+        return spec[0]["run_id"]
+
+    def remove_challenge(self, worker_id: str, slug: str) -> dict:
+        """Stop a challenge's agent session on its worker and drop its run record.
+        Leaves the workspace on disk (operator can re-add)."""
+        worker = self._worker_record(worker_id)
+        client = self._client(worker)
+        sess = _slugify(slug)
+        try:
+            client.exec(f"sudo -u ctf bash -lc 'tmux kill-session -t {sess} 2>/dev/null || true'", timeout=30)
+        except ControlPlaneError as exc:
+            raise ApiError("REMOTE_ERROR", str(exc), 502) from exc
+        removed = None
+        for listing in self.registry.list_runs()[0]:
+            r = listing.record
+            if r.parent_worker_id == worker.run_id and self._slug_of(r) == sess:
+                removed = r.run_id
+                self.registry.delete_record(r.run_id)
+                break
+        return {"worker_id": worker.run_id, "slug": sess, "removed_run_id": removed}
+
+    def list_workers(self) -> list[dict]:
+        """Group runs into workers + the challenges hosted on each. Standalone
+        (non-worker, non-hosted) runs are not included."""
+        listings, _ = self.registry.list_runs()
+        workers = {l.record.run_id: {"worker": l, "challenges": []}
+                   for l in listings if l.record.runner_type == RUNNER_WORKER}
+        for l in listings:
+            pw = l.record.parent_worker_id
+            if pw and pw in workers:
+                workers[pw]["challenges"].append(l)
+        return list(workers.values())
+
+    @staticmethod
+    def _slug_of(record: RunRecord) -> str:
+        return str(record.tmux_session or "").split(":")[0] or _slugify(record.challenge_name or "")
 
     # --- spawn / jobs ------------------------------------------------------
     def agents(self) -> list[dict]:
@@ -566,6 +868,22 @@ class UiService:
 def _iso_now() -> str:
     from datetime import datetime, timezone
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _slugify(name: str) -> str:
+    """Filesystem/tmux-safe slug: lowercase, [a-z0-9-], collapsed dashes."""
+    import re
+    s = re.sub(r"[^a-z0-9]+", "-", str(name or "").strip().lower()).strip("-")
+    return s or "challenge"
+
+
+def _unique_slug(slug: str, existing: set) -> str:
+    if slug not in existing:
+        return slug
+    i = 2
+    while f"{slug}-{i}" in existing:
+        i += 1
+    return f"{slug}-{i}"
 
 
 def _provision_failure_reason(output: str) -> str:

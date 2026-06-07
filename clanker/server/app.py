@@ -70,10 +70,16 @@ class App:
             ("GET", re.compile(r"^/api/v1/spawn-defaults$"), self._spawn_defaults),
             ("GET", re.compile(r"^/api/v1/runs$"), self._runs_list),
             ("POST", re.compile(r"^/api/v1/runs$"), self._spawn),
+            ("GET", re.compile(r"^/api/v1/workers$"), self._workers_list),
+            ("POST", re.compile(r"^/api/v1/workers$"), self._spawn_workers),
+            ("POST", re.compile(r"^/api/v1/workers/([^/]+)/challenges$"), self._add_challenge),
+            ("DELETE", re.compile(r"^/api/v1/workers/([^/]+)/challenges/([^/]+)$"), self._remove_challenge),
             ("POST", re.compile(r"^/api/v1/select-directory$"), self._select_directory),
             ("GET", re.compile(r"^/api/v1/runs/([^/]+)$"), self._snapshot),
             ("POST", re.compile(r"^/api/v1/runs/([^/]+)/status$"), self._set_status),
             ("DELETE", re.compile(r"^/api/v1/runs/([^/]+)/status$"), self._clear_status),
+            ("POST", re.compile(r"^/api/v1/runs/([^/]+)/upload$"), self._upload),
+            ("POST", re.compile(r"^/api/v1/runs/([^/]+)/upload-tar$"), self._upload_tar),
             ("POST", re.compile(r"^/api/v1/runs/([^/]+)/panes/send$"), self._pane_send),
             ("POST", re.compile(r"^/api/v1/runs/([^/]+)/panes/keys$"), self._pane_keys),
             ("POST", re.compile(r"^/api/v1/runs/([^/]+)/panes/trust$"), self._pane_trust),
@@ -198,6 +204,29 @@ class App:
     def _spawn(self, _m, _q, body):
         return ok({"job_ids": self.s.spawn(self._body_json(body))})
 
+    def _workers_list(self, _m, _q, _b):
+        return ok({"workers": [serialize.worker_group(g) for g in self.s.list_workers()]})
+
+    def _spawn_workers(self, _m, _q, body):
+        return ok({"job_ids": self.s.spawn_workers(self._body_json(body))})
+
+    def _add_challenge(self, m, query, body):
+        # raw body = challenge tar (optional); metadata in query params
+        payload = {
+            "name": (query.get("name") or [""])[0],
+            "agent_backend": (query.get("agent_backend") or [""])[0],
+            "description": (query.get("description") or [""])[0],
+            "ideas": (query.get("ideas") or [""])[0],
+            "flag_format": (query.get("flag_format") or [""])[0],
+            "model": (query.get("model") or [""])[0],
+            "reasoning_effort": (query.get("reasoning_effort") or [""])[0],
+            "account": (query.get("account") or [""])[0],
+        }
+        return ok(self.s.add_challenge(m.group(1), payload, body or b""))
+
+    def _remove_challenge(self, m, _q, _b):
+        return ok(self.s.remove_challenge(m.group(1), urllib.parse.unquote(m.group(2))))
+
     def _select_directory(self, _m, _q, body):
         data = self._body_json(body)
         return ok(self.s.choose_directory(data.get("current_path", ""), bool(data.get("batch", False))))
@@ -210,6 +239,19 @@ class App:
     def _clear_status(self, m, _q, _b):
         self.s.clear_status(m.group(1))
         return ok({"run_id": m.group(1)})
+
+    def _upload(self, m, query, body):
+        dest = (query.get("path") or [""])[0]
+        mode = (query.get("mode") or [""])[0]
+        res = self.s.upload(m.group(1), dest, body, mode=mode, as_tar=False,
+                            allow_abs=_bool(query, "allow_abs"))
+        return ok(serialize.upload_result(res))
+
+    def _upload_tar(self, m, query, body):
+        dest = (query.get("dest") or [""])[0]
+        res = self.s.upload(m.group(1), dest, body, as_tar=True,
+                            allow_abs=_bool(query, "allow_abs"))
+        return ok(serialize.upload_result(res))
 
     def _pane_send(self, m, _q, body):
         data = self._body_json(body)

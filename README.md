@@ -106,6 +106,35 @@ python -m clanker fanout ./ctf-challenges --provider digitalocean --agent codex
 # or from the web UI: "+ New run" -> tick "deploy folder — each subfolder is its own run"
 ```
 
+**Bake a golden image once — fast boots, no Docker** (tools + agent CLIs pre-installed; **no
+credentials baked** — those are injected per challenge at launch):
+
+```bash
+python -m clanker image bake --provider digitalocean   # attended; spins up a builder VM, snapshots it
+python -m clanker image status                          # when it was built + agent versions
+#  digitalocean  clanker-toolbox-20260606-164056 — built 3 days ago
+#                codex codex-cli 0.137.0, claude-code 2.1.167
+```
+
+Built once, reused for every run/worker (read from `.ctfvm/golden-image.json`, or set
+`CTFVM_GOLDEN_IMAGE_DO`). Blank ⇒ stock distro + the slow per-boot install. Re-bake only to
+update the toolset/CLIs. GCP: `--provider gcp` (mirrors DO; the stock-image fallback covers it).
+
+**Worker pool — N reusable VMs, add challenges on demand** (one VM hosts many challenges, each
+in its own session + workspace; runs the agent directly on the host, no Docker):
+
+```bash
+python -m clanker worker spawn --count 5 --provider digitalocean   # 5 empty workers (--count required)
+python -m clanker worker ls                                        # workers + hosted-challenge counts
+python -m clanker worker add worker-01 --dir ./challenges/pwn-01 --agent codex   # upload + launch
+python -m clanker worker show worker-01                            # its hosted challenges
+python -m clanker worker rm-challenge worker-01 pwn-01             # stop one challenge
+```
+
+Each challenge is its own focusable run in the UI, grouped under its worker; credentials are
+injected per challenge at launch. Trade-off: challenges on one worker share ports/packages (no
+container isolation) — see [docs/PROPOSAL_BOOT_WORKERS_UPLOADS.md](docs/PROPOSAL_BOOT_WORKERS_UPLOADS.md).
+
 **List the agent backends + readiness:**
 
 ```bash
@@ -163,6 +192,16 @@ python -m clanker share        # prints https://<public>.ngrok.app/?token=...  (
 **IDA MCP / model / reasoning effort / control port:** all in `.env` (`CTFVM_DEFAULT_IDA_MCP_URL`,
 `CTFVM_MODEL`, `CTFVM_REASONING_EFFORT`, `CTFVM_CONTROL_PORT`); `config show` confirms it took.
 
+**Push a file to a running run** (confined to the run's workspace by default):
+
+```bash
+python -m clanker upload --run-id <id> ./exploit.py                 # -> workspace/exploit.py
+python -m clanker upload --run-id <id> ./libs --tar remote/libs     # tar a dir, extract remotely
+python -m clanker upload --run-id <id> ./key --allow-abs /etc/x     # opt out of workspace confinement
+# or in the UI artifacts tab: "Upload file", or "Upload folder (tar)" — picks a folder and
+# tars it in the browser, so worker "add challenge" also takes a folder directly.
+```
+
 **Continue manually then resume the agent:**
 
 ```bash
@@ -212,6 +251,7 @@ Add a transcript parser in `clanker/transcript.py` if its session format differs
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Target architecture, the two ABCs, invariants |
 | [docs/AGENTS.md](docs/AGENTS.md) | Agent backends: auth, config mapping, subagents |
 | [docs/API.md](docs/API.md) | The `/api/v1` HTTP surface |
+| [docs/PROPOSAL_BOOT_WORKERS_UPLOADS.md](docs/PROPOSAL_BOOT_WORKERS_UPLOADS.md) | Golden image, worker VMs, uploads (design + status) |
 | [docs/BUGS.md](docs/BUGS.md) · [docs/REFACTOR_PLAN.md](docs/REFACTOR_PLAN.md) | Verified bugs; migration status |
 | [CLAUDE.md](CLAUDE.md) | Repo layout & conventions (for contributors) |
 

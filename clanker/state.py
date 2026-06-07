@@ -16,6 +16,7 @@ Invariant 2: no other module reads or writes ``.ctfvm/*.json``.
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 from pathlib import Path
@@ -95,6 +96,38 @@ class RunRegistry:
     def load_state(self, run_id: str | None = None) -> RunRecord | None:
         raw = self.load_raw(run_id)
         return RunRecord.from_mapping(raw) if raw else None
+
+    def save_record(self, record: RunRecord, *, extra: dict | None = None) -> Path:
+        """Persist a run record to ``.ctfvm/runs/<run_id>.json`` (atomic). The sole
+        write path for run state (Invariant 2). Used to register challenge runs
+        hosted on a worker VM. ``extra`` merges non-RunRecord keys (e.g. boot
+        image) into the persisted dict."""
+        run_id = str(record.run_id or "").strip()
+        if not run_id:
+            raise ValueError("cannot persist a record without a run_id")
+        data = record.to_state_dict()
+        if extra:
+            data.update({k: v for k, v in extra.items() if k not in data})
+        path = self._runs_dir / f"{run_id}.json"
+        with self._lock:
+            self._runs_dir.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(data, indent=2) + "\n")
+            tmp.replace(path)
+        return path
+
+    def delete_record(self, run_id: str) -> bool:
+        """Remove a run's ``.ctfvm/runs/<run_id>.json`` (Invariant 2 write path).
+        Used when a challenge is removed from a worker. True if a file was deleted."""
+        run_id = str(run_id or "").strip()
+        if not run_id:
+            return False
+        path = self._runs_dir / f"{run_id}.json"
+        with self._lock:
+            if path.exists():
+                path.unlink()
+                return True
+        return False
 
     def resolve(self, run_id: str | None = None) -> RunRecord | None:
         wanted = str(run_id or "").strip()
@@ -186,6 +219,15 @@ class RunRegistry:
                             "started_at": state.get("started_at", ""),
                             "agent_backend": state.get("agent_backend", ""),
                             "challenge_name": state.get("challenge_name", ""),
+                            "remote_run_dir": state.get("remote_run_dir", ""),
+                            "control_scheme": state.get("control_scheme", ""),
+                            "control_host": state.get("control_host", ""),
+                            "control_port": state.get("control_port", ""),
+                            "control_user": state.get("control_user", ""),
+                            "control_password": state.get("control_password", ""),
+                            "runner_type": state.get("runner_type", ""),
+                            "parent_worker_id": state.get("parent_worker_id", ""),
+                            "tmux_session": state.get("tmux_session", ""),
                             "__source": "local",
                         }
                     )
@@ -205,6 +247,9 @@ class RunRegistry:
                         "started_at": cs["started_at"],
                         "agent_backend": cs["agent_backend"],
                         "challenge_name": cs.get("challenge_name", ""),
+                        "runner_type": cs.get("runner_type", ""),
+                        "parent_worker_id": cs.get("parent_worker_id", ""),
+                        "tmux_session": cs.get("tmux_session", ""),
                         "__source": "current",
                     }
                 )

@@ -422,6 +422,93 @@ Capped at `RUN_BUNDLE_MAX_BYTES` (32 MB). Returns `413` if the run exceeds this 
 
 ---
 
+## Uploads (operator → running run)
+
+### `POST /api/v1/runs/{run_id}/upload`
+
+Push a single file to a running run over the control plane.
+
+**Query params:**
+- `path` (required) — destination. A relative path joins the run's workspace
+  (`remote_run_dir`, default `/home/ctf/run`); an absolute path must stay inside the
+  workspace unless `allow_abs=true`.
+- `mode` (optional) — octal file mode, e.g. `0755`.
+- `allow_abs` (optional, `true|false`) — permit an absolute destination outside the
+  workspace. Off by default; the operator must opt in.
+
+**Body:** raw file bytes (`application/octet-stream`). Capped at `MAX_UPLOAD_BYTES`
+(1 GiB) — returns `413` over the limit, `400` for an empty body.
+
+**Response:**
+```json
+{ "ok": true, "data": { "path": "/home/ctf/run/exploit.py", "size_bytes": 1234, "mode": "0755", "as_tar": false } }
+```
+
+Returns `400` (`INVALID_PATH`) when the destination escapes the workspace without
+`allow_abs`.
+
+---
+
+### `POST /api/v1/runs/{run_id}/upload-tar`
+
+Upload a tar archive and extract it into a directory on the run.
+
+**Query params:**
+- `dest` (required) — destination directory (same workspace-confinement rules as `path` above).
+- `allow_abs` (optional) — as above.
+
+**Body:** raw tar bytes. Extraction is traversal-guarded on the VM
+(`_safe_extract_tar`). Same size cap as `/upload`.
+
+**Response:** `{ "ok": true, "data": { "path": "<dest>", "size_bytes": N, "mode": "", "as_tar": true } }`
+
+CLI equivalent: `clanker upload <run> <local> [remote] [--tar] [--allow-abs] [--mode 0755]`.
+
+---
+
+## Workers
+
+A **worker** is an empty VM (golden image, control plane up, no agent) that hosts many
+challenges. Each hosted challenge is its own run (own workspace + tmux session) sharing
+the worker's control endpoint. See docs/PROPOSAL_BOOT_WORKERS_UPLOADS.md.
+
+### `GET /api/v1/workers`
+
+List workers and the challenges hosted on each.
+
+```json
+{ "ok": true, "data": { "workers": [
+  { "worker": { "run_id": "...", "name": "worker-01", "runner_type": "worker", ... },
+    "challenges": [ { "run_id": "...", "name": "pwn-01", "parent_worker_id": "...",
+                      "tmux_session": "pwn-01:supervisor", ... } ] } ] } }
+```
+
+### `POST /api/v1/workers`
+
+Spawn N empty workers. Body: `{ "count": 5, "provider": "digitalocean", ... }`.
+`count` is **required** (1..`MAX_SPAWN_JOBS`). Returns `{ "job_ids": [...] }`.
+
+### `POST /api/v1/workers/{worker_id}/challenges`
+
+Add a challenge to a worker: creates its workspace, uploads the challenge, stages the
+agent config, **injects this challenge's credentials at launch**, and starts the agent in
+its own tmux session.
+
+- **Query:** `name`, `agent_backend`, `description`, `model`, `reasoning_effort`, `account`.
+- **Body:** raw tar of the challenge folder (optional).
+- **Response:** `{ "run_id", "slug", "tmux_session", "workspace", "parent_worker_id" }`.
+
+Returns `400` if the target run is not a worker; `AUTH_REQUIRED` if the chosen backend has
+no credentials.
+
+### `DELETE /api/v1/workers/{worker_id}/challenges/{slug}`
+
+Stop a challenge's agent session and drop its run record (workspace left on disk).
+
+CLI: `clanker worker {spawn,ls,show,add,rm-challenge}`.
+
+---
+
 ## Spawn Jobs
 
 ### `GET /api/v1/jobs/{job_id}`

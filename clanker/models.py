@@ -18,6 +18,11 @@ from .identity import (
 
 DEFAULT_REMOTE_RUN_DIR = "/home/ctf/run"
 DEFAULT_AGENT_BACKEND = "codex"
+DEFAULT_TMUX_SESSION = "ctf:supervisor"
+# runner_type values: a normal one-VM-one-challenge run, vs. an empty worker VM
+# that hosts many challenge runs (see docs/PROPOSAL_BOOT_WORKERS_UPLOADS.md).
+RUNNER_CHALLENGE = "challenge"
+RUNNER_WORKER = "worker"
 
 
 @dataclass(frozen=True)
@@ -46,6 +51,13 @@ class RunRecord:
     control_port: str = ""
     control_user: str = ""
     control_password: str = ""
+    # --- worker model (platform-v2.1) -------------------------------------
+    # A "worker" is an empty multi-challenge VM; a "challenge" hosted on it is its
+    # own record sharing the worker's control endpoint (parent_worker_id set) but
+    # with its own workspace + tmux session. None of these are part of run identity.
+    runner_type: str = RUNNER_CHALLENGE
+    parent_worker_id: str = ""
+    tmux_session: str = DEFAULT_TMUX_SESSION
 
     @classmethod
     def from_mapping(cls, data: dict[str, Any]) -> "RunRecord":
@@ -53,6 +65,7 @@ class RunRecord:
         instance = normalize_instance_name(data.get("instance", ""))
         run_id = normalize_run_id(data.get("run_id", ""), instance)
         backend = str(data.get("agent_backend", "") or "").strip().lower() or DEFAULT_AGENT_BACKEND
+        runner_type = str(data.get("runner_type", "") or "").strip().lower() or RUNNER_CHALLENGE
         return cls(
             provider=normalize_provider(data.get("provider", "gcp")),
             run_id=run_id,
@@ -69,6 +82,9 @@ class RunRecord:
             control_port=str(data.get("control_port", "") or "").strip(),
             control_user=str(data.get("control_user", "") or "").strip(),
             control_password=str(data.get("control_password", "") or "").strip(),
+            runner_type=runner_type,
+            parent_worker_id=str(data.get("parent_worker_id", "") or "").strip(),
+            tmux_session=str(data.get("tmux_session", "") or DEFAULT_TMUX_SESSION).strip() or DEFAULT_TMUX_SESSION,
         )
 
     def to_state_dict(self) -> dict[str, str]:
@@ -90,6 +106,9 @@ class RunRecord:
             "control_port": self.control_port,
             "control_user": self.control_user,
             "control_password": self.control_password,
+            "runner_type": self.runner_type,
+            "parent_worker_id": self.parent_worker_id,
+            "tmux_session": self.tmux_session,
         }
 
     # --- control plane -----------------------------------------------------
@@ -117,6 +136,16 @@ class RunListing:
     runtime_status: str = ""
     is_runtime_active: bool = False
     source: str = ""
+
+
+@dataclass
+class UploadResult:
+    """Outcome of an operator file push to a running run (see UiService.upload)."""
+
+    path: str
+    size_bytes: int
+    mode: str = ""
+    as_tar: bool = False
 
 
 @dataclass

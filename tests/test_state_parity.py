@@ -239,5 +239,46 @@ class ParityWithLegacy(unittest.TestCase):
             self.assertEqual(old_current, new_current)
 
 
+class WorkerFieldsTest(unittest.TestCase):
+    def test_defaults_for_legacy_record(self):
+        r = RunRecord.from_mapping({"provider": "gcp", "instance": "ctfvm-a-20250101-000000",
+                                    "zone": "z", "project": "p"})
+        self.assertEqual(r.runner_type, "challenge")
+        self.assertEqual(r.parent_worker_id, "")
+        self.assertEqual(r.tmux_session, "ctf:supervisor")
+
+    def test_round_trip_worker_fields(self):
+        data = {
+            "provider": "digitalocean", "instance": "ctfvm-worker-20250101-000000",
+            "zone": "nyc3", "project": "digitalocean", "run_id": "20250101-000000",
+            "runner_type": "worker", "parent_worker_id": "", "tmux_session": "ctf:supervisor",
+        }
+        r = RunRecord.from_mapping(data)
+        self.assertEqual(r.runner_type, "worker")
+        out = r.to_state_dict()
+        self.assertEqual(out["runner_type"], "worker")
+        # round-trips back through from_mapping unchanged
+        r2 = RunRecord.from_mapping(out)
+        self.assertEqual(r2.runner_type, "worker")
+        self.assertEqual(r2.parent_worker_id, "")
+
+    def test_challenge_on_worker_record(self):
+        data = {
+            "provider": "digitalocean", "instance": "ctfvm-worker-20250101-000000",
+            "zone": "nyc3", "project": "digitalocean", "run_id": "20250101-000100",
+            "runner_type": "challenge", "parent_worker_id": "20250101-000000",
+            "remote_run_dir": "/home/ctf/run/pwn-01", "tmux_session": "pwn-01:supervisor",
+        }
+        r = RunRecord.from_mapping(data)
+        self.assertEqual(r.parent_worker_id, "20250101-000000")
+        self.assertEqual(r.tmux_session, "pwn-01:supervisor")
+        self.assertEqual(r.remote_run_dir, "/home/ctf/run/pwn-01")
+
+    def test_blank_tmux_session_falls_back(self):
+        r = RunRecord.from_mapping({"instance": "ctfvm-a-20250101-000000", "zone": "z",
+                                    "project": "p", "tmux_session": ""})
+        self.assertEqual(r.tmux_session, "ctf:supervisor")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

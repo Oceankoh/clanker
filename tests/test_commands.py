@@ -243,5 +243,53 @@ class ProviderRegistryWiring(unittest.TestCase):
         self.assertEqual(reg.get_status(d), "active")
 
 
+class ConfineRemotePathTest(unittest.TestCase):
+    RUN_DIR = "/home/ctf/run"
+
+    def test_relative_joins_workspace(self):
+        self.assertEqual(commands.confine_remote_path(self.RUN_DIR, "a/b.txt"), "/home/ctf/run/a/b.txt")
+
+    def test_workspace_root_itself_allowed(self):
+        self.assertEqual(commands.confine_remote_path(self.RUN_DIR, "."), self.RUN_DIR)
+
+    def test_absolute_inside_workspace_allowed(self):
+        self.assertEqual(commands.confine_remote_path(self.RUN_DIR, "/home/ctf/run/x"), "/home/ctf/run/x")
+
+    def test_relative_traversal_escape_rejected(self):
+        with self.assertRaises(ValueError):
+            commands.confine_remote_path(self.RUN_DIR, "../../etc/passwd")
+
+    def test_absolute_outside_rejected_without_optin(self):
+        with self.assertRaises(ValueError):
+            commands.confine_remote_path(self.RUN_DIR, "/etc/passwd")
+
+    def test_absolute_outside_allowed_with_optin(self):
+        self.assertEqual(commands.confine_remote_path(self.RUN_DIR, "/etc/passwd", allow_abs=True), "/etc/passwd")
+
+    def test_empty_rejected(self):
+        with self.assertRaises(ValueError):
+            commands.confine_remote_path(self.RUN_DIR, "  ")
+
+
+class BuildChallengePromptTest(unittest.TestCase):
+    def test_includes_desc_ideas_and_instructions(self):
+        p = commands.build_challenge_prompt("a heap UAF", "try tcache poisoning")
+        self.assertIn("Challenge description:", p)
+        self.assertIn("a heap UAF", p)
+        self.assertIn("Initial ideas:", p)
+        self.assertIn("try tcache poisoning", p)
+        self.assertIn("findings.md", p)   # from instructions.txt (or the fallback)
+
+    def test_blank_fields_say_none_provided(self):
+        p = commands.build_challenge_prompt("", "")
+        self.assertIn("Challenge description:\n(none provided)", p)
+        self.assertIn("Initial ideas:\n(none provided)", p)
+
+    def test_missing_instructions_uses_fallback(self):
+        with TemporaryDirectory() as d:
+            p = commands.build_challenge_prompt("x", "y", root=Path(d))
+            self.assertIn("Objectives:", p)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

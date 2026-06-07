@@ -83,6 +83,109 @@ def _cmd_sync_down(args: argparse.Namespace) -> int:
     )
 
 
+def _cmd_upload(args: argparse.Namespace) -> int:
+    return commands.cmd_upload(
+        build_run_registry(),
+        run_id=args.run_id,
+        instance=args.instance,
+        local_path=args.local_path,
+        remote_path=args.remote_path,
+        as_tar=args.tar,
+        allow_abs=args.allow_abs,
+        mode=args.mode,
+    )
+
+
+def _cmd_worker(args: argparse.Namespace) -> int:
+    import io
+    import tarfile
+    from .server.service import ApiError, UiService
+
+    svc = UiService()
+    try:
+        if args.worker_cmd == "spawn":
+            payload = {"count": args.count, "provider": args.provider, "zone": args.zone,
+                       "project": args.project, "size_slug": args.size_slug,
+                       "machine_type": args.machine_type}
+            cmds = svc.worker_start_commands({k: v for k, v in payload.items() if v})
+            rc = 0
+            for cmd in cmds:
+                print("+", " ".join(cmd))
+                rc |= subprocess.call(cmd)
+            return 1 if rc else 0
+        if args.worker_cmd == "ls":
+            groups = svc.list_workers()
+            if not groups:
+                print("(no workers)")
+            for g in groups:
+                w = g["worker"].record
+                print(f"{w.challenge_name or w.run_id:<14} {w.provider:<13} {len(g['challenges'])} challenge(s)  {w.ip}")
+            return 0
+        if args.worker_cmd == "show":
+            for g in svc.list_workers():
+                w = g["worker"].record
+                if args.worker not in (w.run_id, w.instance, w.challenge_name):
+                    continue
+                print(f"{w.challenge_name or w.run_id}  ({w.provider} {w.ip})")
+                for c in g["challenges"]:
+                    cr = c.record
+                    print(f"  - {cr.challenge_name:<16} {cr.agent_backend:<11} {cr.tmux_session}  run_id={cr.run_id}")
+                return 0
+            sys.stderr.write(f"worker not found: {args.worker}\n")
+            return 1
+        if args.worker_cmd == "add":
+            from pathlib import Path as _P
+            src = _P(args.dir).expanduser()
+            if not src.is_dir():
+                sys.stderr.write(f"challenge dir not found: {src}\n")
+                return 1
+            buf = io.BytesIO()
+            with tarfile.open(fileobj=buf, mode="w") as tf:
+                tf.add(str(src), arcname=".")
+            # mirror a normal run: default desc/ideas from the folder's files
+            def _read(name):
+                try:
+                    return (src / name).read_text().strip()
+                except OSError:
+                    return ""
+            payload = {"name": args.name or src.name, "agent_backend": args.agent,
+                       "description": args.desc or _read("description.txt"),
+                       "ideas": args.ideas or _read("ideas.txt"),
+                       "flag_format": args.flag_format,
+                       "model": args.model, "reasoning_effort": args.reasoning_effort,
+                       "account": args.account}
+            res = svc.add_challenge(args.worker, {k: v for k, v in payload.items() if v}, buf.getvalue())
+            print(f"Added challenge {res['slug']} to {args.worker}: "
+                  f"run_id={res['run_id']} session={res['tmux_session']}")
+            return 0
+        if args.worker_cmd == "rm-challenge":
+            res = svc.remove_challenge(args.worker, args.slug)
+            print(f"Removed {res['slug']} from {res['worker_id']} (run_id={res['removed_run_id']})")
+            return 0
+    except ApiError as exc:
+        sys.stderr.write(f"{exc.message}\n")
+        return 1
+    sys.stderr.write("usage: clanker worker {spawn,ls,show,add,rm-challenge}\n")
+    return 2
+
+
+def _cmd_image(args: argparse.Namespace) -> int:
+    if args.image_cmd == "status":
+        return commands.cmd_image_status()
+    if args.image_cmd == "id":
+        return commands.cmd_image_id(args.provider)
+    if args.image_cmd == "bake":
+        return commands.cmd_image_bake(args.provider)
+    if args.image_cmd == "record":
+        return commands.cmd_image_record(
+            args.provider, image_id=args.image_id, image_name=args.image_name,
+            built_at=args.built_at, codex_version=args.codex_version,
+            claude_version=args.claude_version,
+        )
+    sys.stderr.write("usage: clanker image {status,bake,record}\n")
+    return 2
+
+
 def _cmd_config(args: argparse.Namespace) -> int:
     if args.config_cmd == "show":
         return commands.cmd_config_show()
@@ -196,6 +299,17 @@ def main(argv: list[str] | None = None) -> int:
     sync_down.add_argument("--remote-path", dest="remote_path", default="/home/ctf/run/challenge")
     sync_down.set_defaults(func=_cmd_sync_down)
 
+    upload = sub.add_parser("upload", help="push a file (or --tar a directory) to a running run")
+    _add_selector(upload)
+    upload.add_argument("local_path", help="local file (or directory with --tar) to upload")
+    upload.add_argument("remote_path", nargs="?", default="",
+                        help="remote dest (default: workspace/<basename>); confined to the workspace")
+    upload.add_argument("--tar", action="store_true", help="local_path is a directory; tar + extract into remote_path")
+    upload.add_argument("--allow-abs", dest="allow_abs", action="store_true",
+                        help="permit an absolute remote path outside the run workspace")
+    upload.add_argument("--mode", default="", help="octal file mode for the uploaded file (e.g. 0755)")
+    upload.set_defaults(func=_cmd_upload)
+
     render = sub.add_parser("render-agent-config", help="render an agent backend's on-VM config")
     render.add_argument("--agent", default="codex", choices=list(SUPPORTED_BACKENDS))
     render.add_argument("--model", default="")
@@ -216,6 +330,50 @@ def main(argv: list[str] | None = None) -> int:
                             help="local dir holding this account's ~/.codex/auth.json")
     auth_sub.add_parser("show", help="show which agent backends have credentials")
     auth.set_defaults(func=_cmd_auth)
+
+    worker = sub.add_parser("worker", help="empty worker VMs that host many challenges")
+    worker_sub = worker.add_subparsers(dest="worker_cmd", required=True)
+    w_spawn = worker_sub.add_parser("spawn", help="provision N empty worker VMs")
+    w_spawn.add_argument("--count", type=int, required=True, help="how many workers to spawn")
+    w_spawn.add_argument("--provider", default="")
+    w_spawn.add_argument("--zone", default="")
+    w_spawn.add_argument("--project", default="")
+    w_spawn.add_argument("--size-slug", dest="size_slug", default="")
+    w_spawn.add_argument("--machine-type", dest="machine_type", default="")
+    worker_sub.add_parser("ls", help="list workers + hosted challenge counts")
+    w_show = worker_sub.add_parser("show", help="show a worker's hosted challenges")
+    w_show.add_argument("worker", help="worker run_id / instance / name")
+    w_add = worker_sub.add_parser("add", help="add a challenge to a worker (upload + launch)")
+    w_add.add_argument("worker", help="worker run_id / instance / name")
+    w_add.add_argument("--dir", required=True, help="local challenge folder")
+    w_add.add_argument("--name", default="", help="challenge name (default: folder name)")
+    w_add.add_argument("--agent", default="", help="agent backend (default: worker's)")
+    w_add.add_argument("--desc", default="", help="challenge description (default: description.txt in the folder)")
+    w_add.add_argument("--ideas", default="", help="starting ideas (default: ideas.txt in the folder)")
+    w_add.add_argument("--flag-format", dest="flag_format", default="", help="expected flag format, folded into the prompt")
+    w_add.add_argument("--model", default="")
+    w_add.add_argument("--reasoning-effort", dest="reasoning_effort", default="")
+    w_add.add_argument("--account", default="", help="credential profile")
+    w_rm = worker_sub.add_parser("rm-challenge", help="stop a challenge on a worker")
+    w_rm.add_argument("worker", help="worker run_id / instance / name")
+    w_rm.add_argument("slug", help="challenge slug (see `worker show`)")
+    worker.set_defaults(func=_cmd_worker)
+
+    image = sub.add_parser("image", help="golden VM image: status / bake / record")
+    image_sub = image.add_subparsers(dest="image_cmd", required=True)
+    image_sub.add_parser("status", help="show when each provider's golden image was built")
+    image_id = image_sub.add_parser("id", help="print the effective golden image id (for the provisioner)")
+    image_id.add_argument("--provider", required=True)
+    image_bake = image_sub.add_parser("bake", help="rebuild the golden image (attended; provisions a builder VM)")
+    image_bake.add_argument("--provider", required=True, help="digitalocean | gcp")
+    image_record = image_sub.add_parser("record", help="persist golden-image metadata (used by bake.sh)")
+    image_record.add_argument("--provider", required=True)
+    image_record.add_argument("--image-id", dest="image_id", required=True)
+    image_record.add_argument("--image-name", dest="image_name", default="")
+    image_record.add_argument("--built-at", dest="built_at", default="")
+    image_record.add_argument("--codex-version", dest="codex_version", default="")
+    image_record.add_argument("--claude-version", dest="claude_version", default="")
+    image.set_defaults(func=_cmd_image)
 
     config = sub.add_parser("config", help="inspect resolved configuration")
     config_sub = config.add_subparsers(dest="config_cmd", required=True)
