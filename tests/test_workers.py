@@ -50,15 +50,28 @@ class FakeClient:
         self.tars.append((remote_dir, len(body)))
 
 
+class _Job:
+    def __init__(self, state="running", output=""):
+        self.state = state
+        self.output = output
+        self.job_id = "j"
+        self.started_at = ""
+        self.finished_at = ""
+
+
 class _FakeJobs:
     def __init__(self):
         self.submitted = []
+        self.by_run = {}  # run_id -> [_Job, ...]
 
     def submit(self, cmd):
         self.submitted.append(cmd)
         class J:  # noqa: E306
             job_id = f"job-{len(self.submitted)}"
         return J()
+
+    def for_run(self, run_id):
+        return self.by_run.get(run_id, [])
 
     def active_count(self):
         return 0
@@ -205,6 +218,72 @@ class ChallengeSnapshotFilterTest(unittest.TestCase):
             snap = svc.snapshot(res["run_id"])
             seen = {p.session for p in snap.panes}
             self.assertEqual(seen, {"pwn-01", "subagent-pwn-01-abc"})
+
+
+class WorkerStateTest(unittest.TestCase):
+    WORKER = "20250101-000000"
+
+    def test_reachable_worker_is_ready_not_halted(self):
+        # A worker runs no agent, so the agent-centric derive would call it
+        # "Halted" (no panes). With its control plane reachable and no spawn job
+        # running, it must read as "ready".
+        with TemporaryDirectory() as d:
+            svc, _, _ = _service(Path(d))
+            snap = svc.snapshot(self.WORKER)
+            self.assertEqual(snap.challenge_state.state, "ready")
+
+    def test_worker_provisioning_while_spawn_job_runs(self):
+        with TemporaryDirectory() as d:
+            svc, _, _ = _service(Path(d))
+            svc.jobs.by_run[self.WORKER] = [_Job(state="running")]
+            snap = svc.snapshot(self.WORKER)
+            self.assertEqual(snap.challenge_state.state, "provisioning")
+
+    def test_worker_failed_when_spawn_job_errored(self):
+        with TemporaryDirectory() as d:
+            svc, _, _ = _service(Path(d))
+            svc.jobs.by_run[self.WORKER] = [_Job(state="error", output="image pull 404")]
+            snap = svc.snapshot(self.WORKER)
+            self.assertEqual(snap.challenge_state.state, "failed")
+
+
+class WorkerChallengeVpnStatusTest(unittest.TestCase):
+    WORKER = "20250101-000000"
+
+    def _vpn_status_with_root(self, svc, root: Path, run_id: str):
+        import clanker.server.service as service_mod
+        orig = service_mod.ROOT
+        service_mod.ROOT = root
+        try:
+            return svc.vpn_status(run_id)
+        finally:
+            service_mod.ROOT = orig
+
+    def test_challenge_reports_worker_tunnel_connected(self):
+        # The worker's tunnel is up (state file keyed by the WORKER run_id); a
+        # hosted challenge shares it, so its vpn_status must read "connected".
+        with TemporaryDirectory() as d:
+            svc, _, _ = _service(Path(d))
+            svc._stage_agent_remote = lambda *a, **k: None
+            child = svc.add_challenge(self.WORKER, {"name": "pwn-01"}, archive=b"T")["run_id"]
+            vpn_sub = Path(d) / ".ctfvm" / "vpn" / "sess"
+            vpn_sub.mkdir(parents=True)
+            (vpn_sub / "iface.json").write_text(json.dumps({
+                "run_id": self.WORKER, "local_interface": "ctfvmX",
+                "local_ip": "10.88.0.1", "remote_ip": "10.88.0.2"}))
+            st = self._vpn_status_with_root(svc, Path(d), child)
+            self.assertTrue(st["connected"])
+            self.assertIn(self.WORKER, st["up_command"])      # points at the worker
+            self.assertNotIn(child, st["up_command"])         # not the challenge
+
+    def test_challenge_down_points_bringup_at_worker(self):
+        with TemporaryDirectory() as d:
+            svc, _, _ = _service(Path(d))
+            svc._stage_agent_remote = lambda *a, **k: None
+            child = svc.add_challenge(self.WORKER, {"name": "pwn-01"}, archive=b"T")["run_id"]
+            st = self._vpn_status_with_root(svc, Path(d), child)  # no tunnel up
+            self.assertFalse(st["connected"])
+            self.assertIn(self.WORKER, st["up_command"])
 
 
 if __name__ == "__main__":

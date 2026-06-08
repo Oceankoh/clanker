@@ -172,6 +172,13 @@ else
         [[ -n "${_cf}" ]] && sed -i "s#/workspace#${RUN_DIR}#g" "${_cf}" 2>/dev/null || true
       done < <(grep -rIl '/workspace' "${_d}" 2>/dev/null || true)
     done
+    # .claude.json sits at the run-dir ROOT (not under a remapped subdir) and its
+    # projects-key carries the folder-trust acceptance (hasTrustDialogAccepted).
+    # Without remapping it, claude-code blocks on "Do you trust the files in this
+    # folder?" on normal dockerless runs (cwd=RUN_DIR but the trusted key is still
+    # /workspace) and never starts. Workers already remap it before upload; this
+    # makes the normal path match.
+    [[ -f "${RUN_DIR}/.claude.json" ]] && sed -i "s#/workspace#${RUN_DIR}#g" "${RUN_DIR}/.claude.json" 2>/dev/null || true
   fi
   if ! command -v "${AGENT_BIN}" >/dev/null 2>&1; then
     echo "${AGENT_BIN} CLI not found on host (looked in ${HOST_NPM_BIN})." | tee -a "${RUN_DIR}/logs/supervisor.log"

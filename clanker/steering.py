@@ -13,6 +13,7 @@ import shlex
 from datetime import datetime, timezone
 
 from .controlclient import ControlPlaneClient
+from .models import DEFAULT_REMOTE_RUN_DIR
 from .validation import safe_keys, safe_target, target_session
 
 
@@ -65,10 +66,25 @@ def trust_prompt(client: ControlPlaneClient, target: str = "ctf:supervisor") -> 
     send_keys(client, target, ["1", "Enter"])
 
 
-def set_explicit_status(client: ControlPlaneClient, state: str, note: str = "", *, timeout: int = 15) -> None:
+def _status_path(run_dir: str) -> str:
+    """Resolve the ui-status.json path for a run's remote run dir.
+
+    Worker-hosted challenges share one VM but each has its own run dir
+    (`/home/ctf/run/<slug>`), so the status file must live under that dir — not
+    the hardcoded parent — to match where the snapshot gatherer reads it.
+    """
+    base = (str(run_dir or "").strip() or DEFAULT_REMOTE_RUN_DIR).rstrip("/")
+    if "'" in base:
+        raise SteeringError("Invalid run dir")
+    return base + "/ui-status.json"
+
+
+def set_explicit_status(client: ControlPlaneClient, state: str, note: str = "",
+                        run_dir: str = DEFAULT_REMOTE_RUN_DIR, *, timeout: int = 15) -> None:
     state = str(state or "").strip().lower()
     if state not in {"solved", "blocked"}:
         raise SteeringError("Invalid explicit status")
+    path = _status_path(run_dir)
     payload = {"state": state, "updated_at": _utc_now_iso()}
     note = str(note or "").strip()
     if note:
@@ -76,14 +92,16 @@ def set_explicit_status(client: ControlPlaneClient, state: str, note: str = "", 
     encoded = base64.b64encode(json.dumps(payload, separators=(",", ":")).encode("utf-8")).decode("ascii")
     remote = (
         "sudo -u ctf bash -lc '"
-        f"printf %s {shlex.quote(encoded)} | base64 -d > /home/ctf/run/ui-status.json"
+        f"printf %s {shlex.quote(encoded)} | base64 -d > {path}"
         "'"
     )
     _exec_ok(client, remote, timeout, "status update failed")
 
 
-def clear_explicit_status(client: ControlPlaneClient, *, timeout: int = 15) -> None:
-    remote = "sudo -u ctf bash -lc 'rm -f /home/ctf/run/ui-status.json'"
+def clear_explicit_status(client: ControlPlaneClient, run_dir: str = DEFAULT_REMOTE_RUN_DIR,
+                          *, timeout: int = 15) -> None:
+    path = _status_path(run_dir)
+    remote = f"sudo -u ctf bash -lc 'rm -f {path}'"
     _exec_ok(client, remote, timeout, "status clear failed")
 
 

@@ -20,8 +20,13 @@
   .run.sel { background:#222a3d; }
   .run .id { font-weight:600; }
   .run .meta { color:var(--muted); font-size:12px; }
+  /* a worker host is a container, not a run — its header is not selectable */
+  .worker-head { padding:10px 16px; border-bottom:1px solid var(--line); }
+  .worker-head .id { font-weight:600; }
+  .worker-head .meta { color:var(--muted); font-size:12px; }
+  .worker-head a { color:var(--accent); }
   .pill { display:inline-block; padding:1px 8px; border-radius:10px; font-size:11px; border:1px solid var(--line); }
-  .s-solved{color:var(--ok);border-color:var(--ok)} .s-blocked,.s-halted,.s-stopped,.s-failed{color:var(--bad);border-color:var(--bad)}
+  .s-solved,.s-ready{color:var(--ok);border-color:var(--ok)} .s-blocked,.s-halted,.s-stopped,.s-failed{color:var(--bad);border-color:var(--bad)}
   .s-stalled,.s-provisioning{color:var(--warn);border-color:var(--warn)} .s-progressing{color:var(--accent);border-color:var(--accent)}
   #focus { padding:16px; overflow:auto; }
   .muted { color:var(--muted); }
@@ -78,6 +83,7 @@
   <span class="pill" id="health">…</span>
   <span class="sp"></span>
   <button class="primary" onclick="showSpawn()">+ New run</button>
+  <button onclick="showSpawnWorkers()">+ Spawn workers</button>
   <button onclick="refreshFleet(true)">↻ rediscover</button>
 </header>
 <main>
@@ -146,12 +152,13 @@ function renderFleet(){
   const childrenOf = id => runs.filter(r=>r.parent_worker_id===id);
   const grouped = new Set();
   workers.forEach(w=>{ grouped.add(w.run_id); childrenOf(w.run_id).forEach(c=>grouped.add(c.run_id)); });
-  let html = `<div class="row" style="padding:8px 12px"><button onclick="showSpawnWorkers()">+ Spawn workers</button></div>`;
+  let html = '';
   html += workers.map(w=>{
     const kids = childrenOf(w.run_id);
+    const wst = STATE.statusByRun[w.run_id] || w.challenge_state;
     return `<div class="worker-group">
-      <div class="run ${w.run_id===STATE.current?'sel':''}" onclick="selectRun('${w.run_id}')">
-        <div class="id">⬢ ${esc(w.name)||w.run_id} <span class="pill">${kids.length} challenge${kids.length!==1?'s':''}</span></div>
+      <div class="worker-head">
+        <div class="id">⬢ ${esc(w.name)||w.run_id} ${statePill(wst)} <span class="pill">${kids.length} challenge${kids.length!==1?'s':''}</span></div>
         <div class="meta">${w.provider} · ${w.runtime_status||'?'} · ${w.ip||'—'}
           <a href="#" onclick="addChallenge('${w.run_id}',event)">+ add</a></div>
       </div>
@@ -310,6 +317,9 @@ async function pollFleetTick(){
 }
 function startFleetPoll(){ if(_pollTimer===null){ _pollTimer=0; pollFleetTick(); } }
 async function selectRun(id){
+  // a worker host is a container, not a run — never focus it (open a challenge instead)
+  const r=(STATE.runs||[]).find(x=>x.run_id===id);
+  if(r && r.runner_type==='worker') return;
   STATE.current=id; STATE.snap=null; STATE.steerTarget='';  // drop prev snapshot + steer target so the new run defaults to its own session
   renderFleet(); await refreshFocus();
 }

@@ -16,6 +16,7 @@ from pathlib import PurePosixPath
 
 from .config import MAX_ARTIFACT_PREVIEW_BYTES, RUN_BUNDLE_MAX_BYTES
 from .controlclient import ControlPlaneClient, ControlPlaneError
+from .models import DEFAULT_REMOTE_RUN_DIR
 from .remote import remote_python
 from .validation import sanitize_relpath
 
@@ -161,15 +162,24 @@ def download_artifact(
 def build_bundle(
     client: ControlPlaneClient,
     run_id: str,
+    run_dir: str = DEFAULT_REMOTE_RUN_DIR,
     *,
     max_bytes: int = RUN_BUNDLE_MAX_BYTES,
     timeout: int = 60,
 ) -> ArtifactDownload:
-    """Tar findings + artifacts + logs server-side, then download it."""
+    """Tar findings + artifacts + logs server-side, then download it.
+
+    ``run_dir`` is the run's remote dir; worker-hosted challenges live under
+    ``/home/ctf/run/<slug>``, so bundling must cd there — not the shared parent —
+    or it would tar sibling challenges instead of this one's artifacts.
+    """
+    cd_dir = (str(run_dir or "").strip() or DEFAULT_REMOTE_RUN_DIR).rstrip("/")
+    if "'" in cd_dir:
+        raise ArtifactError("Invalid run dir")
     remote_tar = "/tmp/ctfvm-bundle-$$.tar.gz"
     make = (
         "sudo -u ctf bash -lc '"
-        f'cd /home/ctf/run || exit 1; tmp={remote_tar}; '
+        f'cd {cd_dir} || exit 1; tmp={remote_tar}; '
         'tar -czf "$tmp" findings.md artifacts logs challenge_prompt.txt 2>/dev/null '
         '|| tar -czf "$tmp" artifacts logs challenge_prompt.txt; '
         f'size=$(wc -c < "$tmp" | tr -d " "); '

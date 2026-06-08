@@ -1777,7 +1777,8 @@ vpn_up_loaded() {
 # tunnel's local gateway IP, and point the VM's agent container at it — so the
 # agent resolves whatever this laptop can (LAN/internal names, a loopback proxy,
 # public). DHCP can't cross a routed WireGuard tunnel, so this is the way to get
-# internal hostname resolution. Off unless CTFVM_VPN_DNS is set.
+# internal hostname resolution. On by default (CTFVM_VPN_DNS=auto); set
+# CTFVM_VPN_DNS=off to disable.
 vpn_dns_enabled() {
   case "${CTFVM_VPN_DNS:-auto}" in
     off|0|false|no) return 1 ;;
@@ -1790,16 +1791,20 @@ vpn_dns_pidfile() { printf '%s/%s-dns.pid' "$(vpn_state_dir)" "$1"; }
 vpn_dns_up() {
   local vpn_name="$1" local_ip="$2"
   local pidfile sudo_cmd resolv b64 u
+  # default to auto when unset — `set -u` is on, and vpn_dns_enabled already
+  # treats unset as "auto", so this path must use the same default (not bare
+  # ${CTFVM_VPN_DNS}, which would abort with "unbound variable").
+  local dns_mode="${CTFVM_VPN_DNS:-auto}"
   local -a upstream_args=()
   pidfile="$(vpn_dns_pidfile "${vpn_name}")"
   sudo_cmd="$(vpn_sudo_prefix)"
-  # CTFVM_VPN_DNS=auto|on -> detect this laptop's resolvers; anything else is a
-  # comma-separated explicit upstream list (e.g. CTFVM_VPN_DNS=10.0.0.53).
-  case "${CTFVM_VPN_DNS}" in
+  # auto|on -> detect this laptop's resolvers; anything else is a comma-separated
+  # explicit upstream list (e.g. CTFVM_VPN_DNS=10.0.0.53).
+  case "${dns_mode}" in
     auto|on|1|true|yes) : ;;
-    *) local IFS=','; for u in ${CTFVM_VPN_DNS}; do [[ -n "$u" ]] && upstream_args+=(--upstream "$u"); done ;;
+    *) local IFS=','; for u in ${dns_mode}; do [[ -n "$u" ]] && upstream_args+=(--upstream "$u"); done ;;
   esac
-  echo "Starting tunnel DNS forwarder on ${local_ip}:53 (CTFVM_VPN_DNS=${CTFVM_VPN_DNS:-auto})..."
+  echo "Starting tunnel DNS forwarder on ${local_ip}:53 (CTFVM_VPN_DNS=${dns_mode})..."
   rm -f "${pidfile}"
   ${sudo_cmd} nohup python3 "${REPO_ROOT}/scripts/vpn_dns_forwarder.py" \
     --bind "${local_ip}" --port 53 --pidfile "${pidfile}" \
@@ -2019,9 +2024,14 @@ cmd_vpn_up_all() {
   local rid total=0 ok=0 run_ids
   # Skip challenges hosted on a worker: they have no VM/IP of their own and
   # share the worker's single tunnel, so only the worker run gets a VPN.
+  # Also skip runs started with --no-vpn (vpn_requested=0): bringing a tunnel up
+  # for a run that explicitly opted out is wrong and wastes a local interface.
   run_ids="$( { for f in "${RUNS_DIR}"/*.json; do
       [[ -e "${f}" ]] || continue
       [[ -n "$(json_get_from_file parent_worker_id "${f}" 2>/dev/null || true)" ]] && continue
+      case "$(json_get_from_file vpn_requested "${f}" 2>/dev/null || echo 1)" in
+        0|false|False|no) continue ;;
+      esac
       json_get_from_file run_id "${f}" 2>/dev/null
     done; } | sort -u | grep -E '^[0-9]{8}-[0-9]{6}$' || true)"
   if [[ -z "${run_ids}" ]]; then
@@ -4124,7 +4134,14 @@ cmd_destroy() {
       fi_inst="$(json_get_from_file instance "${f}" || true)"
       fi_zone="$(json_get_from_file zone "${f}" || true)"
       fi_proj="$(json_get_from_file project "${f}" || true)"
-      if [[ "${fi_inst}" == "${inst}" && ( -z "${fi_zone}" || -z "${zn}" || "${fi_zone}" == "${zn}" ) && ( -z "${fi_proj}" || -z "${proj}" || "${fi_proj}" == "${proj}" ) ]]; then
+      fi_parent="$(json_get_from_file parent_worker_id "${f}" || true)"
+      # Remove the run whose instance matches, AND any worker-hosted challenge
+      # whose parent_worker_id points at the worker we just destroyed: those
+      # challenges share the worker's VM and have a synthetic instance name of
+      # their own, so an instance-name match alone never sweeps them — they'd
+      # orphan in local state after `destroy --all` (UI keeps listing them).
+      if [[ "${fi_inst}" == "${inst}" && ( -z "${fi_zone}" || -z "${zn}" || "${fi_zone}" == "${zn}" ) && ( -z "${fi_proj}" || -z "${proj}" || "${fi_proj}" == "${proj}" ) ]] \
+         || [[ -n "${run_guess}" && -n "${fi_parent}" && "${fi_parent}" == "${run_guess}" ]]; then
         rm -f "${f}"
       fi
     done

@@ -83,6 +83,28 @@ class Steering(unittest.TestCase):
         steering.set_explicit_status(c, "solved", note="flag{x}")
         self.assertIn("ui-status.json", c.commands[0])
 
+    def test_status_writes_to_run_dir(self):
+        # Worker-hosted challenges share a VM but each has its own run dir; the
+        # status file must land under that dir (matching where the snapshot
+        # gatherer reads it), not the hardcoded /home/ctf/run parent.
+        c = FakeClient()
+        steering.set_explicit_status(c, "solved", run_dir="/home/ctf/run/web-1")
+        self.assertIn("/home/ctf/run/web-1/ui-status.json", c.commands[0])
+        steering.clear_explicit_status(c, "/home/ctf/run/web-1")
+        self.assertIn("/home/ctf/run/web-1/ui-status.json", c.commands[1])
+
+    def test_status_default_run_dir_unchanged(self):
+        # Normal challenges (no per-slug dir) keep the legacy path.
+        c = FakeClient()
+        steering.set_explicit_status(c, "blocked")
+        self.assertIn("/home/ctf/run/ui-status.json", c.commands[0])
+
+    def test_status_rejects_run_dir_with_quote(self):
+        c = FakeClient()
+        with self.assertRaises(SteeringError):
+            steering.set_explicit_status(c, "solved", run_dir="/home/ctf/run/x'y")
+        self.assertEqual(c.commands, [])
+
     def test_remote_failure_raises(self):
         c = FakeClient(exec_result=ExecResult(returncode=1, stderr=b"no session"))
         with self.assertRaises(ControlPlaneError):
@@ -115,6 +137,28 @@ class Artifacts(unittest.TestCase):
         c = FakeClient(exec_result=ExecResult(returncode=0, stdout=body.encode()))
         with self.assertRaises(ArtifactError):
             artifacts.download_artifact(c, "/home/ctf/run", "artifacts/missing")
+
+    def test_bundle_cds_into_run_dir(self):
+        # Worker-hosted challenges live under /home/ctf/run/<slug>; the bundle
+        # must cd there, else it tars the shared parent (sibling challenges).
+        c = FakeClient(exec_result=ExecResult(returncode=0, stdout=b"/tmp/ctfvm-bundle-1.tar.gz"),
+                       download=b"tarbytes")
+        dl = artifacts.build_bundle(c, "run-x", "/home/ctf/run/web-1")
+        self.assertEqual(dl.content, b"tarbytes")
+        self.assertIn("cd /home/ctf/run/web-1 ", c.commands[0])
+        self.assertNotIn("cd /home/ctf/run ", c.commands[0])
+
+    def test_bundle_default_run_dir_unchanged(self):
+        c = FakeClient(exec_result=ExecResult(returncode=0, stdout=b"/tmp/ctfvm-bundle-1.tar.gz"),
+                       download=b"tarbytes")
+        artifacts.build_bundle(c, "run-x")
+        self.assertIn("cd /home/ctf/run ", c.commands[0])
+
+    def test_bundle_rejects_run_dir_with_quote(self):
+        c = FakeClient()
+        with self.assertRaises(ArtifactError):
+            artifacts.build_bundle(c, "run-x", "/home/ctf/run/x'y")
+        self.assertEqual(c.commands, [])
 
     def test_preview_parses_json_envelope(self):
         body = json.dumps({"ok": True, "mime": "text/x-python", "size": 5,

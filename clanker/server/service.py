@@ -141,6 +141,8 @@ class UiService:
                 )
                 for j in self.jobs.for_run(record.run_id)
             ]
+            if record.runner_type == RUNNER_WORKER:
+                return self._cache_cs(record, self._apply_worker_state(snap, record, reachable=False))
             return self._cache_cs(record, self._relabel_if_provisioning(snap, record))
         snap = snapshot_mod.fetch_snapshot(
             client, record, include_artifacts=include_artifacts, runtime_status=runtime_status,
@@ -153,6 +155,8 @@ class UiService:
             snap.panes = [p for p in snap.panes
                           if p.session == sess or p.session.startswith(f"subagent-{sess}")]
         snap.subagents = self._subagents_from_snapshot(snap)
+        if record.runner_type == RUNNER_WORKER:
+            return self._cache_cs(record, self._apply_worker_state(snap, record, reachable=True))
         return self._cache_cs(record, self._relabel_if_provisioning(snap, record))
 
     def _cache_cs(self, record: RunRecord, snap):
@@ -214,6 +218,42 @@ class UiService:
             last_activity_label=cs.last_activity_label,
         )
 
+    def _apply_worker_state(self, snap, record: RunRecord, *, reachable: bool):
+        """A worker host runs no agent, so the agent-centric derive (Halted/Stopped
+        because there are no panes/findings) is meaningless for it. Give it a
+        host-appropriate state: Provisioning while its spawn job runs, Failed if
+        that job errored, Ready once its control plane answers, else Stopped."""
+        jobs = self.jobs.for_run(record.run_id)
+        if any(j.state in ("queued", "running") for j in jobs):
+            snap.challenge_state = self._worker_provisioning_cs()
+            return snap
+        failed = next((j for j in jobs if j.state == "error"), None)
+        if failed:
+            reason = _provision_failure_reason(failed.output)
+            snap.error = f"Provisioning failed: {reason}" if reason else (snap.error or "Provisioning failed.")
+            snap.challenge_state = ChallengeState(
+                state="failed", label="Failed",
+                summary="Worker provisioning failed before it came up — see the error.")
+            return snap
+        if reachable:
+            snap.challenge_state = ChallengeState(
+                state="ready", label="Ready",
+                summary="Worker VM is up and reachable. Add challenges to it.")
+            return snap
+        age = _run_age_seconds(record)
+        if age is not None and age < self.PROVISION_WINDOW_SEC:
+            snap.challenge_state = self._worker_provisioning_cs()
+            return snap
+        snap.challenge_state = ChallengeState(
+            state="stopped", label="Stopped", summary="Worker VM is unreachable.")
+        return snap
+
+    @staticmethod
+    def _worker_provisioning_cs() -> ChallengeState:
+        return ChallengeState(
+            state="provisioning", label="Provisioning",
+            summary="Worker VM is starting up — not ready yet.")
+
     @staticmethod
     def _subagents_from_snapshot(snap) -> list[Subagent]:
         seen: dict[str, Subagent] = {}
@@ -254,25 +294,25 @@ class UiService:
 
     # --- steering / status -------------------------------------------------
     def pane_send(self, run_id, target, text, enter=True):
-        self._steer(lambda c: steering_mod.send_text(c, target, text, enter=enter), run_id)
+        self._steer(lambda c, r: steering_mod.send_text(c, target, text, enter=enter), run_id)
 
     def pane_keys(self, run_id, target, keys):
-        self._steer(lambda c: steering_mod.send_keys(c, target, keys), run_id)
+        self._steer(lambda c, r: steering_mod.send_keys(c, target, keys), run_id)
 
     def pane_trust(self, run_id, target="ctf:supervisor"):
-        self._steer(lambda c: steering_mod.trust_prompt(c, target), run_id)
+        self._steer(lambda c, r: steering_mod.trust_prompt(c, target), run_id)
 
     def set_status(self, run_id, state, note=""):
-        self._steer(lambda c: steering_mod.set_explicit_status(c, state, note), run_id)
+        self._steer(lambda c, r: steering_mod.set_explicit_status(c, state, note, r.remote_run_dir), run_id)
 
     def clear_status(self, run_id):
-        self._steer(lambda c: steering_mod.clear_explicit_status(c), run_id)
+        self._steer(lambda c, r: steering_mod.clear_explicit_status(c, r.remote_run_dir), run_id)
 
     def _steer(self, fn, run_id):
         record = self._record(run_id)
         client = self._client(record)
         try:
-            fn(client)
+            fn(client, record)
         except steering_mod.SteeringError as exc:
             raise ApiError("BAD_REQUEST", str(exc), 400) from exc
         except ControlPlaneError as exc:
@@ -292,7 +332,7 @@ class UiService:
     def bundle(self, run_id):
         record = self._record(run_id)
         client = self._client(record)
-        return self._artifact(lambda: artifacts_mod.build_bundle(client, record.run_id))
+        return self._artifact(lambda: artifacts_mod.build_bundle(client, record.run_id, record.remote_run_dir))
 
     @staticmethod
     def _artifact(fn):
@@ -623,7 +663,13 @@ class UiService:
         """Local VPN state for a run. VPN bring-up is a *local* privileged step
         (`ctfvm vpn up`, needs sudo on the operator's machine), so the UI reports
         status + the command to run rather than doing it itself."""
-        up_cmd = f"./scripts/ctfvm vpn --run-id {run_id} up"
+        # A challenge hosted on a worker has no VM/IP of its own — it shares the
+        # worker's single VPN tunnel. Report the worker's tunnel state and point
+        # bring-up/down at the worker (the challenge's run_id has no tunnel, and
+        # `ctfvm vpn --run-id <challenge>` redirects to the worker anyway).
+        record = self.registry.resolve(run_id)
+        vpn_run_id = record.parent_worker_id if (record and record.parent_worker_id) else run_id
+        up_cmd = f"./scripts/ctfvm vpn --run-id {vpn_run_id} up"
         # Was VPN requested for this run? (vs --no-vpn). Default True for older
         # runs / VPN-on default, so the UI errs toward prompting.
         raw = self.registry.load_raw(run_id) or {}
@@ -639,7 +685,7 @@ class UiService:
                         data = _json.loads(f.read_text())
                     except Exception:
                         continue
-                    if str(data.get("run_id") or "") == run_id:
+                    if str(data.get("run_id") or "") == vpn_run_id:
                         state = data
                         break
                 if state:
@@ -655,7 +701,7 @@ class UiService:
             "cidrs": state.get("local_cidrs") or [],
             "nat": bool(state.get("nat_enabled")),
             "up_command": up_cmd,
-            "down_command": f"./scripts/ctfvm vpn --run-id {run_id} down",
+            "down_command": f"./scripts/ctfvm vpn --run-id {vpn_run_id} down",
         }
 
     def profiles(self) -> list[dict]:
