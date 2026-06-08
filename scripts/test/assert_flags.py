@@ -48,6 +48,11 @@ def main():
             continue  # the host itself solves nothing
         rid, slug = r["run_id"], (r.get("name") or "").strip()
         exp = EXPECTED.get(slug, "")
+        if not exp:  # dedup may prefix the name (e.g. smoke-challenges-01-strings)
+            for k, v in EXPECTED.items():
+                if slug.endswith(k):
+                    slug, exp = k, v
+                    break
         try:
             snap = api(f"/api/v1/runs/{rid}?include_artifacts=false")
         except Exception as e:  # noqa: BLE001

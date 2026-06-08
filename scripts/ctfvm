@@ -2029,9 +2029,10 @@ cmd_vpn_up_all() {
   run_ids="$( { for f in "${RUNS_DIR}"/*.json; do
       [[ -e "${f}" ]] || continue
       [[ -n "$(json_get_from_file parent_worker_id "${f}" 2>/dev/null || true)" ]] && continue
-      case "$(json_get_from_file vpn_requested "${f}" 2>/dev/null || echo 1)" in
-        0|false|False|no) continue ;;
-      esac
+      # NOTE: no `case` here — bash 3.2 (macOS /bin/bash, used by sudo) has a
+      # parser bug on `case` inside $(...). A [[ ]] test is 3.2-safe.
+      _vr="$(json_get_from_file vpn_requested "${f}" 2>/dev/null || echo 1)"
+      [[ "${_vr}" == "0" || "${_vr}" == "false" || "${_vr}" == "False" || "${_vr}" == "no" ]] && continue
       json_get_from_file run_id "${f}" 2>/dev/null
     done; } | sort -u | grep -E '^[0-9]{8}-[0-9]{6}$' || true)"
   if [[ -z "${run_ids}" ]]; then
@@ -4180,7 +4181,12 @@ cmd_destroy() {
             sudo "${local_nat_script}" down "${local_interface}" >/dev/null 2>&1 || true
           fi
         fi
-        rm -f "${local_config}" "${local_nat_script}" "${f}"
+        # These files can be root-owned (sudo vpn up). A plain `rm` then fails
+        # with EPERM and, under `set -e`, would abort destroy BEFORE the droplet
+        # is deleted — leaving paid VMs running. Try sudo (non-interactive so it
+        # never hangs), fall back to plain rm, and never let it fail the teardown.
+        sudo -n rm -f "${local_config}" "${local_nat_script}" "${f}" 2>/dev/null \
+          || rm -f "${local_config}" "${local_nat_script}" "${f}" 2>/dev/null || true
         rmdir "$(dirname "${f}")" >/dev/null 2>&1 || true
       fi
     done
@@ -4202,7 +4208,8 @@ cmd_destroy() {
     ZONE="${zn}"
     PROJECT="${proj}"
     IP="${inst_ip}"
-    cleanup_local_vpn_for_instance "${inst}" "${zn}" "${proj}"
+    # never let local VPN cleanup block the (paid) droplet deletion below
+    cleanup_local_vpn_for_instance "${inst}" "${zn}" "${proj}" || true
     if [[ "${no_wipe}" == "0" ]]; then
       echo "Wiping VM Codex session material before deletion: ${inst} (${zn}, $(provider_label "${provider}"))"
       gcloud_ssh "sudo -u ctf bash -lc '
@@ -4323,7 +4330,7 @@ cmd_destroy() {
     fi
   fi
 
-  cleanup_local_vpn_for_instance "${INSTANCE}" "${ZONE}" "${PROJECT}"
+  cleanup_local_vpn_for_instance "${INSTANCE}" "${ZONE}" "${PROJECT}" || true
 
   if [[ "${no_wipe}" == "0" ]]; then
     echo "Wiping VM Codex session material before deletion..."
