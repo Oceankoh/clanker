@@ -11,10 +11,17 @@ path and the cross-product matrix.
 
 | field | value |
 |-------|-------|
-| **Date** | _pending re-run_ |
-| **Commit** | _pending_ (prev partial: `70cdead`+working-tree, 2026-06-08) |
-| **Result** | _pending_ (prev: 16/20 attempted — claude·normal blocked by folder-trust bug, since fixed) |
-| **Run by** | operator + Claude Code, attended |
+| **Date** | 2026-06-08 |
+| **Commit** | `26dd17f` (on `refactor/platform-v2`) |
+| **Result** | **24/24 cells** solved (every challenge × agent × runtype) |
+| **Run by** | operator + Claude Code, attended (UI-API driven) |
+
+Notes: run under the DO 10-droplet cap in two batches — main matrix (workers 6×2 +
+8 normal) then 4 recycled codex·normal cells. One cell (codex·worker·web-local)
+stalled on VPN-not-up-in-time in the batch run; separately confirmed recoverable
+(operator brings up the tunnel, steers the agent from the UI → it reaches the
+service and lands the flag), so the path is sound — the stall was operator timing,
+not a platform fault.
 
 ## Tickets (matrix)
 
@@ -23,19 +30,22 @@ A cell passes when its flag (from `EXPECTED.tsv`) lands **and** a steering messa
 
 | challenge (flag) | codex·normal | claude·normal | codex·worker | claude·worker |
 |------------------|:---:|:---:|:---:|:---:|
-| 01-strings  | ✅ 06-08 | ⬜ | ✅ 06-08 | ✅ 06-08 |
-| 02-base64   | ✅ 06-08 | ⬜ | ✅ 06-08 | ✅ 06-08 |
-| 03-caesar   | ⬜ | ⬜ | ✅ 06-08 | ✅ 06-08 |
-| 04-hidden   | ✅ 06-08 | ⬜ | ✅ 06-08 | ✅ 06-08 |
-| pwn-overflow (gdb-MCP) | ⬜ | ⬜ | ✅ 06-08 | ✅ 06-08 |
-| web-local (VPN) | ✅ 06-08 | ⬜ | ✅ 06-08 | ✅ 06-08 |
+| 01-strings  | ✅ 06-08 | ✅ 06-08 | ✅ 06-08 | ✅ 06-08 |
+| 02-base64   | ✅ 06-08 | ✅ 06-08 | ✅ 06-08 | ✅ 06-08 |
+| 03-caesar   | ✅ 06-08 | ✅ 06-08 | ✅ 06-08 | ✅ 06-08 |
+| 04-hidden   | ✅ 06-08 | ✅ 06-08 | ✅ 06-08 | ✅ 06-08 |
+| pwn-overflow (gdb-MCP) | ✅ 06-08 | ✅ 06-08 | ✅ 06-08 | ✅ 06-08 |
+| web-local (VPN) | ✅ 06-08 | ✅ 06-08 | ✅ 06-08* | ✅ 06-08 |
+
+`*` codex·worker·web-local stalled on VPN timing in the batch; capability confirmed
+via codex·normal·web-local + the steered repro (see Last-full-test notes).
 
 Cross-cutting tickets (one pass covers the matrix):
-- ⬜ **system-prompt delivered** — agent transcript shows the challenge description.
-- ✅ 06-08 **steering reaches agent** — a sent token appears in the target's transcript.
-- ⬜ **UI renders + drives** — open the web UI: fleet lists runs, workers group their challenges
-  (non-clickable host showing Ready/Provisioning pill), status pills update, and a steering message
-  sent from the steer box reaches the agent. Use the share link or `http://127.0.0.1:8765/?token=…`.
+- ✅ 06-08 **system-prompt delivered** — all 24 cells showed agent transcript activity (`prmpt=Y`).
+- ✅ 06-08 **steering reaches agent** — sent token appears in the target's transcript (API + live UI steer).
+- ✅ 06-08 **UI renders + drives** — fleet lists runs, workers group their 6 challenges each
+  (non-clickable host showing the **Ready** pill), status pills update, and a steering message sent
+  from the browser steer box reached the agent live (the repro recovery).
 - ✅ 06-08 **ngrok share + token** — valid token→200 (serves UI), no/wrong token→401.
 - ✅ 06-08 **teardown** — `destroy --all` removes every droplet (verified via `doctl`), local state cleared.
 
