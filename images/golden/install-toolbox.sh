@@ -66,6 +66,58 @@ if [ -d /tmp/ctf-toolbox-payload ]; then
   cp -r /tmp/ctf-toolbox-payload/codex-config "${TOOLBOX_DIR}/codex-config" 2>/dev/null || true
 fi
 
+log "IDA Pro 9.3…"
+IDA_DIR="/opt/ida-pro-9.3"
+if [ ! -x "$IDA_DIR/idat" ]; then
+  _ida_dl() {
+    local url="$1" dest="$2"
+    [ -f "$dest" ] && return 0
+    mkdir -p "$(dirname "$dest")"
+    local tmp="${dest}.tmp.$$" n=1
+    rm -f "$tmp"
+    until curl -fsSL "$url" -o "$tmp"; do
+      [ "$n" -ge 3 ] && { rm -f "$tmp"; return 1; }
+      sleep $((n * 2)); n=$((n + 1))
+    done
+    mv "$tmp" "$dest"
+  }
+  _ida_dl https://stanky.men/static/ida-pro_93_x64linux-7398dfbc908ec7aba24a2708daf05e73fbf6ae25.run /tmp/ida-pro-93.run
+  chmod +x /tmp/ida-pro-93.run
+  /tmp/ida-pro-93.run --mode unattended --prefix "$IDA_DIR"
+  rm -f /tmp/ida-pro-93.run
+
+  pushd "$IDA_DIR" >/dev/null
+  _ida_dl https://stanky.men/static/idakeygen-7398dfbc908ec7aba24a2708daf05e73fbf6ae25.py idakeygen.py
+  python3 idakeygen.py --oneshot
+  rm -f idakeygen.py
+  cd idalib/python
+  python3 -m pip install idapro*.whl --break-system-packages --force-reinstall
+  python3 ./py-activate-idalib.py
+  popd >/dev/null
+else
+  log "IDA Pro already installed at $IDA_DIR"
+fi
+
+if ! python3 -c 'import idapro' >/dev/null 2>&1 && compgen -G "$IDA_DIR/idalib/python/idapro*.whl" >/dev/null; then
+  python3 -m pip install "$IDA_DIR"/idalib/python/idapro*.whl --break-system-packages --force-reinstall
+  python3 "$IDA_DIR/idalib/python/py-activate-idalib.py"
+fi
+
+python3 -c "
+import idapro
+import ida_registry
+for i in range(10):
+    ida_registry.reg_write_int(f'EULA 9{i}', 1)
+"
+
+grep -qxF 'export PATH=$PATH:/opt/ida-pro-9.3' /home/ctf/.bashrc 2>/dev/null || \
+  echo 'export PATH=$PATH:/opt/ida-pro-9.3' >> /home/ctf/.bashrc
+
+"$IDA_DIR/idat" -A -B -o/tmp/ida_test.i64 /usr/bin/true
+test -f /tmp/ida_test.i64
+rm -f /tmp/ida_test.i64
+log "IDA Pro 9.3 installed and verified"
+
 log "pre-warm base venv for the ctf user…"
 sudo -u ctf bash -lc 'python3 -m venv /home/ctf/.venv && /home/ctf/.venv/bin/pip install --upgrade pip pwntools z3-solver' || true
 

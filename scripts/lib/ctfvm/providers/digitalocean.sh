@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 
 ctfvm_doctl() {
-  local retry_max="${CTFVM_DOCTL_HTTP_RETRY_MAX:-0}"
+  # Use doctl's built-in retry/backoff by default. It was pinned to 0, which made a
+  # single HTTP 429 ("Too many requests") from the DigitalOcean API immediately
+  # fatal — and `droplet get <name>` is a full droplet-list call, so fanning it out
+  # (e.g. `vpn up` over many workers right after spinning them up) reliably tripped
+  # the rate limit. Override via CTFVM_DOCTL_HTTP_RETRY_MAX if needed.
+  local retry_max="${CTFVM_DOCTL_HTTP_RETRY_MAX:-5}"
   doctl --http-retry-max "${retry_max}" "$@"
 }
 
@@ -45,10 +50,41 @@ ctfvm_provider_digitalocean_default_registry_repository() {
   ctfvm_doctl registries get --format Name --no-header 2>/dev/null | head -n1 || true
 }
 
+_CTFVM_DO_LIST_CACHE=""
+_CTFVM_DO_LIST_CACHE_AT=0
+
+_ctfvm_do_cached_list() {
+  local now
+  now="$(date +%s)"
+  if [[ -n "${_CTFVM_DO_LIST_CACHE}" ]] && (( now - _CTFVM_DO_LIST_CACHE_AT < 30 )); then
+    printf '%s\n' "${_CTFVM_DO_LIST_CACHE}"
+    return 0
+  fi
+  _CTFVM_DO_LIST_CACHE="$(ctfvm_doctl compute droplet list --tag-name ctfvm \
+    --format Name,Region,Status,PublicIPv4 --no-header 2>/dev/null || true)"
+  _CTFVM_DO_LIST_CACHE_AT="$(date +%s)"
+  printf '%s\n' "${_CTFVM_DO_LIST_CACHE}"
+}
+
 ctfvm_provider_digitalocean_get_field() {
   local instance="$1"
   local field="$2"
-  ctfvm_doctl compute droplet get "${instance}" --format "${field}" --no-header 2>/dev/null | head -n1 || true
+  local list_out line
+  list_out="$(_ctfvm_do_cached_list)"
+  while IFS= read -r line; do
+    [[ -z "${line//[[:space:]]/}" ]] && continue
+    local name
+    name="$(awk '{print $1}' <<< "${line}")"
+    if [[ "${name}" == "${instance}" ]]; then
+      case "${field}" in
+        Status)      awk '{print $3}' <<< "${line}"; return 0 ;;
+        PublicIPv4)  awk '{print $4}' <<< "${line}"; return 0 ;;
+        Region)      awk '{print $2}' <<< "${line}"; return 0 ;;
+        Name)        awk '{print $1}' <<< "${line}"; return 0 ;;
+      esac
+    fi
+  done <<< "${list_out}"
+  printf '%s\n' ""
 }
 
 ctfvm_provider_digitalocean_list_running() {
@@ -56,7 +92,7 @@ ctfvm_provider_digitalocean_list_running() {
     return 0
   fi
   local rows line name region status ip
-  rows="$(ctfvm_doctl compute droplet list --tag-name ctfvm --format Name,Region,Status,PublicIPv4 --no-header 2>/dev/null || true)"
+  rows="$(_ctfvm_do_cached_list)"
   while IFS= read -r line; do
     [[ -z "${line//[[:space:]]/}" ]] && continue
     name="$(awk '{print $1}' <<< "${line}")"
@@ -121,6 +157,8 @@ ctfvm_provider_digitalocean_ssh_common_args() {
   printf '%s\n' -o "HostKeyAlias=${host_key_alias}"
 }
 
+_CTFVM_DO_SSH_KEYS_CACHE=""
+
 ctfvm_provider_digitalocean_resolve_ssh_keys() {
   local -a keys=("$@")
   if [[ "${#keys[@]}" -gt 0 ]]; then
@@ -137,9 +175,15 @@ ctfvm_provider_digitalocean_resolve_ssh_keys() {
     return 0
   fi
 
-  ctfvm_doctl compute ssh-key list --format FingerPrint --no-header 2>/dev/null \
+  if [[ -n "${_CTFVM_DO_SSH_KEYS_CACHE}" ]]; then
+    printf '%s\n' "${_CTFVM_DO_SSH_KEYS_CACHE}"
+    return 0
+  fi
+
+  _CTFVM_DO_SSH_KEYS_CACHE="$(ctfvm_doctl compute ssh-key list --format FingerPrint --no-header 2>/dev/null \
     | awk 'NF { print $1 }' \
-    | paste -sd, -
+    | paste -sd, -)"
+  printf '%s\n' "${_CTFVM_DO_SSH_KEYS_CACHE}"
 }
 
 ctfvm_provider_digitalocean_ssh_exec() {

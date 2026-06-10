@@ -24,6 +24,8 @@
   .worker-head { padding:10px 16px; border-bottom:1px solid var(--line); }
   .worker-head .id { font-weight:600; }
   .worker-head .meta { color:var(--muted); font-size:12px; }
+  .worker-head:hover { background:#1d2230; }
+  .worker-head.sel { background:#222a3d; }
   .worker-head a { color:var(--accent); }
   .pill { display:inline-block; padding:1px 8px; border-radius:10px; font-size:11px; border:1px solid var(--line); }
   .s-solved,.s-ready{color:var(--ok);border-color:var(--ok)} .s-blocked,.s-halted,.s-stopped,.s-failed{color:var(--bad);border-color:var(--bad)}
@@ -129,7 +131,7 @@ async function refreshHealth(){
 }
 async function refreshFleet(force){
   try{
-    const d = await api('/runs?include_status=true'+(force?'&force_discovery=true':''));
+    const d = await api('/runs'+(force?'?force_discovery=true':''));
     STATE.runs = d.runs;
     renderFleet();
     startFleetPoll();   // ensure the background per-run status poller is running
@@ -157,7 +159,7 @@ function renderFleet(){
     const kids = childrenOf(w.run_id);
     const wst = STATE.statusByRun[w.run_id] || w.challenge_state;
     return `<div class="worker-group">
-      <div class="worker-head">
+      <div class="worker-head ${w.run_id===STATE.current?'sel':''}" onclick="selectRun('${w.run_id}')" style="cursor:pointer">
         <div class="id">⬢ ${esc(w.name)||w.run_id} ${statePill(wst)} <span class="pill">${kids.length} challenge${kids.length!==1?'s':''}</span></div>
         <div class="meta">${w.provider} · ${w.runtime_status||'?'} · ${w.ip||'—'}
           <a href="#" onclick="addChallenge('${w.run_id}',event)">+ add</a></div>
@@ -301,14 +303,21 @@ async function submitAddChallenge(){
 // can't stall the others. Pills render instantly from /runs' cached state; this
 // just keeps them fresh + stamps "updated Ns ago". The focused run is skipped —
 // its own refresh keeps it fresher.
-const FLEET_POLL_MS = 4000, POLL_TIMEOUT_MS = 8000;
+const FLEET_POLL_MS = 10000, POLL_TIMEOUT_MS = 8000;
+const _TERMINAL_STATES = new Set(['solved','failed','stopped']);
 let _pollTimer = null;
 async function pollFleetTick(){
-  const runs = STATE.runs.filter(r=>r.run_id!==STATE.current);
+  const runs = STATE.runs.filter(r=>{
+    if(r.run_id===STATE.current) return false;
+    const cs = STATE.statusByRun[r.run_id] || r.challenge_state;
+    if(cs && _TERMINAL_STATES.has(cs.state)) return false;
+    return true;
+  });
   await Promise.allSettled(runs.map(async r=>{
     try{
       const s = await apiTimed('/runs/'+encodeURIComponent(r.run_id)+'?include_artifacts=false', POLL_TIMEOUT_MS);
       if(s.challenge_state){ STATE.statusByRun[r.run_id]=s.challenge_state; }
+      if(s.runtime_status){ r.runtime_status=s.runtime_status; }
     }catch(e){ /* timed out / unreachable — keep last cached pill */ }
     STATE.updatedAt[r.run_id]=Date.now();
   }));
@@ -317,11 +326,10 @@ async function pollFleetTick(){
 }
 function startFleetPoll(){ if(_pollTimer===null){ _pollTimer=0; pollFleetTick(); } }
 async function selectRun(id){
-  // a worker host is a container, not a run — never focus it (open a challenge instead)
-  const r=(STATE.runs||[]).find(x=>x.run_id===id);
-  if(r && r.runner_type==='worker') return;
-  STATE.current=id; STATE.snap=null; STATE.steerTarget='';  // drop prev snapshot + steer target so the new run defaults to its own session
-  renderFleet(); await refreshFocus();
+  STATE.current=id; STATE.snap=null; STATE.steerTarget='';
+  renderFleet();
+  $('#focus').innerHTML='<div class="muted">Loading run…</div>';
+  await refreshFocus();
 }
 
 let AGENTS = [];
@@ -554,6 +562,7 @@ function renderFocus(){
       +s.provisioning.map(p=>`<div class="muted">${p.job_id} · ${p.state}</div><pre class="pane-out">${esc(p.output_tail)||'(no output yet)'}</pre>`).join('')
       :''}
     <div id="vpnrow"></div>
+    <div id="attachrow"></div>
     <div class="row">
       <button onclick="setStatus('solved')">Mark solved</button>
       <button onclick="setStatus('blocked')">Mark blocked</button>
@@ -564,6 +573,7 @@ function renderFocus(){
   Object.entries(keep).forEach(([id,v])=>{const el=$(id); if(el && v!=null) el.value=v;});
   if(STATE.tab==='transcript') loadTranscript();
   loadVpnStatus();
+  loadAttachInfo();
   // keep terminal panes scrolled to the latest output
   document.querySelectorAll('.pane-out').forEach(el=>{ el.scrollTop = el.scrollHeight; });
 }
@@ -599,6 +609,24 @@ async function loadVpnStatus(){
       +'<button onclick="navigator.clipboard.writeText(\''+cmdJs+'\')">copy</button>'
       +'<br><span class="muted">Or bring up every active run in one go: </span><code>./scripts/ctfvm vpn up</code>'
       +'</div>';
+  }catch(e){ row.innerHTML=''; }
+}
+async function loadAttachInfo(){
+  const row=$('#attachrow'); if(!row||!STATE.current) return;
+  try{
+    const d=await api('/runs/'+encodeURIComponent(STATE.current)+'/attach');
+    if(!d.ip){ row.innerHTML=''; return; }
+    const copyBtn=(cmd)=>{
+      const js=cmd.replace(/'/g,"\\'");
+      return `<button onclick="navigator.clipboard.writeText('${js}')">copy</button>`;
+    };
+    let html='<div class="banner" style="border-color:var(--muted);background:rgba(154,163,178,.05)">';
+    html+='<b>Terminal</b> — use the <a href="#" onclick="setTab(\'panes\');return false">panes tab</a> to view output and steer (no SSH needed). ';
+    html+='Break-glass SSH:';
+    html+=' <code>'+esc(d.attach_cmd)+'</code> '+copyBtn(d.attach_cmd);
+    html+=' · <code>'+esc(d.shell_cmd)+'</code> '+copyBtn(d.shell_cmd);
+    html+='</div>';
+    row.innerHTML=html;
   }catch(e){ row.innerHTML=''; }
 }
 
@@ -773,9 +801,10 @@ const _initialRun = _params.get('run');
 refreshHealth();
 Promise.all([loadAgents(), loadProfiles(), loadDefaults()]).then(()=>{ if(_params.get('new')) showSpawn(); });
 refreshFleet().then(()=>{ if(_initialRun) selectRun(_initialRun); });
-setInterval(refreshHealth, 15000);
-setInterval(refreshFleet, 30000);
-setInterval(()=>{ if(STATE.current) refreshFocus(); }, 8000);
+setInterval(refreshHealth, 30000);
+setInterval(refreshFleet, 60000);
+let _focusBusy=false;
+setInterval(async()=>{ if(!STATE.current||_focusBusy) return; _focusBusy=true; try{ await refreshFocus(); }finally{ _focusBusy=false; } }, 8000);
 </script>
 </body>
 </html>

@@ -7,6 +7,10 @@ export DEBIAN_FRONTEND=noninteractive
 CTFVM_PROVIDER="__CTFVM_PROVIDER__"
 TIMEOUT_MIN="__CTFVM_TIMEOUT_MIN__"
 
+# Disable unattended-upgrades: a systemd/openssh/libpam upgrade mid-run kills
+# tmux sessions (and the agents inside them) via service restarts.
+systemctl disable --now unattended-upgrades apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+
 if ! command -v python3 >/dev/null 2>&1; then
   apt-get update
   apt-get install -y python3

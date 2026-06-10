@@ -812,8 +812,15 @@ load_state_required_for_selector() {
   REMOTE_RUN_DIR="$(json_get_from_file remote_run_dir "${selected_file}")"
   IP="$(json_get_from_file ip "${selected_file}" || true)"
   load_control_plane_from_file "${selected_file}"
+  PARENT_WORKER_ID="$(json_get_from_file parent_worker_id "${selected_file}" || true)"
+  TMUX_SESSION="$(json_get_from_file tmux_session "${selected_file}" || true)"
   if [[ -z "${REMOTE_RUN_DIR}" ]]; then
     REMOTE_RUN_DIR="/home/ctf/run"
+  fi
+  # A challenge hosted on a worker has no IP of its own — use the worker's IP
+  # (already in CONTROL_HOST) so SSH/attach/shell can reach the VM.
+  if [[ -n "${PARENT_WORKER_ID}" && -z "${IP}" && -n "${CONTROL_HOST:-}" ]]; then
+    IP="${CONTROL_HOST}"
   fi
 
   if [[ "${PROVIDER}" == "digitalocean" ]]; then
@@ -1084,9 +1091,23 @@ choose_running_instance_interactive() {
 }
 
 refresh_instance_ip() {
-  IP="$(ctfvm_provider_call "${PROVIDER}" get_ip "${INSTANCE}" "${ZONE}" "${PROJECT}" || true)"
+  # Prefer an IP we already have (typically loaded from the run record). The live
+  # provider lookup resolves DigitalOcean droplets by *name*, which costs a full
+  # droplet-list API call and gets rate-limited (HTTP 429) when fanned out across
+  # many runs at once (e.g. `vpn up` over every worker) — and a 429 used to clobber
+  # a perfectly good cached IP with an empty string. So: only hit the provider when
+  # we have no cached IP, and never let an empty/failed lookup overwrite a good one.
+  # Callers that genuinely need a forced re-lookup set IP="" first (see cmd_start's
+  # provisioning path and resolve_target_required).
+  if [[ -z "${IP:-}" ]]; then
+    local fresh
+    fresh="$(ctfvm_provider_call "${PROVIDER}" get_ip "${INSTANCE}" "${ZONE}" "${PROJECT}" || true)"
+    if [[ -n "${fresh}" ]]; then
+      IP="${fresh}"
+    fi
+  fi
   if [[ -z "${CONTROL_HOST:-}" ]]; then
-    CONTROL_HOST="${IP}"
+    CONTROL_HOST="${IP:-}"
   fi
 }
 
@@ -3269,7 +3290,9 @@ cmd_attach() {
     exit 1
   fi
   resolve_interactive_ssh_target_required
-  vm_ssh_tty 'sudo -u ctf tmux select-window -t ctf:supervisor >/dev/null 2>&1 || true; sudo -u ctf tmux attach -t ctf || sudo -u ctf tmux ls'
+  local sess="${TMUX_SESSION%%:*}"
+  sess="${sess:-ctf}"
+  vm_ssh_tty "sudo -u ctf tmux select-window -t ${sess}:supervisor >/dev/null 2>&1 || true; sudo -u ctf tmux attach -t ${sess} || sudo -u ctf tmux ls"
 }
 
 cmd_chat() {
@@ -3280,7 +3303,9 @@ cmd_chat() {
     exit 1
   fi
   resolve_interactive_ssh_target_required
-  vm_ssh_tty 'sudo -u ctf tmux attach -t ctf:supervisor || sudo -u ctf tmux ls'
+  local sess="${TMUX_SESSION%%:*}"
+  sess="${sess:-ctf}"
+  vm_ssh_tty "sudo -u ctf tmux attach -t ${sess}:supervisor || sudo -u ctf tmux ls"
 }
 
 cmd_shell() {

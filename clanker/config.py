@@ -22,8 +22,16 @@ CONFIG_JSON = STATE_DIR / "config.json"
 ENV_FILE = ROOT / ".env"
 
 # --- tunables (kept identical to the current code) --------------------------
-STATUS_CACHE_TTL_SECONDS = 10
-DISCOVERY_TTL_SECONDS = 15
+STATUS_CACHE_TTL_SECONDS = 30
+DISCOVERY_TTL_SECONDS = 60
+# Background fleet-poll snapshots (the UI refreshes every run every few seconds) are
+# served from a short-TTL cache with single-flight, so overlapping/duplicate polls
+# do at most one remote exec per run per window instead of one per request.
+SNAPSHOT_CACHE_TTL_SECONDS = 5.0
+# The poll path uses a tighter exec timeout than interactive snapshots so a slow or
+# unreachable VM fails fast (and caches an error) instead of pinning a server thread
+# (and its VM socket) for the full 25s while the browser already aborted at ~8s.
+SNAPSHOT_POLL_TIMEOUT_SECONDS = 8
 DEFAULT_CONTROL_PORT = "443"
 ACTIVE_RUNTIME_STATUSES = {"running", "active"}
 

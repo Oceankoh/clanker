@@ -14,6 +14,7 @@ import json as _json
 import os
 import shutil
 import subprocess
+import threading
 from pathlib import Path
 
 from .. import artifacts as artifacts_mod
@@ -23,7 +24,14 @@ from .. import transcript as transcript_mod
 from ..agents import build_agent_backend
 from ..artifacts import ArtifactError
 from ..commands import agents_info, confine_remote_path, discover_challenges
-from ..config import MAX_SPAWN_JOBS, MAX_UPLOAD_BYTES, ROOT, Settings
+from ..config import (
+    MAX_SPAWN_JOBS,
+    MAX_UPLOAD_BYTES,
+    ROOT,
+    SNAPSHOT_CACHE_TTL_SECONDS,
+    SNAPSHOT_POLL_TIMEOUT_SECONDS,
+    Settings,
+)
 from ..controlclient import ControlPlaneClient, ControlPlaneError
 from ..models import (
     DEFAULT_AGENT_BACKEND,
@@ -60,6 +68,14 @@ class UiService:
         # last-known challenge_state per run, so the sidebar (/runs) can render
         # every pill instantly without a control-plane round trip per run.
         self._cs_cache: dict[str, "ChallengeState"] = {}
+        # Short-TTL cache for background fleet-poll snapshots (include_artifacts=
+        # False, no force) + a per-run lock for single-flight, so the UI's every-few-
+        # seconds parallel poll over every run collapses to ~one remote exec per run
+        # per TTL window. Interactive/focused snapshots bypass this and stay live.
+        self._snap_cache: dict[str, tuple[float, "Snapshot"]] = {}
+        self._snap_cache_guard = threading.Lock()
+        self._snap_locks: dict[str, threading.Lock] = {}
+        self._snap_locks_guard = threading.Lock()
         # run_ids handed out this process — to dedup across concurrent batches
         # whose state isn't persisted yet (see _assign_run_ids).
         self._assigned_run_ids: set[str] = set()
@@ -117,6 +133,52 @@ class UiService:
 
     # --- snapshot ----------------------------------------------------------
     def snapshot(self, run_id: str, *, include_artifacts=True, force_status=False):
+        # Only the background fleet poll (no artifacts, no forced status) is served
+        # from the short-TTL cache with single-flight: the UI refreshes every run in
+        # parallel every few seconds, so without this each request is its own remote
+        # exec — even when an identical one is already in flight or just completed.
+        # Focused/interactive snapshots (include_artifacts) bypass the cache so
+        # steering stays live.
+        if include_artifacts or force_status:
+            return self._snapshot_uncached(
+                run_id, include_artifacts=include_artifacts, force_status=force_status,
+            )
+        cached = self._snap_cache_get(run_id)
+        if cached is not None:
+            return cached
+        with self._snap_lock_for(run_id):
+            # Another request may have filled the cache while we waited on the lock.
+            cached = self._snap_cache_get(run_id)
+            if cached is not None:
+                return cached
+            snap = self._snapshot_uncached(
+                run_id, include_artifacts=False, force_status=False,
+                timeout=SNAPSHOT_POLL_TIMEOUT_SECONDS,
+            )
+            self._snap_cache_put(run_id, snap)
+            return snap
+
+    def _snap_cache_get(self, run_id: str):
+        with self._snap_cache_guard:
+            ent = self._snap_cache.get(run_id)
+            if ent and (time.monotonic() - ent[0]) < SNAPSHOT_CACHE_TTL_SECONDS:
+                return ent[1]
+        return None
+
+    def _snap_cache_put(self, run_id: str, snap) -> None:
+        with self._snap_cache_guard:
+            self._snap_cache[run_id] = (time.monotonic(), snap)
+
+    def _snap_lock_for(self, run_id: str) -> "threading.Lock":
+        with self._snap_locks_guard:
+            lock = self._snap_locks.get(run_id)
+            if lock is None:
+                lock = threading.Lock()
+                self._snap_locks[run_id] = lock
+            return lock
+
+    def _snapshot_uncached(self, run_id: str, *, include_artifacts=True,
+                           force_status=False, timeout=None):
         record = self._record(run_id)
         # A hosted challenge shares the worker's VM — use the worker's runtime
         # status, not a dead lookup of the challenge's synthetic instance.
@@ -144,8 +206,10 @@ class UiService:
             if record.runner_type == RUNNER_WORKER:
                 return self._cache_cs(record, self._apply_worker_state(snap, record, reachable=False))
             return self._cache_cs(record, self._relabel_if_provisioning(snap, record))
+        fetch_kwargs = {} if timeout is None else {"timeout": timeout}
         snap = snapshot_mod.fetch_snapshot(
             client, record, include_artifacts=include_artifacts, runtime_status=runtime_status,
+            **fetch_kwargs,
         )
         # A challenge hosted on a worker shares the VM (and its tmux server) with
         # other challenges. Keep only this challenge's session + its subagents so
@@ -702,6 +766,32 @@ class UiService:
             "nat": bool(state.get("nat_enabled")),
             "up_command": up_cmd,
             "down_command": f"./scripts/ctfvm vpn --run-id {vpn_run_id} down",
+        }
+
+    def attach_info(self, run_id: str) -> dict:
+        """Build the SSH commands for attaching to a run's tmux / getting a shell.
+        A challenge hosted on a worker targets the worker's IP but the
+        challenge's own tmux session."""
+        record = self.registry.resolve(run_id)
+        if not record:
+            raise ApiError("NOT_FOUND", f"Run not found: {run_id}", 404)
+        # For a challenge on a worker, SSH to the worker's IP
+        if record.parent_worker_id:
+            worker = self.registry.resolve(record.parent_worker_id)
+            ip = (worker.ip if worker else "") or record.control_host or ""
+            tmux_session = str(record.tmux_session or "").split(":")[0] or self._slug_of(record)
+        else:
+            ip = record.ip or record.control_host or ""
+            tmux_session = "ctf"
+        selector = f"--run-id {record.run_id}" if record.run_id else f"--ip {ip}"
+        return {
+            "ip": ip,
+            "tmux_session": tmux_session,
+            "attach_cmd": f"./scripts/ctfvm attach {selector}",
+            "shell_cmd": f"./scripts/ctfvm shell {selector}",
+            "ssh_cmd": f"ssh root@{ip}" if ip else "",
+            "is_worker": record.runner_type == RUNNER_WORKER,
+            "is_hosted": bool(record.parent_worker_id),
         }
 
     def profiles(self) -> list[dict]:

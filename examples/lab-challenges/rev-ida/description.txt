@@ -1,0 +1,9 @@
+`crackme` is a 64-bit Linux binary. It prompts for a password, checks it, and
+prints the flag only if the password is correct.
+
+The password and flag are NOT stored in plaintext — `strings` and `ltrace` will
+not help. You need to reverse-engineer the binary to understand how it validates
+the password and reconstruct the correct input.
+
+Use IDA Pro (installed at /opt/ida-pro-9.3) or the `idapro` Python module to
+disassemble and decompile the binary statically. The flag format is flag{...}.

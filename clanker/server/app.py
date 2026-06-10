@@ -84,6 +84,7 @@ class App:
             ("POST", re.compile(r"^/api/v1/runs/([^/]+)/panes/keys$"), self._pane_keys),
             ("POST", re.compile(r"^/api/v1/runs/([^/]+)/panes/trust$"), self._pane_trust),
             ("GET", re.compile(r"^/api/v1/runs/([^/]+)/subagents$"), self._subagents),
+            ("GET", re.compile(r"^/api/v1/runs/([^/]+)/attach$"), self._attach_info),
             ("GET", re.compile(r"^/api/v1/runs/([^/]+)/vpn$"), self._vpn_status),
             ("GET", re.compile(r"^/api/v1/runs/([^/]+)/transcript$"), self._transcript),
             ("GET", re.compile(r"^/api/v1/runs/([^/]+)/artifacts/(.+)/download$"), self._artifact_download),
@@ -274,6 +275,9 @@ class App:
     def _subagents(self, m, _q, _b):
         subs = self.s.subagents(m.group(1))
         return ok({"subagents": [serialize.subagent(s) for s in subs]})
+
+    def _attach_info(self, m, _q, _b):
+        return ok(self.s.attach_info(m.group(1)))
 
     def _vpn_status(self, m, _q, _b):
         return ok(self.s.vpn_status(m.group(1)))
