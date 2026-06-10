@@ -13,11 +13,13 @@ import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from clanker import commands  # noqa: E402
+from clanker.config import Settings  # noqa: E402
 from clanker.models import RunRecord  # noqa: E402
 from clanker.providers.base import CloudProvider, CloudProviderRegistry  # noqa: E402
 from clanker.state import RunRegistry  # noqa: E402
@@ -171,6 +173,31 @@ class Status(unittest.TestCase):
             out = buf.getvalue()
             self.assertIn("Provider: DigitalOcean", out)
             self.assertNotIn("GCPTOOLBOX", out)  # must not bleed from current-run.json
+
+
+class GoldenImageBake(unittest.TestCase):
+    def test_passes_dotenv_bake_settings_to_script(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script = root / "images" / "golden" / "bake.sh"
+            script.parent.mkdir(parents=True)
+            script.write_text("#!/usr/bin/env bash\n")
+            (root / ".env").write_text(
+                "CTFVM_DO_SSH_KEY=do-key\n"
+                "CTFVM_IDA_INSTALLER_PATH=/tmp/ida-pro-93.run\n"
+                "CTFVM_TOOLBOX_VARIANT=full\n"
+            )
+
+            with patch.object(commands, "ROOT", root), \
+                    patch("clanker.commands.subprocess.call", return_value=0) as call:
+                rc = commands.cmd_image_bake("do", settings=Settings(root=root))
+
+            self.assertEqual(rc, 0)
+            args, kwargs = call.call_args
+            self.assertEqual(args[0], ["bash", str(script), "--provider", "digitalocean"])
+            self.assertEqual(kwargs["env"]["CTFVM_DO_SSH_KEY"], "do-key")
+            self.assertEqual(kwargs["env"]["CTFVM_IDA_INSTALLER_PATH"], "/tmp/ida-pro-93.run")
+            self.assertEqual(kwargs["env"]["CTFVM_TOOLBOX_VARIANT"], "full")
 
 
 class _FakeClient:

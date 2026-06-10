@@ -18,7 +18,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${HERE}/../.." && pwd)"
 PROVIDER=""
-VARIANT="${CTF_TOOLBOX_VARIANT:-lean}"
+VARIANT="${CTF_TOOLBOX_VARIANT:-${CTFVM_TOOLBOX_VARIANT:-lean}}"
 STAMP="$(date -u +%Y%m%d-%H%M%S)"
 IMAGE_NAME="clanker-toolbox-${STAMP}"
 DO_BASE_IMAGE="${CTFVM_DO_BASE_IMAGE:-ubuntu-24-04-x64}"
@@ -69,6 +69,9 @@ record() {  # provider image_id image_name codex_ver claude_ver
 # Read CODEX_VERSION / CLAUDE_VERSION out of the versions file the install script
 # wrote, given its contents on stdin.
 parse_ver() { grep -E "^$1=" | head -n1 | cut -d= -f2- | tr -d '\r'; }
+shell_quote() {
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
 
 build_payload_tar() {
   PAYLOAD="$(mktemp -d)"
@@ -76,8 +79,23 @@ build_payload_tar() {
   mkdir -p "${PAYLOAD}/ctf-toolbox-payload"
   cp -r "${REPO_ROOT}/images/ctf-toolbox/mcp" "${PAYLOAD}/ctf-toolbox-payload/mcp" 2>/dev/null || true
   cp -r "${REPO_ROOT}/images/ctf-toolbox/codex-config" "${PAYLOAD}/ctf-toolbox-payload/codex-config" 2>/dev/null || true
+  if [ -n "${CTFVM_IDA_INSTALLER_PATH:-}" ]; then
+    [ -f "${CTFVM_IDA_INSTALLER_PATH}" ] || die "CTFVM_IDA_INSTALLER_PATH does not exist: ${CTFVM_IDA_INSTALLER_PATH}"
+    cp "${CTFVM_IDA_INSTALLER_PATH}" "${PAYLOAD}/ida-pro-93.run"
+  fi
   tar -C "${PAYLOAD}" -czf "${PAYLOAD}.tar.gz" .
   echo "${PAYLOAD}.tar.gz"
+}
+
+install_env_args() {
+  local args="CTF_TOOLBOX_VARIANT=$(shell_quote "${VARIANT}")"
+  if [ -n "${CTFVM_IDA_INSTALLER_URL:-}" ]; then
+    args="${args} CTFVM_IDA_INSTALLER_URL=$(shell_quote "${CTFVM_IDA_INSTALLER_URL}")"
+  fi
+  if [ -n "${CTFVM_IDA_INSTALLER_PATH:-}" ]; then
+    args="${args} CTFVM_IDA_INSTALLER_PATH=/tmp/payload/ida-pro-93.run"
+  fi
+  printf '%s\n' "${args}"
 }
 
 # --------------------------------------------------------------------------
@@ -114,9 +132,11 @@ bake_digitalocean() {
   scp ${sshopts} "${payload}" "root@${ip}:/tmp/payload.tar.gz"
   # `timeout` on the remote install caps the whole provision so a stuck apt can
   # never wedge the bake indefinitely.
+  local env_args
+  env_args="$(install_env_args)"
   ${ssh} "set -e; mkdir -p /tmp/payload && tar -C /tmp/payload -xzf /tmp/payload.tar.gz \
           && cp -r /tmp/payload/ctf-toolbox-payload /tmp/ctf-toolbox-payload \
-          && timeout 1500 env CTF_TOOLBOX_VARIANT='${VARIANT}' bash /tmp/payload/install-toolbox.sh"
+          && timeout 1500 env ${env_args} bash /tmp/payload/install-toolbox.sh"
 
   local versions codex_ver claude_ver
   versions="$(${ssh} cat /var/lib/ctfvm/golden-versions.env 2>/dev/null || true)"
@@ -156,10 +176,12 @@ bake_gcp() {
 
   log "uploading payload + running install-toolbox.sh…"
   gcloud compute scp "${payload}" "${name}:/tmp/payload.tar.gz" --project "${project}" --zone "${zone}"
+  local env_args
+  env_args="$(install_env_args)"
   gcloud compute ssh "${name}" --project "${project}" --zone "${zone}" --command \
     "set -e; mkdir -p /tmp/payload && tar -C /tmp/payload -xzf /tmp/payload.tar.gz \
      && sudo cp -r /tmp/payload/ctf-toolbox-payload /tmp/ctf-toolbox-payload \
-     && sudo timeout 1500 env CTF_TOOLBOX_VARIANT='${VARIANT}' bash /tmp/payload/install-toolbox.sh"
+     && sudo timeout 1500 env ${env_args} bash /tmp/payload/install-toolbox.sh"
 
   local versions codex_ver claude_ver
   versions="$(gcloud compute ssh "${name}" --project "${project}" --zone "${zone}" --command 'sudo cat /var/lib/ctfvm/golden-versions.env' 2>/dev/null || true)"

@@ -773,14 +773,34 @@ def cmd_image_id(provider: str) -> int:
     return 0
 
 
-def cmd_image_bake(provider: str) -> int:
+def cmd_image_bake(provider: str, *, settings: Settings | None = None) -> int:
     prov = normalize_provider(provider)
     script = ROOT / "images" / "golden" / "bake.sh"
     if not script.exists():
         sys.stderr.write(f"bake script not found: {script}\n")
         return 1
+    settings = settings or Settings()
+    env = os.environ.copy()
+    effective = {item[0].name: item for item in settings.effective()}
+    for key in (
+        "gcp_project",
+        "gcp_zone",
+        "gcp_machine_type",
+        "do_region",
+        "do_size_slug",
+        "do_ssh_key",
+        "toolbox_variant",
+        "ida_installer_url",
+        "ida_installer_path",
+    ):
+        spec = effective.get(key)
+        if not spec:
+            continue
+        config_key, value, _source = spec
+        if value not in (None, ""):
+            env[config_key.env_var] = str(value)
     print(f"Baking golden image for {prov} via {script} (attended — provisions a builder VM)…")
-    return subprocess.call(["bash", str(script), "--provider", prov])
+    return subprocess.call(["bash", str(script), "--provider", prov], env=env)
 
 
 def cmd_image_record(

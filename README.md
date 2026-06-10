@@ -38,6 +38,7 @@ codex login                       # Codex (syncs ~/.codex to the VM)
 python -m clanker auth claude     # Claude (stores a setup-token; never copies creds)
 
 # d) bake the golden VM image once (tools + agent CLIs pre-installed, no Docker, no creds)
+#    IDA requires CTFVM_IDA_INSTALLER_URL or CTFVM_IDA_INSTALLER_PATH in .env.
 python -m clanker image bake --provider digitalocean    # ~12-15 min; reused by every run/worker
 python -m clanker image status                          # when it was built; re-bake to update tools
 ```

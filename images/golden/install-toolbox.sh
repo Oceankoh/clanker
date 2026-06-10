@@ -16,6 +16,43 @@ MARKER="/var/lib/ctfvm/golden-ready"
 VERSIONS_FILE="/var/lib/ctfvm/golden-versions.env"
 
 log() { echo "[install-toolbox] $*"; }
+die() { echo "[install-toolbox] ERROR: $*" >&2; exit 1; }
+
+retry() {
+  local attempts="$1"
+  shift
+  local n=1
+  until "$@"; do
+    if [ "$n" -ge "$attempts" ]; then
+      return 1
+    fi
+    sleep $((n * 2))
+    n=$((n + 1))
+  done
+}
+
+download_file() {
+  local url="$1"
+  local dest="$2"
+  if [ -f "$dest" ]; then
+    return 0
+  fi
+  mkdir -p "$(dirname "$dest")"
+  local tmp
+  tmp="${dest}.tmp.$$"
+  rm -f "$tmp"
+  retry 3 curl -fsSL "$url" -o "$tmp"
+  mv "$tmp" "$dest"
+}
+
+append_bashrc_line() {
+  local bashrc="$1"
+  local line="$2"
+  touch "$bashrc"
+  if ! grep -qxF "$line" "$bashrc"; then
+    printf '%s\n' "$line" >> "$bashrc"
+  fi
+}
 
 # Fully non-interactive apt: DEBIAN_FRONTEND stops debconf prompts, and the
 # NEEDRESTART_* vars stop Ubuntu 24.04's needrestart from prompting "which
@@ -29,7 +66,7 @@ apt-get update
 apt-get install -y --no-install-recommends \
   binutils build-essential ca-certificates curl dnsutils file gdb git ripgrep \
   iproute2 iputils-ping jq less libc6-dbg libssl-dev netcat-openbsd nodejs npm \
-  python3 python3-dev python3-venv socat sudo strace tcpdump tmux unzip vim wget
+  python3 python3-dev python3-pip python3-venv socat sudo strace tcpdump tmux unzip vim wget
 
 log "uv…"
 curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR=/usr/local/bin sh
@@ -68,39 +105,33 @@ fi
 
 log "IDA Pro 9.3…"
 IDA_DIR="/opt/ida-pro-9.3"
+IDA_INSTALLER_URL="${CTFVM_IDA_INSTALLER_URL:-}"
+IDA_INSTALLER_PATH="${CTFVM_IDA_INSTALLER_PATH:-}"
 if [ ! -x "$IDA_DIR/idat" ]; then
-  _ida_dl() {
-    local url="$1" dest="$2"
-    [ -f "$dest" ] && return 0
-    mkdir -p "$(dirname "$dest")"
-    local tmp="${dest}.tmp.$$" n=1
-    rm -f "$tmp"
-    until curl -fsSL "$url" -o "$tmp"; do
-      [ "$n" -ge 3 ] && { rm -f "$tmp"; return 1; }
-      sleep $((n * 2)); n=$((n + 1))
-    done
-    mv "$tmp" "$dest"
-  }
-  _ida_dl https://stanky.men/static/ida-pro_93_x64linux-7398dfbc908ec7aba24a2708daf05e73fbf6ae25.run /tmp/ida-pro-93.run
+  if [ -n "$IDA_INSTALLER_PATH" ]; then
+    [ -f "$IDA_INSTALLER_PATH" ] || die "CTFVM_IDA_INSTALLER_PATH does not exist: ${IDA_INSTALLER_PATH}"
+    cp "$IDA_INSTALLER_PATH" /tmp/ida-pro-93.run
+  elif [ -n "$IDA_INSTALLER_URL" ]; then
+    download_file "$IDA_INSTALLER_URL" /tmp/ida-pro-93.run
+  else
+    die "IDA is not installed; set CTFVM_IDA_INSTALLER_URL or CTFVM_IDA_INSTALLER_PATH for the licensed IDA Pro 9.3 installer"
+  fi
   chmod +x /tmp/ida-pro-93.run
   /tmp/ida-pro-93.run --mode unattended --prefix "$IDA_DIR"
   rm -f /tmp/ida-pro-93.run
 
-  pushd "$IDA_DIR" >/dev/null
-  _ida_dl https://stanky.men/static/idakeygen-7398dfbc908ec7aba24a2708daf05e73fbf6ae25.py idakeygen.py
-  python3 idakeygen.py --oneshot
-  rm -f idakeygen.py
-  cd idalib/python
-  python3 -m pip install idapro*.whl --break-system-packages --force-reinstall
-  python3 ./py-activate-idalib.py
-  popd >/dev/null
 else
   log "IDA Pro already installed at $IDA_DIR"
 fi
 
-if ! python3 -c 'import idapro' >/dev/null 2>&1 && compgen -G "$IDA_DIR/idalib/python/idapro*.whl" >/dev/null; then
-  python3 -m pip install "$IDA_DIR"/idalib/python/idapro*.whl --break-system-packages --force-reinstall
-  python3 "$IDA_DIR/idalib/python/py-activate-idalib.py"
+if [ -d "$IDA_DIR/idalib/python" ]; then
+  pushd "$IDA_DIR/idalib/python" >/dev/null
+  if ! python3 -c 'import idapro' >/dev/null 2>&1 && compgen -G "idapro*.whl" >/dev/null; then
+    # Keep pip here: this is a vendor-provided local IDA wheel.
+    python3 -m pip install idapro*.whl --break-system-packages --force-reinstall
+  fi
+  python3 ./py-activate-idalib.py
+  popd >/dev/null
 fi
 
 python3 -c "
@@ -110,8 +141,9 @@ for i in range(10):
     ida_registry.reg_write_int(f'EULA 9{i}', 1)
 "
 
-grep -qxF 'export PATH=$PATH:/opt/ida-pro-9.3' /home/ctf/.bashrc 2>/dev/null || \
-  echo 'export PATH=$PATH:/opt/ida-pro-9.3' >> /home/ctf/.bashrc
+append_bashrc_line /root/.bashrc 'export PATH=$PATH:/opt/ida-pro-9.3'
+append_bashrc_line /home/ctf/.bashrc 'export PATH=$PATH:/opt/ida-pro-9.3'
+chown ctf:ctf /home/ctf/.bashrc
 
 "$IDA_DIR/idat" -A -B -o/tmp/ida_test.i64 /usr/bin/true
 test -f /tmp/ida_test.i64

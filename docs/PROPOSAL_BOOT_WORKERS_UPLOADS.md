@@ -71,7 +71,8 @@ toolset or agent CLIs need updating.
 - **Bake script** `images/golden/bake.sh --provider digitalocean`:
   boots a throwaway builder droplet → runs the install script (today's
   `images/ctf-toolbox/Dockerfile` package list + `uv` + agent CLIs + gdb MCP + config
-  templates + a pre-warmed venv) → captures a **DO custom image** (`doctl compute image`)
+  templates + IDA from `CTFVM_IDA_INSTALLER_URL` or `CTFVM_IDA_INSTALLER_PATH` + a
+  pre-warmed venv) → captures a **DO custom image** (`doctl compute image`)
   → writes `.ctfvm/golden-image.json` = `{provider, image_id, built_at, agent_versions}`.
   The image is **credential-free**: only binaries, tools, and non-secret config templates
   — never an OAuth token, API key, or `auth.json` (§1.5).

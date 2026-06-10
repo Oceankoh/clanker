@@ -82,9 +82,12 @@ SETTINGS_SCHEMA: list[ConfigKey] = [
     ConfigKey("gcp_machine_type", "CTFVM_GCP_MACHINE_TYPE", "e2-standard-4", "cloud", "GCP machine type", consumed_by="bash"),
     ConfigKey("do_region", "CTFVM_DO_REGION", "", "cloud", "DigitalOcean region", consumed_by="bash"),
     ConfigKey("do_size_slug", "CTFVM_DO_SIZE_SLUG", "s-4vcpu-8gb", "cloud", "DigitalOcean droplet size", consumed_by="bash"),
+    ConfigKey("do_ssh_key", "CTFVM_DO_SSH_KEY", "", "cloud", "DigitalOcean SSH key name/fingerprint for golden-image bake", consumed_by="bash"),
     # --- golden image (pre-baked VM image; blank -> stock distro + slow boot) ---
     ConfigKey("golden_image_do", "CTFVM_GOLDEN_IMAGE_DO", "", "cloud", "DigitalOcean golden image id/slug (blank = stock + slow boot)", consumed_by="bash"),
     ConfigKey("golden_image_gcp", "CTFVM_GOLDEN_IMAGE_GCP", "", "cloud", "GCP golden image name (blank = stock + slow boot)", consumed_by="bash"),
+    ConfigKey("ida_installer_url", "CTFVM_IDA_INSTALLER_URL", "", "cloud", "Licensed IDA Pro installer URL for golden-image bake", secret=True, consumed_by="bash"),
+    ConfigKey("ida_installer_path", "CTFVM_IDA_INSTALLER_PATH", "", "cloud", "Local licensed IDA Pro installer path for golden-image bake", consumed_by="bash"),
     # --- control plane / run ---
     ConfigKey("control_port", "CTFVM_CONTROL_PORT", "443", "control", "Control-plane port", consumed_by="both"),
     ConfigKey("timeout_min", "CTFVM_TIMEOUT_MIN", "1440", "control", "VM self-destruct timeout (minutes)", consumed_by="both"),
