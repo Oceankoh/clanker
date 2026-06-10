@@ -642,14 +642,21 @@ write_state() {
   local control_password="${22}"
 
   ensure_state_dir
-  cat > "${STATE_FILE}" <<JSON
+  local _tmp; _tmp="$(mktemp "$(dirname "${STATE_FILE}")/.write-XXXXXX")"
+  cat > "${_tmp}" <<JSON
 {
   "provider": "$(json_escape "${provider}")",
   "instance": "$(json_escape "${instance}")",
   "zone": "$(json_escape "${zone}")",
   "project": "$(json_escape "${project}")",
   "machine_type": "$(json_escape "${machine_type}")",
+  "agent_backend": "$(json_escape "${START_AGENT_BACKEND:-codex}")",
+  "model": "$(json_escape "${START_AGENT_MODEL:-}")",
+  "reasoning_effort": "$(json_escape "${START_AGENT_REASONING_EFFORT:-}")",
   "run_id": "$(json_escape "${run_id}")",
+  "challenge_name": "$(json_escape "${START_CHALLENGE_NAME:-$(basename "${challenge_dir}")}")",
+  "runner_type": "$(json_escape "${START_RUNNER_TYPE:-challenge}")",
+  "vpn_requested": "$(json_escape "${START_VPN_REQUESTED:-1}")",
   "challenge_dir": "$(json_escape "${challenge_dir}")",
   "timeout_min": "$(json_escape "${timeout_min}")",
   "workers": "$(json_escape "${workers}")",
@@ -670,8 +677,13 @@ write_state() {
   "remote_run_dir": "/home/ctf/run"
 }
 JSON
-  cp "${STATE_FILE}" "${RUNS_DIR}/${run_id}.json"
-  cp "${STATE_FILE}" "${RUNS_DIR}/${instance}.json"
+  # Atomic, per-process placement: build into a unique temp, then rename into
+  # each target (mv is an atomic same-filesystem rename). Concurrent spawns
+  # (e.g. `worker spawn --count N`) can no longer leave a half-written/0-byte or
+  # interleaved double-JSON state file, and a reader never catches a partial one.
+  cp -f "${_tmp}" "${RUNS_DIR}/${run_id}.json.$$.tmp"  && mv -f "${RUNS_DIR}/${run_id}.json.$$.tmp"  "${RUNS_DIR}/${run_id}.json"
+  cp -f "${_tmp}" "${RUNS_DIR}/${instance}.json.$$.tmp" && mv -f "${RUNS_DIR}/${instance}.json.$$.tmp" "${RUNS_DIR}/${instance}.json"
+  mv -f "${_tmp}" "${STATE_FILE}"
 }
 
 load_state_required() {
@@ -800,8 +812,15 @@ load_state_required_for_selector() {
   REMOTE_RUN_DIR="$(json_get_from_file remote_run_dir "${selected_file}")"
   IP="$(json_get_from_file ip "${selected_file}" || true)"
   load_control_plane_from_file "${selected_file}"
+  PARENT_WORKER_ID="$(json_get_from_file parent_worker_id "${selected_file}" || true)"
+  TMUX_SESSION="$(json_get_from_file tmux_session "${selected_file}" || true)"
   if [[ -z "${REMOTE_RUN_DIR}" ]]; then
     REMOTE_RUN_DIR="/home/ctf/run"
+  fi
+  # A challenge hosted on a worker has no IP of its own — use the worker's IP
+  # (already in CONTROL_HOST) so SSH/attach/shell can reach the VM.
+  if [[ -n "${PARENT_WORKER_ID}" && -z "${IP}" && -n "${CONTROL_HOST:-}" ]]; then
+    IP="${CONTROL_HOST}"
   fi
 
   if [[ "${PROVIDER}" == "digitalocean" ]]; then
@@ -1072,9 +1091,23 @@ choose_running_instance_interactive() {
 }
 
 refresh_instance_ip() {
-  IP="$(ctfvm_provider_call "${PROVIDER}" get_ip "${INSTANCE}" "${ZONE}" "${PROJECT}" || true)"
+  # Prefer an IP we already have (typically loaded from the run record). The live
+  # provider lookup resolves DigitalOcean droplets by *name*, which costs a full
+  # droplet-list API call and gets rate-limited (HTTP 429) when fanned out across
+  # many runs at once (e.g. `vpn up` over every worker) — and a 429 used to clobber
+  # a perfectly good cached IP with an empty string. So: only hit the provider when
+  # we have no cached IP, and never let an empty/failed lookup overwrite a good one.
+  # Callers that genuinely need a forced re-lookup set IP="" first (see cmd_start's
+  # provisioning path and resolve_target_required).
+  if [[ -z "${IP:-}" ]]; then
+    local fresh
+    fresh="$(ctfvm_provider_call "${PROVIDER}" get_ip "${INSTANCE}" "${ZONE}" "${PROJECT}" || true)"
+    if [[ -n "${fresh}" ]]; then
+      IP="${fresh}"
+    fi
+  fi
   if [[ -z "${CONTROL_HOST:-}" ]]; then
-    CONTROL_HOST="${IP}"
+    CONTROL_HOST="${IP:-}"
   fi
 }
 
@@ -1100,13 +1133,15 @@ gcloud_ssh() {
     refresh_instance_ip
   fi
   if control_plane_configured; then
+    # </dev/null: these exec calls never need stdin; without it the client
+    # blocks reading an interactive terminal (hung `ctfvm vpn up` from a tty).
     python3 "${REPO_ROOT}/scripts/ctfvm_control_client.py" \
       --endpoint "$(control_endpoint)" \
       --user "${CONTROL_USER}" \
       --password "${CONTROL_PASSWORD}" \
       exec \
       --timeout "${CTFVM_CONTROL_TIMEOUT_SEC:-1800}" \
-      --command "${cmd}"
+      --command "${cmd}" </dev/null
     return $?
   fi
   if [[ "${PROVIDER}" == "digitalocean" && -z "${IP:-}" ]]; then
@@ -1251,59 +1286,6 @@ wait_for_remote_bootstrap() {
   exit 1
 }
 
-sync_codex_auth() {
-  local codex_home
-  if [[ -n "${CODEX_HOME:-}" ]]; then
-    codex_home="${CODEX_HOME}"
-  else
-    codex_home="${HOME}/.codex"
-  fi
-
-  if [[ ! -d "${codex_home}" ]]; then
-    echo "Codex auth directory not found at ${codex_home}; skipping auth sync." >&2
-    return 0
-  fi
-
-  local -a auth_files=()
-  local rel
-  for rel in auth.json installation_id; do
-    if [[ -f "${codex_home}/${rel}" ]]; then
-      auth_files+=("${rel}")
-    fi
-  done
-
-  if [[ "${#auth_files[@]}" -eq 0 ]]; then
-    echo "No Codex auth session files found in ${codex_home}; skipping auth sync." >&2
-    return 0
-  fi
-
-  echo "Syncing Codex session data to VM (OAuth session only, no API keys)."
-  COPYFILE_DISABLE=1 tar --no-xattrs -C "${codex_home}" -cf - "${auth_files[@]}" 2>/dev/null | \
-    gcloud_ssh "sudo -u ctf bash -lc 'mkdir -p /home/ctf/run/.codex && tar -C /home/ctf/run/.codex -xf - && chmod -R go-rwx /home/ctf/run/.codex'"
-}
-
-install_managed_codex_config() {
-  local remote_upload_dir="$1"
-  local ida_mcp_url="${CTFVM_DEFAULT_IDA_MCP_URL:-}"
-  local remote_cmd remote_cmd_q
-  echo "Installing managed Codex agent-role config in /home/ctf/run/.codex."
-  remote_cmd="set -euo pipefail; mkdir -p /home/ctf/run/.codex /home/ctf/run/.codex/roles; if [ -f ${remote_upload_dir}/codex-config/config.toml ]; then cp ${remote_upload_dir}/codex-config/config.toml /home/ctf/run/.codex/config.toml; fi; if [ -d ${remote_upload_dir}/codex-config/roles ]; then rm -rf /home/ctf/run/.codex/roles; mkdir -p /home/ctf/run/.codex/roles; cp -R ${remote_upload_dir}/codex-config/roles/. /home/ctf/run/.codex/roles/; fi"
-  if [[ -n "${ida_mcp_url}" ]]; then
-    remote_cmd="${remote_cmd}; if [ -f /home/ctf/run/.codex/config.toml ] && ! grep -q '^\\[mcp_servers\\.ida\\]$' /home/ctf/run/.codex/config.toml; then cat >> /home/ctf/run/.codex/config.toml <<'EOF'
-
-[mcp_servers.ida]
-url = \"${ida_mcp_url}\"
-EOF
-fi"
-  fi
-  remote_cmd="${remote_cmd}; chown -R ctf:ctf /home/ctf/run/.codex; chmod 700 /home/ctf/run/.codex; if [ -f /home/ctf/run/.codex/config.toml ]; then chmod 600 /home/ctf/run/.codex/config.toml; fi; if [ -d /home/ctf/run/.codex/roles ]; then find /home/ctf/run/.codex/roles -type f -name '*.toml' -exec chmod 600 {} +; fi"
-  printf -v remote_cmd_q '%q' "${remote_cmd}"
-  gcloud_ssh "sudo bash -lc ${remote_cmd_q}"
-  if [[ -n "${ida_mcp_url}" ]]; then
-    echo "Managed Codex config includes default ida MCP server: ${ida_mcp_url}"
-  fi
-}
-
 build_remote_toolbox() {
   local variant="${1:-lean}"
   echo "Building toolbox image on VM (${variant} variant; first run may take several minutes)."
@@ -1313,7 +1295,11 @@ build_remote_toolbox() {
 load_remote_toolbox_archive() {
   local remote_archive="$1"
   echo "Loading cached toolbox image archive on VM."
-  gcloud_ssh "sudo -u ctf bash -lc 'gzip -dc \"${remote_archive}\" | docker load'"
+  # Load as root: the control plane uploads the archive into a root-owned
+  # /tmp/ctfvm-upload (restrictive umask), which the ctf user can't traverse.
+  # `docker load` only needs daemon access, which root has; the image lands in
+  # the shared daemon regardless of which user loads it.
+  gcloud_ssh "gzip -dc \"${remote_archive}\" | docker load"
 }
 
 pull_remote_toolbox_image() {
@@ -1447,11 +1433,35 @@ vpn_require_local_prereqs() {
 }
 
 vpn_sudo_prefix() {
-  if [[ -t 0 && -t 1 ]]; then
+  # NB: this runs inside $(...), so fd 1 is a pipe — never test `-t 1` here, it
+  # is always false and would force `sudo -n` (which refuses to prompt). Test
+  # the inherited stdin instead: a tty there means sudo can prompt for a passwd.
+  if [[ -t 0 ]]; then
     printf '%s\n' "sudo"
   else
     printf '%s\n' "sudo -n"
   fi
+}
+
+# `wg-quick` requires bash 4+, but macOS ships bash 3.2 as /bin/bash and sudo
+# resets PATH, so wg-quick's `#!/usr/bin/env bash` shebang resolves to the old
+# one ("Version mismatch: bash 3 detected"). Echo the argv to invoke wg-quick
+# with a bash 4+ interpreter explicitly (no-op on Linux / where bash is modern).
+vpn_wgquick_cmd() {
+  local wgq b
+  wgq="$(command -v wg-quick 2>/dev/null || true)"
+  if [[ -z "${wgq}" || "$(uname -s)" != "Darwin" ]]; then
+    printf '%s' "wg-quick"
+    return
+  fi
+  for b in "$(command -v bash 2>/dev/null)" /opt/homebrew/bin/bash /usr/local/bin/bash; do
+    [[ -x "${b}" ]] || continue
+    if [[ "$("${b}" -c 'printf %s "${BASH_VERSINFO[0]}"' 2>/dev/null)" -ge 4 ]] 2>/dev/null; then
+      printf '%s %s' "${b}" "${wgq}"
+      return
+    fi
+  done
+  printf '%s' "${wgq}"
 }
 
 vpn_write_local_nat_script() {
@@ -1625,7 +1635,12 @@ vpn_install_remote() {
   remote_config_b64="$(base64 < "${remote_config}" | tr -d '\n')"
   remote_env_b64="$(base64 < "${remote_env}" | tr -d '\n')"
   remote_json_b64="$(base64 < "${remote_json}" | tr -d '\n')"
-  remote_cmd="set -euo pipefail; export DEBIAN_FRONTEND=noninteractive; if ! command -v wg >/dev/null 2>&1 || ! command -v wg-quick >/dev/null 2>&1; then apt-get update && apt-get install -y wireguard-tools; fi; install -d -m 700 /etc/wireguard ${REMOTE_VPN_DIR}; systemctl stop wg-quick@${remote_interface}.service >/dev/null 2>&1 || true; printf '%s' '${remote_config_b64}' | base64 -d > /etc/wireguard/${remote_interface}.conf; chmod 600 /etc/wireguard/${remote_interface}.conf; printf '%s' '${remote_env_b64}' | base64 -d > ${REMOTE_VPN_DIR}/${remote_interface}.env; printf '%s' '${remote_json_b64}' | base64 -d > ${REMOTE_VPN_DIR}/${remote_interface}.json; chown -R ctf:ctf ${REMOTE_VPN_DIR}; systemctl enable --now wg-quick@${remote_interface}.service"
+  # NB: use `wg-quick up/down` directly, NOT `systemctl … wg-quick@…`. systemctl
+  # hangs over the non-interactive control-plane exec (no tty/session -> blocks
+  # on systemd/dbus), which previously wedged the install at the first
+  # `systemctl stop` before the config was even written. Ephemeral CTF VMs don't
+  # need reboot-persistence. timeout guards so a stuck bring-up fails fast.
+  remote_cmd="set -euo pipefail; export DEBIAN_FRONTEND=noninteractive; if ! command -v wg >/dev/null 2>&1 || ! command -v wg-quick >/dev/null 2>&1; then timeout 180 bash -c 'apt-get update && apt-get install -y wireguard-tools'; fi; install -d -m 700 /etc/wireguard ${REMOTE_VPN_DIR}; wg-quick down ${remote_interface} >/dev/null 2>&1 || true; printf '%s' '${remote_config_b64}' | base64 -d > /etc/wireguard/${remote_interface}.conf; chmod 600 /etc/wireguard/${remote_interface}.conf; printf '%s' '${remote_env_b64}' | base64 -d > ${REMOTE_VPN_DIR}/${remote_interface}.env; printf '%s' '${remote_json_b64}' | base64 -d > ${REMOTE_VPN_DIR}/${remote_interface}.json; chown -R ctf:ctf ${REMOTE_VPN_DIR}; timeout 30 wg-quick up ${remote_interface}"
   printf -v remote_cmd_q '%q' "${remote_cmd}"
   gcloud_ssh "sudo bash -lc ${remote_cmd_q}"
 }
@@ -1736,8 +1751,8 @@ vpn_up_loaded() {
   fi
 
   echo "Starting local WireGuard interface ${local_interface}..."
-  if ! ${sudo_cmd} wg-quick up "${local_config}"; then
-    gcloud_ssh "sudo bash -lc 'systemctl disable --now wg-quick@${remote_interface}.service >/dev/null 2>&1 || true; rm -f /etc/wireguard/${remote_interface}.conf ${REMOTE_VPN_DIR}/${remote_interface}.env ${REMOTE_VPN_DIR}/${remote_interface}.json'" >/dev/null 2>&1 || true
+  if ! ${sudo_cmd} $(vpn_wgquick_cmd) up "${local_config}"; then
+    gcloud_ssh "sudo bash -lc 'timeout 20 wg-quick down ${remote_interface} >/dev/null 2>&1 || true; rm -f /etc/wireguard/${remote_interface}.conf ${REMOTE_VPN_DIR}/${remote_interface}.env ${REMOTE_VPN_DIR}/${remote_interface}.json'" >/dev/null 2>&1 || true
     rm -rf "${stage_dir}"
     return 1
   fi
@@ -1747,11 +1762,109 @@ vpn_up_loaded() {
   mv "${state_file}.tmp" "${state_file}"
   rm -rf "${stage_dir}"
 
+  # Verify the tunnel actually carries traffic: ping the VM's WireGuard IP from
+  # here. This also primes the handshake (PersistentKeepalive). A failure here
+  # almost always means UDP ${port} isn't reaching the VM (provider firewall).
+  local _vpn_verified="0" _try _ping
+  case "$(uname -s)" in
+    Darwin) _ping=(ping -c1 -t 3) ;;   # -t = total timeout (s) on macOS
+    *)      _ping=(ping -c1 -W 3) ;;    # -W = per-reply timeout (s) on Linux
+  esac
+  for _try in 1 2 3 4 5; do
+    if "${_ping[@]}" "${remote_ip}" >/dev/null 2>&1; then _vpn_verified="1"; break; fi
+    sleep 2
+  done
+
   echo "VPN ${vpn_name} is up for ${INSTANCE}."
   echo "  VM WireGuard IP: ${remote_ip}"
   echo "  Local gateway: ${local_ip}"
   echo "  Routed local CIDRs: ${cidrs_csv}"
   echo "  Remote env: ${REMOTE_VPN_DIR}/${remote_interface}.env"
+  if [[ "${_vpn_verified}" == "1" ]]; then
+    echo "  Tunnel verified: handshake OK (local <-> VM)."
+  else
+    echo "  WARNING: tunnel handshake not confirmed (could not ping ${remote_ip})." >&2
+    echo "           Usually UDP ${port} isn't reaching the VM. Check the provider firewall," >&2
+    echo "           or that the laptop has outbound UDP. The VM/agent can still run locally." >&2
+  fi
+
+  if vpn_dns_enabled; then
+    vpn_dns_up "${vpn_name}" "${local_ip}"
+  fi
+}
+
+# --- tunnel-side DNS forwarder (CTFVM_VPN_DNS) ------------------------------
+# Optional: run scripts/vpn_dns_forwarder.py on this laptop, bound to the
+# tunnel's local gateway IP, and point the VM's agent container at it — so the
+# agent resolves whatever this laptop can (LAN/internal names, a loopback proxy,
+# public). DHCP can't cross a routed WireGuard tunnel, so this is the way to get
+# internal hostname resolution. On by default (CTFVM_VPN_DNS=auto); set
+# CTFVM_VPN_DNS=off to disable.
+vpn_dns_enabled() {
+  case "${CTFVM_VPN_DNS:-auto}" in
+    off|0|false|no) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+vpn_dns_pidfile() { printf '%s/%s-dns.pid' "$(vpn_state_dir)" "$1"; }
+
+vpn_dns_up() {
+  local vpn_name="$1" local_ip="$2"
+  local pidfile sudo_cmd resolv b64 u
+  # default to auto when unset — `set -u` is on, and vpn_dns_enabled already
+  # treats unset as "auto", so this path must use the same default (not bare
+  # ${CTFVM_VPN_DNS}, which would abort with "unbound variable").
+  local dns_mode="${CTFVM_VPN_DNS:-auto}"
+  local -a upstream_args=()
+  pidfile="$(vpn_dns_pidfile "${vpn_name}")"
+  sudo_cmd="$(vpn_sudo_prefix)"
+  # auto|on -> detect this laptop's resolvers; anything else is a comma-separated
+  # explicit upstream list (e.g. CTFVM_VPN_DNS=10.0.0.53).
+  case "${dns_mode}" in
+    auto|on|1|true|yes) : ;;
+    *) local IFS=','; for u in ${dns_mode}; do [[ -n "$u" ]] && upstream_args+=(--upstream "$u"); done ;;
+  esac
+  echo "Starting tunnel DNS forwarder on ${local_ip}:53 (CTFVM_VPN_DNS=${dns_mode})..."
+  rm -f "${pidfile}"
+  ${sudo_cmd} nohup python3 "${REPO_ROOT}/scripts/vpn_dns_forwarder.py" \
+    --bind "${local_ip}" --port 53 --pidfile "${pidfile}" \
+    ${upstream_args[@]+"${upstream_args[@]}"} >/dev/null 2>&1 &
+  disown 2>/dev/null || true
+  # verify it actually came up (port 53 free, python3 present) before relying on it
+  local fpid="" _t
+  for _t in 1 2 3 4 5; do
+    sleep 0.5
+    [[ -f "${pidfile}" ]] && fpid="$(cat "${pidfile}" 2>/dev/null)"
+    [[ -n "${fpid}" ]] && ps -p "${fpid}" >/dev/null 2>&1 && break
+    fpid=""
+  done
+  if [[ -z "${fpid}" ]]; then
+    echo "  WARNING: DNS forwarder did not start (is :53 already bound, or python3 missing?)." >&2
+    echo "           Internal hostname resolution won't work; reach targets by IP, or set CTFVM_VPN_DNS=off." >&2
+    return 0
+  fi
+  echo "  DNS forwarder running (pid ${fpid})."
+  # point the agent container's resolver at the forwarder (+ a public fallback),
+  # base64'd to avoid nested-quoting hell through the control plane
+  resolv="$(printf 'nameserver %s\nnameserver 1.1.1.1\n' "${local_ip}")"
+  b64="$(printf '%s' "${resolv}" | base64 | tr -d '\n')"
+  if gcloud_ssh "sudo -u ctf bash -lc 'printf %s ${b64} | base64 -d | docker exec -i -u root ctf-toolbox sh -c \"cat > /etc/resolv.conf\"'" >/dev/null 2>&1; then
+    echo "  Agent container DNS -> ${local_ip} (resolves what this laptop can)."
+  else
+    echo "  NOTE: agent container not reachable yet; rerun 'ctfvm vpn ... up' once it's running to set DNS." >&2
+  fi
+}
+
+vpn_dns_down() {
+  local vpn_name="$1" pidfile pid sudo_cmd
+  pidfile="$(vpn_dns_pidfile "${vpn_name}")"
+  [[ -f "${pidfile}" ]] || return 0
+  sudo_cmd="$(vpn_sudo_prefix)"
+  pid="$(cat "${pidfile}" 2>/dev/null || true)"
+  [[ -n "${pid}" ]] && ${sudo_cmd} kill "${pid}" >/dev/null 2>&1 || true
+  rm -f "${pidfile}"
+  echo "Stopped tunnel DNS forwarder."
 }
 
 cmd_vpn_up() {
@@ -1785,6 +1898,15 @@ cmd_vpn_up() {
   done
 
   resolve_target_required
+  # A challenge hosted on a worker has no VM/IP of its own — VPN is a per-VM
+  # tunnel, so point the operator at the worker instead of failing on a blank IP.
+  local _pw
+  _pw="$(json_get_from_file parent_worker_id "${SELECTED_STATE_FILE}" 2>/dev/null || true)"
+  if [[ -n "${_pw}" ]]; then
+    echo "This run is a challenge hosted on worker ${_pw}; challenges share the worker's VM + tunnel." >&2
+    echo "Bring the VPN up on the worker instead:  ${SCRIPT_DIR}/ctfvm vpn --run-id ${_pw} up" >&2
+    exit 1
+  fi
   if [[ -z "${vpn_name}" ]]; then
     vpn_name="$(vpn_default_name)"
   fi
@@ -1883,15 +2005,16 @@ cmd_vpn_down() {
   local_nat_script="$(jq -r '.local_nat_script' "${state_file}")"
 
   if [[ -f "${local_config}" ]]; then
-    sudo wg-quick down "${local_config}" >/dev/null 2>&1 || true
+    sudo $(vpn_wgquick_cmd) down "${local_config}" >/dev/null 2>&1 || true
   elif [[ -n "${local_interface}" ]]; then
-    sudo wg-quick down "${local_interface}" >/dev/null 2>&1 || true
+    sudo $(vpn_wgquick_cmd) down "${local_interface}" >/dev/null 2>&1 || true
   fi
   if [[ -x "${local_nat_script}" ]]; then
     sudo "${local_nat_script}" down "${local_interface}" >/dev/null 2>&1 || true
   fi
 
-  gcloud_ssh "sudo bash -lc 'systemctl disable --now wg-quick@${remote_interface}.service >/dev/null 2>&1 || true; rm -f /etc/wireguard/${remote_interface}.conf ${REMOTE_VPN_DIR}/${remote_interface}.env ${REMOTE_VPN_DIR}/${remote_interface}.json'" >/dev/null 2>&1 || true
+  vpn_dns_down "${vpn_name}"
+  gcloud_ssh "sudo bash -lc 'timeout 20 wg-quick down ${remote_interface} >/dev/null 2>&1 || true; rm -f /etc/wireguard/${remote_interface}.conf ${REMOTE_VPN_DIR}/${remote_interface}.env ${REMOTE_VPN_DIR}/${remote_interface}.json'" >/dev/null 2>&1 || true
   rm -f "${local_config}" "${local_nat_script}" "${state_file}"
   rmdir "$(dirname "${state_file}")" >/dev/null 2>&1 || true
   echo "VPN ${vpn_name} removed."
@@ -1916,12 +2039,53 @@ cmd_vpn_list() {
   done
 }
 
+# `ctfvm vpn up` with no selector: bring the tunnel up for EVERY active run,
+# reusing a single sudo session (one password prompt for all of them).
+cmd_vpn_up_all() {
+  local rid total=0 ok=0 run_ids
+  # Skip challenges hosted on a worker: they have no VM/IP of their own and
+  # share the worker's single tunnel, so only the worker run gets a VPN.
+  # Also skip runs started with --no-vpn (vpn_requested=0): bringing a tunnel up
+  # for a run that explicitly opted out is wrong and wastes a local interface.
+  run_ids="$( { for f in "${RUNS_DIR}"/*.json; do
+      [[ -e "${f}" ]] || continue
+      [[ -n "$(json_get_from_file parent_worker_id "${f}" 2>/dev/null || true)" ]] && continue
+      # NOTE: no `case` here — bash 3.2 (macOS /bin/bash, used by sudo) has a
+      # parser bug on `case` inside $(...). A [[ ]] test is 3.2-safe.
+      _vr="$(json_get_from_file vpn_requested "${f}" 2>/dev/null || echo 1)"
+      [[ "${_vr}" == "0" || "${_vr}" == "false" || "${_vr}" == "False" || "${_vr}" == "no" ]] && continue
+      json_get_from_file run_id "${f}" 2>/dev/null
+    done; } | sort -u | grep -E '^[0-9]{8}-[0-9]{6}$' || true)"
+  if [[ -z "${run_ids}" ]]; then
+    echo "No runs found. Start one with: ctfvm start --dir <challenge-folder>" >&2
+    exit 1
+  fi
+  # prime the sudo timestamp once so each tunnel doesn't re-prompt for a password
+  if [[ -t 0 ]]; then sudo -v 2>/dev/null || true; fi
+  while IFS= read -r rid; do
+    [[ -n "${rid}" ]] || continue
+    total=$((total + 1))
+    echo ""
+    echo "=== VPN up: ${rid} ==="
+    # subshell so a per-run failure (or exit) doesn't abort the loop, and the
+    # selector globals don't leak between runs
+    if ( SEL_PICK=0; SEL_RUN_ID="${rid}"; SEL_INSTANCE=""; SEL_IP=""; SEL_ZONE=""; SEL_PROJECT=""; SEL_PROVIDER=""; cmd_vpn_up "$@" ); then
+      ok=$((ok + 1))
+    else
+      echo "  ${rid}: skipped or failed (continuing)" >&2
+    fi
+  done <<< "${run_ids}"
+  echo ""
+  echo "VPN bring-up: ${ok}/${total} run(s) up."
+}
+
 cmd_vpn() {
   parse_selector_args "$@"
   set -- ${PARSED_SELECTOR_ARGS[@]+"${PARSED_SELECTOR_ARGS[@]}"}
 
   if [[ $# -lt 1 ]]; then
     echo "Usage: ctfvm vpn [--pick | --run-id <YYYYmmdd-HHMMSS> | --instance <ctfvm-...> [--provider gcp|digitalocean --zone <zone-or-region> --project <project>]] <up|status|down|list> [args...]" >&2
+    echo "  'vpn up' with no selector brings the tunnel up for ALL active runs (one sudo session)." >&2
     exit 1
   fi
 
@@ -1929,7 +2093,12 @@ cmd_vpn() {
   shift
   case "${subcmd}" in
     up)
-      cmd_vpn_up "$@" ;;
+      # no selector -> every active run; with a selector -> just that one
+      if [[ "${SEL_PICK}" == "0" && -z "${SEL_RUN_ID}${SEL_INSTANCE}${SEL_IP}" ]]; then
+        cmd_vpn_up_all "$@"
+      else
+        cmd_vpn_up "$@"
+      fi ;;
     status)
       cmd_vpn_status "$@" ;;
     down)
@@ -2470,10 +2639,22 @@ cmd_start() {
   local size_slug="${CTFVM_DO_SIZE_SLUG:-s-4vcpu-8gb}"
   local zone=""
   local project=""
+  local agent="${CTFVM_AGENT:-codex}"
+  local model="${CTFVM_MODEL:-}"
+  local start_run_id=""
+  local start_name=""
+  local reasoning_effort="${CTFVM_REASONING_EFFORT:-xhigh}"
+  local account=""
   local no_auth_sync="0"
   local force_remote_build="0"
   local use_local_image="0"
   local local_image_archive
+  local worker_mode="0"
+  # dockerless: run the agent directly on the host (golden image has the tools),
+  # no toolbox container. Set when booting the golden image (unless the operator
+  # explicitly asked for the legacy container via --use-local-image), and always
+  # for workers. Docker is now the fallback for the stock image only.
+  local dockerless="0"
   local toolbox_variant="${CTFVM_TOOLBOX_VARIANT:-lean}"
   local toolbox_image_ref=""
   local toolbox_location=""
@@ -2501,6 +2682,8 @@ cmd_start() {
     case "$1" in
       --provider)
         provider="$(normalize_provider "$2")"; shift 2 ;;
+      --worker)
+        worker_mode=1; shift ;;
       --dir)
         challenge_dir="$2"; shift 2 ;;
       --desc)
@@ -2537,6 +2720,18 @@ cmd_start() {
         boot_image_family="$2"; shift 2 ;;
       --boot-image-project)
         boot_image_project="$2"; shift 2 ;;
+      --agent)
+        agent="$2"; shift 2 ;;
+      --model)
+        model="$2"; shift 2 ;;
+      --run-id)
+        start_run_id="$2"; shift 2 ;;
+      --name)
+        start_name="$2"; shift 2 ;;
+      --reasoning-effort)
+        reasoning_effort="$2"; shift 2 ;;
+      --account)
+        account="$2"; shift 2 ;;
       --no-auth-sync)
         no_auth_sync="1"; shift ;;
       --force-remote-build)
@@ -2574,6 +2769,10 @@ cmd_start() {
     echo "Invalid toolbox variant: ${toolbox_variant}. Use lean or full." >&2
     exit 1
   fi
+  if [[ "${agent}" != "codex" && "${agent}" != "claude-code" ]]; then
+    echo "Invalid --agent: ${agent}. Use codex or claude-code." >&2
+    exit 1
+  fi
   if [[ "${auto_vpn}" != "0" && "${auto_vpn}" != "1" ]]; then
     echo "Invalid CTFVM_VPN value: ${auto_vpn}. Use 0 or 1." >&2
     exit 1
@@ -2601,10 +2800,18 @@ cmd_start() {
 
   if [[ "${provider}" == "gcp" ]]; then
     if [[ -z "${boot_image}" && -z "${boot_image_family}" ]]; then
-      boot_image="$(env_first_set CTFVM_GCP_BOOT_IMAGE)"
-      if [[ -z "${boot_image}" ]]; then
-        boot_image_family="${CTFVM_GCP_BOOT_IMAGE_FAMILY:-debian-12}"
-        boot_image_project="${CTFVM_GCP_BOOT_IMAGE_PROJECT:-debian-cloud}"
+      # Prefer the pre-baked golden image (CTFVM_GOLDEN_IMAGE_GCP or .ctfvm/golden-image.json);
+      # fall back to the stock distro family + the slow startup install.
+      boot_image="$( cd "${REPO_ROOT}" && PYTHONPATH="${REPO_ROOT}" python3 -m clanker image id --provider gcp 2>/dev/null || true )"
+      if [[ -n "${boot_image}" ]]; then
+        echo "Using golden image: ${boot_image}"
+        [[ "${use_local_image}" == "1" ]] || dockerless=1
+      else
+        boot_image="$(env_first_set CTFVM_GCP_BOOT_IMAGE)"
+        if [[ -z "${boot_image}" ]]; then
+          boot_image_family="${CTFVM_GCP_BOOT_IMAGE_FAMILY:-debian-12}"
+          boot_image_project="${CTFVM_GCP_BOOT_IMAGE_PROJECT:-debian-cloud}"
+        fi
       fi
     fi
   else
@@ -2613,7 +2820,14 @@ cmd_start() {
       boot_image_family=""
     fi
     if [[ -z "${boot_image}" ]]; then
-      boot_image="${CTFVM_DO_BOOT_IMAGE:-ubuntu-24-04-x64}"
+      # Prefer the pre-baked golden image; fall back to the stock distro image.
+      boot_image="$( cd "${REPO_ROOT}" && PYTHONPATH="${REPO_ROOT}" python3 -m clanker image id --provider digitalocean 2>/dev/null || true )"
+      if [[ -n "${boot_image}" ]]; then
+        echo "Using golden image: ${boot_image}"
+        [[ "${use_local_image}" == "1" ]] || dockerless=1
+      else
+        boot_image="${CTFVM_DO_BOOT_IMAGE:-ubuntu-24-04-x64}"
+      fi
     fi
     boot_image_family=""
     boot_image_project=""
@@ -2631,6 +2845,21 @@ cmd_start() {
     desc="$(cat "${desc_file}")"
   fi
 
+  # Worker mode: provision an empty VM (control plane + golden image) with NO
+  # challenge and NO agent launched. Challenges are added later via the control
+  # plane (`clanker worker add`). Synthesize an empty challenge dir so the shared
+  # provisioning/state path works unchanged; the challenge upload is harmlessly
+  # empty and the supervisor launch is skipped below.
+  if [[ "${worker_mode}" == "1" ]]; then
+    export START_RUNNER_TYPE="worker"
+    dockerless=1   # workers never run the toolbox container
+    if [[ -z "${challenge_dir}" ]]; then
+      challenge_dir="$(mktemp -d)"
+      : > "${challenge_dir}/.worker"
+    fi
+    [[ -n "${start_name}" ]] || start_name="worker-${RANDOM}"
+  fi
+
   if [[ -z "${challenge_dir}" ]]; then
     echo "Missing required flag: --dir <challenge-folder>" >&2
     exit 1
@@ -2641,7 +2870,7 @@ cmd_start() {
     exit 1
   fi
 
-  if [[ ! -f "${REPO_ROOT}/vm/startup.sh" || ! -f "${REPO_ROOT}/vm/control_server.py" || ! -f "${REPO_ROOT}/runner/supervisor.sh" || ! -f "${REPO_ROOT}/runner/spawn-idea-workers.sh" || ! -f "${REPO_ROOT}/runner/subagent-tmux-bridge.sh" || ! -f "${REPO_ROOT}/runner/install-python-runtime.sh" || ! -d "${REPO_ROOT}/skills" || ! -f "${REPO_ROOT}/images/ctf-toolbox/codex-config/config.toml" ]]; then
+  if [[ ! -f "${REPO_ROOT}/vm/startup.sh" || ! -f "${REPO_ROOT}/vm/control_server.py" || ! -f "${REPO_ROOT}/runner/supervisor.sh" || ! -f "${REPO_ROOT}/runner/spawn-idea-workers.sh" || ! -f "${REPO_ROOT}/runner/subagent-tmux-bridge.sh" || ! -f "${REPO_ROOT}/runner/install-python-runtime.sh" || ! -d "${REPO_ROOT}/skills" ]]; then
     echo "Required implementation files are missing in repo." >&2
     exit 1
   fi
@@ -2677,7 +2906,18 @@ cmd_start() {
   local control_port control_user control_password
   local vpn_status="disabled"
   local remote_upload_dir="/tmp/ctfvm-upload"
-  run_id="$(date +%Y%m%d-%H%M%S)"
+  # A caller (the UI/server, when fanning out a folder deploy) may pin the
+  # run_id so parallel runs don't collide on the same-second timestamp; else
+  # mint one here. Must stay YYYYmmdd-HHMMSS — identity/state/selectors assume it.
+  if [[ -n "${start_run_id}" ]]; then
+    if [[ ! "${start_run_id}" =~ ^[0-9]{8}-[0-9]{6}$ ]]; then
+      echo "Invalid --run-id value: ${start_run_id} (expected YYYYmmdd-HHMMSS)" >&2
+      exit 1
+    fi
+    run_id="${start_run_id}"
+  else
+    run_id="$(date +%Y%m%d-%H%M%S)"
+  fi
   challenge_slug="$(instance_slug_from_challenge_dir "${challenge_dir}")"
   instance="ctfvm-${challenge_slug}-${run_id}"
   control_port="${DEFAULT_CONTROL_PORT}"
@@ -2690,6 +2930,9 @@ cmd_start() {
   toolbox_image_source="artifact-registry"
   render_startup_script "${provider}" "${timeout_min}" "${control_port}" "${control_user}" "${control_password}" "${startup_tmp}"
 
+  # Dockerless (golden image / worker) runs the agent directly on the host —
+  # no toolbox container, so skip all toolbox-image resolution / pull / run.
+  if [[ "${dockerless}" != "1" ]]; then
   if [[ "${force_remote_build}" == "1" ]]; then
     echo "--force-remote-build is disabled. Use Artifact Registry or --use-local-image." >&2
     exit 1
@@ -2752,6 +2995,7 @@ cmd_start() {
         ;;
     esac
   fi
+  fi  # end dockerless toolbox guard
 
   {
     echo "Challenge description:"
@@ -2829,8 +3073,34 @@ PROMPT
     ZONE="$(do_region_for_instance "${instance}")"
   fi
 
+  # Persist a recovery state file NOW — the VM exists and its control creds are
+  # known, but the rest of provisioning (control-plane wait, bootstrap, upload,
+  # image pull, container start) is long. If anything below is interrupted
+  # (e.g. the caller is killed), this early write means the run is still in
+  # local state so it can be destroyed/inspected instead of leaking. The final
+  # write_state below overwrites it with the complete record.
+  START_AGENT_BACKEND="${agent}"
+  START_AGENT_MODEL="${model}"
+  START_AGENT_REASONING_EFFORT="${reasoning_effort}"
+  # Display name: the server passes --name (folder name, parent-prefixed on
+  # collision); direct CLI use falls back to the challenge folder's basename.
+  START_CHALLENGE_NAME="${start_name:-$(basename "${challenge_dir}")}"
+  # Record whether VPN was requested for this run (vs --no-vpn) so the UI can
+  # alert only when the tunnel is actually expected for networked challenges.
+  START_VPN_REQUESTED="${auto_vpn}"
+  refresh_instance_ip || true
+  write_state "${provider}" "${instance}" "${ZONE}" "${project}" "${machine_type}" "${run_id}" "$(cd "${challenge_dir}" && pwd)" "${timeout_min}" "" "${auth_sync}" "${no_auth_sync}" "${IP:-}" "${boot_image}" "${boot_image_family}" "${boot_image_project}" "${toolbox_image_ref}" "${toolbox_image_source}" "${CONTROL_SCHEME}" "${CONTROL_HOST:-${IP:-}}" "${CONTROL_PORT}" "${CONTROL_USER}" "${CONTROL_PASSWORD}"
+
   echo "Waiting for VM control plane availability..."
   wait_for_control_plane
+
+  # Re-persist now that the control plane is confirmed up and the IP is known.
+  # The first recovery write (above) can land before DigitalOcean has assigned a
+  # public IP, leaving control_host empty -> the UI shows "no control-plane
+  # credentials" for the whole (long) upload/image-load phase. With the IP now
+  # set, the run is usable/selectable in the UI while the rest provisions.
+  refresh_instance_ip || true
+  write_state "${provider}" "${instance}" "${ZONE}" "${project}" "${machine_type}" "${run_id}" "$(cd "${challenge_dir}" && pwd)" "${timeout_min}" "" "${auth_sync}" "${no_auth_sync}" "${IP:-}" "${boot_image}" "${boot_image_family}" "${boot_image_project}" "${toolbox_image_ref}" "${toolbox_image_source}" "${CONTROL_SCHEME}" "${CONTROL_HOST:-${IP:-}}" "${CONTROL_PORT}" "${CONTROL_USER}" "${CONTROL_PASSWORD}"
 
   echo "Waiting for VM bootstrap readiness..."
   wait_for_remote_bootstrap
@@ -2843,7 +3113,22 @@ PROMPT
     cp -R "${REPO_ROOT}/prompts" "${upload_tmp}/"
   fi
   cp -R "${REPO_ROOT}/skills" "${upload_tmp}/"
-  cp -R "${REPO_ROOT}/images/ctf-toolbox/codex-config" "${upload_tmp}/"
+  # Unified agent flow: both codex and claude-code are materialized by
+  # `clanker stage-agent` (rendered config + role files + auth + the agent/
+  # control files supervisor.sh reads). The model + reasoning effort are chosen
+  # here at start (reasoning effort is codex-only; the claude backend ignores it).
+  echo "Staging ${agent} agent payload${model:+ (model: ${model})}${reasoning_effort:+ (effort: ${reasoning_effort})}${account:+ (profile: ${account})}..."
+  local -a _stage_args=(--agent "${agent}" --staging-dir "${upload_tmp}/agentstage")
+  [[ -n "${model}" ]] && _stage_args+=(--model "${model}")
+  [[ -n "${reasoning_effort}" ]] && _stage_args+=(--reasoning-effort "${reasoning_effort}")
+  [[ -n "${account}" ]] && _stage_args+=(--account "${account}")
+  if ! ( cd "${REPO_ROOT}" && PYTHONPATH="${REPO_ROOT}" CTFVM_NO_AUTH_SYNC="${no_auth_sync}" \
+         python3 -m clanker stage-agent "${_stage_args[@]}" ); then
+    echo "Agent staging failed for '${agent}'. Authenticate it first:" >&2
+    echo "  python3 -m clanker auth ${agent%%-*}${account:+ --name ${account}}" >&2
+    exit 1
+  fi
+  auth_sync="staged"
 
   gcloud_ssh "mkdir -p ${remote_upload_dir} && rm -rf ${remote_upload_dir}/*"
 
@@ -2851,29 +3136,33 @@ PROMPT
   upload_dir_to_remote "${upload_tmp}" "${remote_upload_dir}"
   if [[ "${use_local_image}" == "1" ]]; then
     echo "Uploading local toolbox archive..."
-    upload_file_to_remote "${local_image_archive}" "${remote_upload_dir}/ctf-toolbox.tar.gz"
+    # Mode 644: the control plane uploads as root, but the archive is loaded as
+    # the `ctf` user (`docker load`), which otherwise gets "Permission denied".
+    upload_file_to_remote "${local_image_archive}" "${remote_upload_dir}/ctf-toolbox.tar.gz" 644
   fi
 
   gcloud_ssh "sudo mkdir -p /home/ctf/run /home/ctf/run/.codex/skills && sudo rm -rf /home/ctf/run/challenge /home/ctf/run/prompts /home/ctf/run/.codex/skills/* && sudo cp -R ${remote_upload_dir}/challenge /home/ctf/run/challenge && if [ -d ${remote_upload_dir}/prompts ]; then sudo cp -R ${remote_upload_dir}/prompts /home/ctf/run/prompts; fi && if [ -d ${remote_upload_dir}/skills ]; then sudo cp -R ${remote_upload_dir}/skills/. /home/ctf/run/.codex/skills/; fi && sudo cp ${remote_upload_dir}/challenge_prompt.txt /home/ctf/run/challenge_prompt.txt && sudo cp ${remote_upload_dir}/supervisor.sh ${remote_upload_dir}/spawn-idea-workers.sh ${remote_upload_dir}/subagent-tmux-bridge.sh ${remote_upload_dir}/install-python-runtime.sh /home/ctf/run/ && sudo chown -R ctf:ctf /home/ctf/run && sudo chmod 644 /home/ctf/run/challenge_prompt.txt && sudo -u ctf chmod +x /home/ctf/run/supervisor.sh /home/ctf/run/spawn-idea-workers.sh /home/ctf/run/subagent-tmux-bridge.sh /home/ctf/run/install-python-runtime.sh"
 
-  if [[ "${no_auth_sync}" == "0" ]]; then
-    sync_codex_auth
-  else
-    auth_sync="disabled"
-  fi
+  # Install the staged agent payload (agent/ control files + rendered config +
+  # auth) into the run dir; supervisor.sh reads agent/ to launch the right CLI.
+  # The cp/chown MUST succeed — masking it would silently fall back to Codex —
+  # so only the defensive chmods are tolerant of a missing file.
+  echo "Installing staged ${agent} agent config on the VM..."
+  gcloud_ssh "sudo cp -R ${remote_upload_dir}/agentstage/. /home/ctf/run/ && sudo chown -R ctf:ctf /home/ctf/run && { sudo chmod 600 /home/ctf/run/agent/container.env 2>/dev/null || true; } && { sudo find /home/ctf/run -name auth.json -exec chmod 600 {} + 2>/dev/null || true; }"
 
-  install_managed_codex_config "${remote_upload_dir}"
-
-  if [[ "${use_local_image}" == "1" ]]; then
+  if [[ "${dockerless}" == "1" ]]; then
+    echo "Dockerless: agent runs directly on the host (golden image) — no toolbox container."
+  elif [[ "${use_local_image}" == "1" ]]; then
     if ! gcloud_ssh "test -f ${remote_upload_dir}/ctf-toolbox.tar.gz"; then
       echo "Local archive missing on VM after upload; aborting." >&2
       exit 1
     fi
     load_remote_toolbox_archive "${remote_upload_dir}/ctf-toolbox.tar.gz"
+    start_remote_toolbox_container "${toolbox_variant}"
   else
     pull_remote_toolbox_image "${toolbox_image_ref}"
+    start_remote_toolbox_container "${toolbox_variant}"
   fi
-  start_remote_toolbox_container "${toolbox_variant}"
   gcloud_ssh "rm -rf ${remote_upload_dir}"
 
   refresh_instance_ip
@@ -2885,26 +3174,47 @@ PROMPT
     fi
   fi
 
+  # surfaced in state.json so the UI parses the right transcript format + shows
+  # the backend (read by write_state via these globals).
+  START_AGENT_BACKEND="${agent}"
+  START_AGENT_MODEL="${model}"
+  START_AGENT_REASONING_EFFORT="${reasoning_effort}"
   write_state "${provider}" "${instance}" "${ZONE}" "${project}" "${machine_type}" "${run_id}" "$(cd "${challenge_dir}" && pwd)" "${timeout_min}" "" "${auth_sync}" "${no_auth_sync}" "${ip}" "${boot_image}" "${boot_image_family}" "${boot_image_project}" "${toolbox_image_ref}" "${toolbox_image_source}" "${CONTROL_SCHEME}" "${CONTROL_HOST:-${ip}}" "${CONTROL_PORT}" "${CONTROL_USER}" "${CONTROL_PASSWORD}"
 
   if [[ "${auto_vpn}" == "1" ]]; then
-    local vpn_cidrs_file vpn_name
-    vpn_status="failed"
-    vpn_cidrs_file="$(mktemp)"
-    vpn_name="$(vpn_default_name)"
-    echo "Starting automated local-network VPN (${vpn_name})..."
-    if vpn_split_cidrs "${vpn_cidrs_raw}" "${vpn_cidrs_file}" && vpn_up_loaded "${vpn_name}" "${vpn_port}" "${vpn_cidrs_file}" "${vpn_nat}"; then
-      vpn_status="enabled"
+    # The local tunnel bring-up (wg-quick + pfctl) needs interactive sudo on the
+    # machine that's on the LAN. Run non-interactively (the web UI's spawn job,
+    # CI, ...) there's no tty to prompt on, so DEFER it cleanly instead of
+    # failing: the VM provisions and the operator brings the tunnel up locally
+    # (the UI shows the exact command). VPN stays the default — only the
+    # privileged local step is deferred.
+    if [[ ! -t 0 ]]; then
+      vpn_status="deferred"
+      echo "VPN is enabled but its local bring-up needs a terminal (sudo). After provisioning, run:"
+      echo "  ${SCRIPT_DIR}/ctfvm vpn --run-id ${run_id} up"
     else
-      echo "VPN setup failed. The VM is running, but agents may not reach local-network challenges until you fix the issue and run:" >&2
-      echo "  ${SCRIPT_DIR}/ctfvm vpn --run-id ${run_id} up" >&2
+      local vpn_cidrs_file vpn_name
+      vpn_status="failed"
+      vpn_cidrs_file="$(mktemp)"
+      vpn_name="$(vpn_default_name)"
+      echo "Starting automated local-network VPN (${vpn_name})..."
+      if vpn_split_cidrs "${vpn_cidrs_raw}" "${vpn_cidrs_file}" && vpn_up_loaded "${vpn_name}" "${vpn_port}" "${vpn_cidrs_file}" "${vpn_nat}"; then
+        vpn_status="enabled"
+      else
+        echo "VPN setup failed. The VM is running, but agents may not reach local-network challenges until you fix the issue and run:" >&2
+        echo "  ${SCRIPT_DIR}/ctfvm vpn --run-id ${run_id} up" >&2
+      fi
+      rm -f "${vpn_cidrs_file}"
     fi
-    rm -f "${vpn_cidrs_file}"
   fi
 
-  echo "Launching tmux supervisor..."
-  gcloud_ssh "sudo -u ctf bash -lc 'tmux kill-session -t ctf >/dev/null 2>&1 || true'"
-  launch_supervisor_tmux "/home/ctf/run" "/home/ctf/run/challenge_prompt.txt"
+  if [[ "${worker_mode}" == "1" ]]; then
+    echo "Worker VM ready (no agent launched). Add challenges with: clanker worker add ${start_name:-<worker>} --dir <challenge>"
+  else
+    echo "Launching tmux supervisor..."
+    gcloud_ssh "sudo -u ctf bash -lc 'tmux kill-session -t ctf >/dev/null 2>&1 || true'"
+    launch_supervisor_tmux "/home/ctf/run" "/home/ctf/run/challenge_prompt.txt"
+  fi
 
   rm -f "${prompt_tmp}" "${startup_tmp}"
   rm -rf "${upload_tmp}"
@@ -2980,7 +3290,9 @@ cmd_attach() {
     exit 1
   fi
   resolve_interactive_ssh_target_required
-  vm_ssh_tty 'sudo -u ctf tmux select-window -t ctf:supervisor >/dev/null 2>&1 || true; sudo -u ctf tmux attach -t ctf || sudo -u ctf tmux ls'
+  local sess="${TMUX_SESSION%%:*}"
+  sess="${sess:-ctf}"
+  vm_ssh_tty "sudo -u ctf tmux select-window -t ${sess}:supervisor >/dev/null 2>&1 || true; sudo -u ctf tmux attach -t ${sess} || sudo -u ctf tmux ls"
 }
 
 cmd_chat() {
@@ -2991,7 +3303,9 @@ cmd_chat() {
     exit 1
   fi
   resolve_interactive_ssh_target_required
-  vm_ssh_tty 'sudo -u ctf tmux attach -t ctf:supervisor || sudo -u ctf tmux ls'
+  local sess="${TMUX_SESSION%%:*}"
+  sess="${sess:-ctf}"
+  vm_ssh_tty "sudo -u ctf tmux attach -t ${sess}:supervisor || sudo -u ctf tmux ls"
 }
 
 cmd_shell() {
@@ -3063,7 +3377,13 @@ cmd_ui() {
   done
 
   require_cmd python3
-  python3 "${REPO_ROOT}/scripts/ctfvm_ui.py" --host "${host}" --port "${port}"
+  # platform-v2: launch the new clanker server (the old scripts/ctfvm_ui.py UI is
+  # retired). Set CTFVM_LEGACY_UI=1 to fall back to it.
+  if [[ "${CTFVM_LEGACY_UI:-0}" == "1" ]]; then
+    python3 "${REPO_ROOT}/scripts/ctfvm_ui.py" --host "${host}" --port "${port}"
+  else
+    ( cd "${REPO_ROOT}" && PYTHONPATH="${REPO_ROOT}" python3 -m clanker serve --host "${host}" --port "${port}" )
+  fi
 }
 
 cmd_mcp() {
@@ -3840,7 +4160,14 @@ cmd_destroy() {
       fi_inst="$(json_get_from_file instance "${f}" || true)"
       fi_zone="$(json_get_from_file zone "${f}" || true)"
       fi_proj="$(json_get_from_file project "${f}" || true)"
-      if [[ "${fi_inst}" == "${inst}" && ( -z "${fi_zone}" || -z "${zn}" || "${fi_zone}" == "${zn}" ) && ( -z "${fi_proj}" || -z "${proj}" || "${fi_proj}" == "${proj}" ) ]]; then
+      fi_parent="$(json_get_from_file parent_worker_id "${f}" || true)"
+      # Remove the run whose instance matches, AND any worker-hosted challenge
+      # whose parent_worker_id points at the worker we just destroyed: those
+      # challenges share the worker's VM and have a synthetic instance name of
+      # their own, so an instance-name match alone never sweeps them — they'd
+      # orphan in local state after `destroy --all` (UI keeps listing them).
+      if [[ "${fi_inst}" == "${inst}" && ( -z "${fi_zone}" || -z "${zn}" || "${fi_zone}" == "${zn}" ) && ( -z "${fi_proj}" || -z "${proj}" || "${fi_proj}" == "${proj}" ) ]] \
+         || [[ -n "${run_guess}" && -n "${fi_parent}" && "${fi_parent}" == "${run_guess}" ]]; then
         rm -f "${f}"
       fi
     done
@@ -3871,15 +4198,20 @@ cmd_destroy() {
         local_nat_script="$(json_get_from_file local_nat_script "${f}" || true)"
         if command -v sudo >/dev/null 2>&1; then
           if [[ -f "${local_config}" ]]; then
-            sudo wg-quick down "${local_config}" >/dev/null 2>&1 || true
+            sudo $(vpn_wgquick_cmd) down "${local_config}" >/dev/null 2>&1 || true
           elif [[ -n "${local_interface}" ]]; then
-            sudo wg-quick down "${local_interface}" >/dev/null 2>&1 || true
+            sudo $(vpn_wgquick_cmd) down "${local_interface}" >/dev/null 2>&1 || true
           fi
           if [[ -x "${local_nat_script}" ]]; then
             sudo "${local_nat_script}" down "${local_interface}" >/dev/null 2>&1 || true
           fi
         fi
-        rm -f "${local_config}" "${local_nat_script}" "${f}"
+        # These files can be root-owned (sudo vpn up). A plain `rm` then fails
+        # with EPERM and, under `set -e`, would abort destroy BEFORE the droplet
+        # is deleted — leaving paid VMs running. Try sudo (non-interactive so it
+        # never hangs), fall back to plain rm, and never let it fail the teardown.
+        sudo -n rm -f "${local_config}" "${local_nat_script}" "${f}" 2>/dev/null \
+          || rm -f "${local_config}" "${local_nat_script}" "${f}" 2>/dev/null || true
         rmdir "$(dirname "${f}")" >/dev/null 2>&1 || true
       fi
     done
@@ -3901,7 +4233,8 @@ cmd_destroy() {
     ZONE="${zn}"
     PROJECT="${proj}"
     IP="${inst_ip}"
-    cleanup_local_vpn_for_instance "${inst}" "${zn}" "${proj}"
+    # never let local VPN cleanup block the (paid) droplet deletion below
+    cleanup_local_vpn_for_instance "${inst}" "${zn}" "${proj}" || true
     if [[ "${no_wipe}" == "0" ]]; then
       echo "Wiping VM Codex session material before deletion: ${inst} (${zn}, $(provider_label "${provider}"))"
       gcloud_ssh "sudo -u ctf bash -lc '
@@ -4022,7 +4355,7 @@ cmd_destroy() {
     fi
   fi
 
-  cleanup_local_vpn_for_instance "${INSTANCE}" "${ZONE}" "${PROJECT}"
+  cleanup_local_vpn_for_instance "${INSTANCE}" "${ZONE}" "${PROJECT}" || true
 
   if [[ "${no_wipe}" == "0" ]]; then
     echo "Wiping VM Codex session material before deletion..."
@@ -4054,103 +4387,11 @@ cmd_destroy() {
 }
 
 cmd_cleanup_state() {
+  # Ported to the Python core in Phase 2 (strangler migration). The command
+  # body now lives in clanker/commands.py::cmd_cleanup_state; this shim keeps
+  # the `ctfvm cleanup-state` entrypoint and flag interface unchanged.
   ensure_state_dir
-
-  local dry_run="0"
-  local prune_non_running="0"
-  local removed=0
-  local kept=0
-  local checked=0
-  local promoted_current="0"
-
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-      --dry-run)
-        dry_run="1"; shift ;;
-      --prune-non-running)
-        prune_non_running="1"; shift ;;
-      *)
-        echo "Unknown argument: $1" >&2
-        exit 1 ;;
-    esac
-  done
-
-  cleanup_one_state_file() {
-    local file="$1"
-    local label="$2"
-    local inst zn proj provider status reason remove_now
-
-    [[ -f "${file}" ]] || return 0
-
-    provider="$(provider_from_state_file "${file}")"
-    inst="$(json_get_from_file instance "${file}" || true)"
-    zn="$(json_get_from_file zone "${file}" || true)"
-    proj="$(json_get_from_file project "${file}" || true)"
-    checked=$((checked + 1))
-
-    remove_now="0"
-    reason=""
-    if [[ -z "${inst}" || -z "${zn}" || -z "${proj}" ]]; then
-      remove_now="1"
-      reason="incomplete metadata"
-    else
-      if [[ "${provider}" == "gcp" ]] && ! command -v gcloud >/dev/null 2>&1; then
-        status="CLI_MISSING"
-      elif [[ "${provider}" == "digitalocean" ]] && ! command -v doctl >/dev/null 2>&1; then
-        status="CLI_MISSING"
-      else
-        status="$(instance_status_for "${provider}" "${inst}" "${zn}" "${proj}")"
-      fi
-      if [[ "${status}" == "CLI_MISSING" ]]; then
-        reason="provider CLI unavailable"
-      elif [[ -z "${status}" ]]; then
-        remove_now="1"
-        reason="instance not found"
-      elif [[ "${prune_non_running}" == "1" && "${status}" != "RUNNING" && "${status}" != "active" ]]; then
-        remove_now="1"
-        reason="instance status=${status}"
-      fi
-    fi
-
-    if [[ "${remove_now}" == "1" ]]; then
-      removed=$((removed + 1))
-      if [[ "${dry_run}" == "1" ]]; then
-        echo "[dry-run] remove ${label}: ${file} (${reason})"
-      else
-        rm -f "${file}"
-        echo "Removed ${label}: ${file} (${reason})"
-      fi
-    else
-      kept=$((kept + 1))
-    fi
-  }
-
-  local f
-  for f in "${RUNS_DIR}"/*.json; do
-    [[ -e "${f}" ]] || continue
-    cleanup_one_state_file "${f}" "run"
-  done
-  if [[ -f "${STATE_FILE}" ]]; then
-    cleanup_one_state_file "${STATE_FILE}" "current"
-  fi
-
-  if [[ "${dry_run}" == "0" && ! -f "${STATE_FILE}" ]]; then
-    local latest_run=""
-    latest_run="$(ls -1t "${RUNS_DIR}"/*.json 2>/dev/null | head -n1 || true)"
-    if [[ -n "${latest_run}" && -f "${latest_run}" ]]; then
-      cp "${latest_run}" "${STATE_FILE}"
-      promoted_current="1"
-      echo "Set current state from: ${latest_run}"
-    fi
-  fi
-
-  echo "Cleanup complete: checked=${checked}, removed=${removed}, kept=${kept}"
-  if [[ "${dry_run}" == "1" ]]; then
-    echo "Dry-run only: no files were changed."
-  fi
-  if [[ "${promoted_current}" == "1" ]]; then
-    echo "Current state was missing and has been restored from the newest remaining run."
-  fi
+  ( cd "${REPO_ROOT}" && PYTHONPATH="${REPO_ROOT}" python3 -m clanker cleanup-state "$@" )
 }
 
 usage() {

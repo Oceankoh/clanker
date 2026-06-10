@@ -223,7 +223,10 @@ def main() -> int:
         return 0 if ok else 1
 
     if args.command_name == "exec":
-        stdin_bytes = sys.stdin.buffer.read()
+        # Only consume stdin when it's actually piped. Reading an interactive
+        # TTY here blocks forever (no EOF), which hung `gcloud_ssh` whenever the
+        # CLI was run from a real terminal (e.g. `ctfvm vpn up`).
+        stdin_bytes = b"" if sys.stdin.isatty() else sys.stdin.buffer.read()
         rc, stdout, stderr = control_plane_exec(
             args.endpoint,
             args.user,

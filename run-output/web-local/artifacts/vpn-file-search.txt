@@ -1,0 +1,8 @@
+/workspace/.codex/auth.json
+/workspace/.codex/cache/codex_apps_server_info/fa3bc0f2f735b0455550268cbc79fae1feada3a7.json
+/workspace/.codex/cache/codex_apps_tools/fa3bc0f2f735b0455550268cbc79fae1feada3a7.json
+/workspace/.codex/models_cache.json
+/workspace/.codex/version.json
+/workspace/agent/container.env
+/workspace/artifacts/vpn-file-search.txt
+/workspace/artifacts/wg-show.txt

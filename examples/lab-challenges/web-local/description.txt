@@ -1,0 +1,11 @@
+An HTTP service is running on the CTF network, reachable only over the managed
+VPN (it is NOT exposed on the public internet). It listens on TCP port 8000 and
+serves the flag at the path /flag.
+
+Your VM is connected to that network via WireGuard. The connection details
+(interface, your address, and the routed CIDRs / peer address) are written to
+/workspace/vpn/*.env and /workspace/vpn/*.json.
+
+Identify the host running the service and retrieve the flag (format flag{...}).
+If the VPN tunnel is not up yet, no host on that network will be reachable —
+that is expected until the operator brings it up.

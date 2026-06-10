@@ -53,9 +53,11 @@ if ! command -v tmux >/dev/null 2>&1; then
   echo "tmux not found." >&2
   exit 1
 fi
-if ! command -v docker >/dev/null 2>&1; then
-  echo "docker not found." >&2
-  exit 1
+# Use the container if present, else resume the subagent directly on the host
+# (golden-image / worker path).
+USE_DOCKER=0
+if command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null | grep -q '^ctf-toolbox$'; then
+  USE_DOCKER=1
 fi
 
 STATE_DIR="${RUN_DIR}/.subagent-bridge"
@@ -159,7 +161,11 @@ cat > "${launcher}" <<SCRIPT
 #!/usr/bin/env bash
 set -euo pipefail
 echo "[\$(date -u +%Y-%m-%dT%H:%M:%SZ)] session ${session_name} starting for agent ${agent_id}" | tee -a "${log_file}"
-docker exec -it ctf-toolbox bash -c 'cd /workspace && codex resume ${agent_id} --no-alt-screen'
+if [[ "${USE_DOCKER}" == "1" ]]; then
+  docker exec -it ctf-toolbox bash -c 'cd /workspace && codex resume ${agent_id} --no-alt-screen'
+else
+  ( cd "${RUN_DIR}" && HOME="${RUN_DIR}" PATH="${CTFVM_NPM_PREFIX:-/opt/ctfvm/npm-global}/bin:\$PATH" codex resume ${agent_id} --no-alt-screen )
+fi
 rc=\$?
 echo "[\$(date -u +%Y-%m-%dT%H:%M:%SZ)] session ${session_name} exited rc=\${rc}" | tee -a "${log_file}"
 exit "\${rc}"

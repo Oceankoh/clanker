@@ -21,7 +21,7 @@ Precedence is:
 - saved toolbox metadata in `.ctfvm/config.json`
 - built-in script defaults
 
-The repo now includes a starter [.env](/Users/0c34n/Projects/codex-hackathon/.env) with the main knobs:
+The repo now includes a starter [.env](../.env) with the main knobs:
 - provider: `CTFVM_PROVIDER`
 - GCP project/zone/machine defaults: `CTFVM_GCP_*`
 - DigitalOcean region/size/SSH key defaults: `CTFVM_DO_*`
@@ -107,7 +107,9 @@ Load balancer:
 - not required for the current local-first setup
 - only worth adding if you later host the aggregator in the cloud and want a single stable entrypoint
 
-The higher-level design note lives in [HTTP_CONTROL_PLANE_ARCHITECTURE.md](/Users/0c34n/Projects/codex-hackathon/docs/HTTP_CONTROL_PLANE_ARCHITECTURE.md).
+The higher-level design note lives in [HTTP_CONTROL_PLANE_ARCHITECTURE.md](HTTP_CONTROL_PLANE_ARCHITECTURE.md).
+The platform-v2 refactor (the shared Python core under `clanker/`) is described in
+[ARCHITECTURE.md](ARCHITECTURE.md); the agent-backend layer in [AGENTS.md](AGENTS.md).
 
 ## Provider Architecture
 `ctfvm` keeps the shared orchestration flow in `scripts/ctfvm` and pushes cloud-specific lifecycle logic into provider modules under `scripts/lib/ctfvm/providers/`.
@@ -429,6 +431,22 @@ Operational notes:
 - Set `CTFVM_VPN=0` or pass `--no-vpn` to skip automatic VPN startup.
 - Set `CTFVM_VPN_CIDRS` or pass `--vpn-local-cidrs` to change the default routes.
 - Set `CTFVM_VPN_EGRESS_IF` if automatic local egress-interface detection picks the wrong interface.
+- Set `CTFVM_VPN_DNS` to resolve internal hostnames over the tunnel (see below).
+
+### Resolving internal hostnames (DNS)
+The VPN routes **IP traffic** for the configured CIDRs — it does **not** touch DNS. The VM keeps using its own (cloud) resolver, so it can reach LAN hosts by **IP** but can't resolve LAN-only **hostnames** (e.g. `target.ctf`). DHCP can't help here: WireGuard is a routed (L3) tunnel and carries no broadcast.
+
+This is handled by `scripts/vpn_dns_forwarder.py`, run on your laptop, bound to the tunnel's local gateway IP, with the agent's container resolver pointed at it. The VM then resolves **whatever this laptop can** — LAN/internal names, a loopback proxy (dnscrypt / a corporate client), and public names — because the forwarder runs where those resolvers are valid.
+
+```bash
+./scripts/ctfvm vpn --run-id <id> up                          # auto (default): forward via this laptop's resolvers
+CTFVM_VPN_DNS=10.0.0.53 ./scripts/ctfvm vpn --run-id <id> up   # pin explicit upstream(s), comma-separated
+CTFVM_VPN_DNS=off       ./scripts/ctfvm vpn --run-id <id> up   # disable
+```
+
+- **On by default** (`CTFVM_VPN_DNS=auto`). `vpn up` starts the forwarder and verifies it bound `:53`; `vpn down` stops it.
+- The web UI's **top bar shows a `DNS proxy <running>/<expected>` chip** (green ●, or red ⚠ if a forwarder isn't running) so a crashed/killed proxy is obvious.
+- The forwarder binds `:53` (privileged), which the already-sudo `vpn up` covers; the container resolver is set over the control plane, with a public fallback.
 
 ## Legacy TCP bridges
 `ctfvm bridge` remains available for older TCP-only workflows, but the preferred path is the managed VPN above.
@@ -493,6 +511,59 @@ The UI shows:
 Transport notes:
 - the UI prefers the VM HTTP control plane for snapshot polling and artifact access
 - older runs without control-plane metadata can still fall back to SSH-backed behavior
+
+## Python core (`clanker`) — platform-v2
+
+The shared Python core under `clanker/` is being grown alongside the bash CLI (a strangler
+migration — see [REFACTOR_PLAN.md](REFACTOR_PLAN.md)). Run it with `python -m clanker <cmd>` from the
+repo root. Available today:
+
+Configure everything in one place: copy [`.env.example`](../.env.example) to `.env` and edit. Every
+knob is `CTFVM_*` and listed there; `python -m clanker config show` prints the resolved value and where
+each came from (cli / .env / env / secret / config.json / default).
+
+```bash
+python -m clanker config show                          # effective config + provenance
+python -m clanker serve --host 127.0.0.1 --port 8765   # the new web UI / /api/v1 server
+python -m clanker runs [--json]                        # list known runs from .ctfvm/
+python -m clanker status --run-id <id>                 # one run's status
+python -m clanker cleanup-state [--dry-run] [--prune-non-running]
+python -m clanker fetch --run-id <id> [--out DIR]      # download findings/artifacts/logs
+python -m clanker sync-down --run-id <id> [--out DIR]
+python -m clanker auth claude [--token <t>] [--name <profile>]   # Claude OAuth token (global or per-profile)
+python -m clanker auth codex --name <profile> [--api-key K | --codex-home DIR]
+python -m clanker auth show                            # which backends have credentials
+python -m clanker config profiles                      # list credential profiles
+python -m clanker stage-agent --agent codex|claude-code --staging-dir DIR [--account <profile>]
+python -m clanker share                                # expose the UI via ngrok with a tokenized link
+python -m clanker render-agent-config --agent codex|claude-code
+```
+
+**Multiple subscriptions (credential profiles).** Store one credential set per account and select it
+per run. Both backends are supported per-account — Claude via a per-profile OAuth token, Codex via a
+per-profile `OPENAI_API_KEY` *or* a per-account `~/.codex` dir (its `auth.json` is portable). A profile
+overlays config just below CLI flags.
+
+```bash
+python -m clanker auth claude --name alice                 # alice's Claude subscription
+python -m clanker auth codex  --name bob --api-key sk-...   # bob's Codex API account
+python -m clanker auth codex  --name team --codex-home ~/.codex-team
+python -m clanker stage-agent --agent claude-code --account alice --staging-dir /tmp/run
+```
+
+**Sharing the UI (`clanker share`).** For temporary CTF VMs you can expose the dashboard via ngrok with
+a one-click tokenized link. `share` mints an ephemeral UI token (or uses `CTFVM_UI_TOKEN`), starts the
+**authed** server, launches ngrok, and prints `https://<public>/?token=<token>`. The `?token` sets a
+cookie on first open, so the rest of the session just works. With no token configured, `clanker serve`
+stays open and local-only (127.0.0.1) as before.
+
+`ctfvm cleanup-state` already delegates to the core. The UI server (`serve`) speaks the versioned
+`/api/v1/*` surface documented in [API.md](API.md). `start`/`destroy` and interactive break-glass
+(`attach`/`shell`/`vscode`) remain in the bash CLI until the provisioning port lands.
+
+The selectable **agent backend** (`--agent codex|claude-code`) is the platform-v2 headline: Claude Code
+authenticates via a `claude setup-token` OAuth token (stored by `clanker auth claude`), never by
+copying credential files. See [AGENTS.md](AGENTS.md).
 
 ## Security notes
 - No API keys are required.

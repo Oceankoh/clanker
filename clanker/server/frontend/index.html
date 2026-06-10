@@ -1,0 +1,810 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>clanker</title>
+<style>
+  :root { --bg:#0f1115; --panel:#171a21; --line:#2a2f3a; --fg:#e6e8ee; --muted:#9aa3b2;
+          --accent:#5b9dff; --ok:#3fb950; --warn:#d29922; --bad:#f85149; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--fg); }
+  header { display:flex; align-items:center; gap:12px; padding:10px 16px; border-bottom:1px solid var(--line); background:var(--panel); }
+  header h1 { font-size:16px; margin:0; letter-spacing:.5px; }
+  header .sp { flex:1; }
+  a { color:var(--accent); text-decoration:none; }
+  main { display:grid; grid-template-columns:320px 1fr; min-height:calc(100vh - 50px); }
+  #fleet { border-right:1px solid var(--line); overflow:auto; }
+  .run { padding:10px 16px; border-bottom:1px solid var(--line); cursor:pointer; }
+  .run:hover { background:#1d2230; }
+  .run.sel { background:#222a3d; }
+  .run .id { font-weight:600; }
+  .run .meta { color:var(--muted); font-size:12px; }
+  /* a worker host is a container, not a run — its header is not selectable */
+  .worker-head { padding:10px 16px; border-bottom:1px solid var(--line); }
+  .worker-head .id { font-weight:600; }
+  .worker-head .meta { color:var(--muted); font-size:12px; }
+  .worker-head:hover { background:#1d2230; }
+  .worker-head.sel { background:#222a3d; }
+  .worker-head a { color:var(--accent); }
+  .pill { display:inline-block; padding:1px 8px; border-radius:10px; font-size:11px; border:1px solid var(--line); }
+  .s-solved,.s-ready{color:var(--ok);border-color:var(--ok)} .s-blocked,.s-halted,.s-stopped,.s-failed{color:var(--bad);border-color:var(--bad)}
+  .s-stalled,.s-provisioning{color:var(--warn);border-color:var(--warn)} .s-progressing{color:var(--accent);border-color:var(--accent)}
+  #focus { padding:16px; overflow:auto; }
+  .muted { color:var(--muted); }
+  .tabs { display:flex; gap:6px; margin:12px 0; flex-wrap:wrap; }
+  .tab { padding:5px 12px; border:1px solid var(--line); border-radius:6px; cursor:pointer; background:var(--panel); }
+  .tab.active { border-color:var(--accent); color:var(--accent); }
+  pre { background:#0b0d11; border:1px solid var(--line); border-radius:6px; padding:12px; overflow:auto; max-height:52vh; white-space:pre-wrap; word-break:break-word; }
+  .row { display:flex; gap:8px; align-items:center; margin:8px 0; flex-wrap:wrap; }
+  input[type=text], input[type=number]{ flex:1; min-width:200px; background:#0b0d11; border:1px solid var(--line); color:var(--fg); padding:7px 10px; border-radius:6px; }
+  textarea{ width:100%; background:#0b0d11; border:1px solid var(--line); color:var(--fg); padding:8px 10px; border-radius:6px; font:13px/1.45 ui-monospace,Menlo,monospace; resize:vertical; }
+  textarea:focus,input:focus{ outline:none; border-color:var(--accent); }
+  label.mode{ display:inline-flex; align-items:center; gap:5px; cursor:pointer; }
+  .pane-out{ max-height:46vh; }
+  img.art{ max-width:100%; border:1px solid var(--line); border-radius:6px; }
+  .hint{ color:var(--muted); font-size:12px; }
+  .banner{ margin:6px 0; padding:8px 12px; border-radius:8px; border:1px solid var(--line); font-size:13px; line-height:1.6; }
+  .banner.warn{ border-color:var(--warn); color:var(--warn); background:rgba(210,153,34,.08); }
+  .banner.ok{ border-color:var(--ok); color:var(--ok); background:rgba(63,185,80,.08); }
+  .banner code{ color:var(--fg); background:#0b0d11; padding:1px 6px; border-radius:4px; }
+  .banner button{ margin-left:6px; }
+  .spawn{ max-width:640px; }
+  .spawn h2{ margin:0 0 4px; }
+  .spawn label{ display:block; margin:12px 0 4px; color:var(--muted); font-size:13px; }
+  .spawn input[type=text], .spawn input[type=number], .spawn select{ width:100%; background:#0b0d11; border:1px solid var(--line); color:var(--fg); padding:8px 10px; border-radius:6px; }
+  .spawn select{ height:36px; }
+  .spawn .cols{ display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px; }
+  .spawn .chk{ display:flex; align-items:center; gap:6px; margin:10px 0; color:var(--fg); }
+  .agent-badge{ font-size:11px; }
+  #transcript{ max-height:58vh; overflow:auto; padding-right:6px; }
+  .ev{ margin:8px 0; border-radius:8px; padding:8px 12px; border:1px solid var(--line); }
+  .ev .who{ font-size:11px; text-transform:uppercase; letter-spacing:.4px; color:var(--muted); margin-bottom:3px; }
+  .ev.user{ background:#16203a; border-color:#2a3a5e; }
+  .ev.assistant{ background:#161a22; }
+  .ev.reasoning{ background:transparent; border-style:dashed; color:var(--muted); font-style:italic; }
+  .ev.tool{ background:#0b0d11; }
+  .ev.tool .name{ color:var(--accent); font-weight:600; }
+  .ev.result{ background:#0b0d11; }
+  .ev.result.error{ border-color:var(--bad); }
+  .ev pre{ margin:4px 0 0; max-height:240px; background:transparent; border:0; padding:0; }
+  .ev .body{ white-space:pre-wrap; word-break:break-word; }
+  button { background:var(--panel); color:var(--fg); border:1px solid var(--line); padding:7px 12px; border-radius:6px; cursor:pointer; }
+  button:hover { border-color:var(--accent); }
+  button.primary { background:var(--accent); color:#06121f; border-color:var(--accent); font-weight:600; }
+  table { width:100%; border-collapse:collapse; }
+  td,th { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); font-size:13px; }
+  .feat { display:flex; gap:8px; flex-wrap:wrap; margin:8px 0; }
+  .feat .pill { background:#0b0d11; }
+  .err { color:var(--bad); }
+</style>
+</head>
+<body>
+<header>
+  <h1>clanker</h1>
+  <span class="pill" id="health">…</span>
+  <span class="sp"></span>
+  <button class="primary" onclick="showSpawn()">+ New run</button>
+  <button onclick="showSpawnWorkers()">+ Spawn workers</button>
+  <button onclick="refreshFleet(true)">↻ rediscover</button>
+</header>
+<main>
+  <div id="fleet"><div class="muted" style="padding:16px">loading…</div></div>
+  <div id="focus"><div class="muted">Select a run.</div></div>
+</main>
+<script>
+const $ = (s,el=document)=>el.querySelector(s);
+let STATE = { current:null, tab:'transcript', runs:[], snap:null, steerTarget:'ctf:supervisor', statusByRun:{}, updatedAt:{} };
+// "Ns ago" relative label for cached freshness
+function agoLabel(ts){ if(!ts) return ''; const s=Math.max(0,Math.round((Date.now()-ts)/1000));
+  return s<60?`${s}s ago`:s<3600?`${Math.round(s/60)}m ago`:`${Math.round(s/3600)}h ago`; }
+
+async function api(path, opts){
+  const r = await fetch('/api/v1'+path, opts);
+  const j = await r.json().catch(()=>({ok:false,error:'bad json',code:'PARSE'}));
+  if(!j.ok) throw new Error(j.error||('error '+r.status));
+  return j.data;
+}
+// api() with a hard timeout — for background polls, so a slow/unreachable run
+// aborts quickly instead of stalling the poll cycle.
+async function apiTimed(path, ms){
+  const ac = new AbortController(); const t = setTimeout(()=>ac.abort(), ms);
+  try{ return await api(path, {signal:ac.signal}); } finally{ clearTimeout(t); }
+}
+function statePill(cs){
+  if(!cs) return '';
+  return `<span class="pill s-${cs.state}">${cs.label||cs.state}</span>`;
+}
+async function refreshHealth(){
+  // /health is NOT under /api/v1, so fetch it directly (don't use api()).
+  try{
+    const r=await fetch('/health'); const j=await r.json();
+    if(!j.ok) throw 0;
+    const h=j.data; let s=`${h.known_runs} runs · ${h.active_jobs} jobs · up ${h.uptime_sec}s`;
+    const dp=h.dns_proxy;   // show a colored chip only when a tunnel expects a DNS forwarder
+    if(dp && dp.expected>0){
+      const ok = dp.running>=dp.expected;
+      s += ` · <span title="VPN DNS forwarder(s) running / expected" style="color:${ok?'var(--ok)':'var(--bad)'};font-weight:600">${ok?'● ':'⚠ '}DNS proxy ${dp.running}/${dp.expected}</span>`;
+    }
+    $('#health').innerHTML=s;
+  }catch(e){ $('#health').textContent='offline'; }
+}
+async function refreshFleet(force){
+  try{
+    const d = await api('/runs'+(force?'?force_discovery=true':''));
+    STATE.runs = d.runs;
+    renderFleet();
+    startFleetPoll();   // ensure the background per-run status poller is running
+  }catch(e){ $('#fleet').innerHTML='<div class="err" style="padding:16px">'+e.message+'</div>'; }
+}
+// render from cached STATE.runs + STATE.statusByRun (no network) so status pills
+// can refresh without re-fetching the whole fleet
+function runCard(r, nested){
+  const st = STATE.statusByRun[r.run_id] || r.challenge_state;
+  const upd = agoLabel(STATE.updatedAt[r.run_id]);
+  return `
+    <div class="run ${r.run_id===STATE.current?'sel':''}" style="${nested?'margin-left:14px':''}" onclick="selectRun('${r.run_id}')">
+      <div class="id">${esc(r.name)||r.run_id||r.instance} ${statePill(st)}</div>
+      <div class="meta">${r.name?esc(r.run_id)+' · ':''}${r.provider} · ${r.agent_backend} · ${r.runtime_status||'?'} · ${r.ip||'—'}${upd?' · <span class="muted">updated '+upd+'</span>':''}</div>
+    </div>`;
+}
+function renderFleet(){
+  const runs = STATE.runs||[];
+  const workers = runs.filter(r=>r.runner_type==='worker');
+  const childrenOf = id => runs.filter(r=>r.parent_worker_id===id);
+  const grouped = new Set();
+  workers.forEach(w=>{ grouped.add(w.run_id); childrenOf(w.run_id).forEach(c=>grouped.add(c.run_id)); });
+  let html = '';
+  html += workers.map(w=>{
+    const kids = childrenOf(w.run_id);
+    const wst = STATE.statusByRun[w.run_id] || w.challenge_state;
+    return `<div class="worker-group">
+      <div class="worker-head ${w.run_id===STATE.current?'sel':''}" onclick="selectRun('${w.run_id}')" style="cursor:pointer">
+        <div class="id">⬢ ${esc(w.name)||w.run_id} ${statePill(wst)} <span class="pill">${kids.length} challenge${kids.length!==1?'s':''}</span></div>
+        <div class="meta">${w.provider} · ${w.runtime_status||'?'} · ${w.ip||'—'}
+          <a href="#" onclick="addChallenge('${w.run_id}',event)">+ add</a></div>
+      </div>
+      ${kids.map(c=>runCard(c,true)).join('')}
+    </div>`;
+  }).join('');
+  const standalone = runs.filter(r=>!grouped.has(r.run_id));
+  html += standalone.map(r=>runCard(r,false)).join('');
+  if(!runs.length) html += '<div class="muted" style="padding:16px">no runs</div>';
+  $('#fleet').innerHTML = html;
+}
+// Spawn-workers form — rendered into #focus (consistent with New run / Add challenge).
+function showSpawnWorkers(){
+  STATE.current=null;
+  document.querySelectorAll('.run').forEach(el=>el.classList.remove('sel'));
+  $('#focus').innerHTML = `<div class="spawn">
+    <h2>Spawn workers</h2>
+    <div class="hint">Provisions empty worker VMs (golden image, no agent). Add challenges to them afterward. Blank fields fall back to your <code>.env</code> defaults.</div>
+    <div class="cols">
+      <div><label>Count</label><input type="number" id="sw-count" min="1" value="3"></div>
+      <div><label>Provider</label><select id="sw-provider" onchange="swProviderFields()"><option value="">(default)</option><option value="gcp">gcp</option><option value="digitalocean">digitalocean</option></select></div>
+    </div>
+    <div class="cols" id="sw-gcp-fields" style="display:none">
+      <div><label>Zone</label><input type="text" id="sw-zone" placeholder="(gcloud default)"></div>
+      <div><label>Project</label><input type="text" id="sw-project" placeholder="(gcloud default)"></div>
+      <div><label>Machine type</label><input type="text" id="sw-machine" placeholder="e2-standard-4"></div>
+    </div>
+    <div class="cols" id="sw-do-fields" style="display:none">
+      <div><label>Region</label><input type="text" id="sw-region" placeholder="(CTFVM_DO_REGION)"></div>
+      <div><label>Size slug</label><input type="text" id="sw-size" placeholder="s-4vcpu-8gb"></div>
+    </div>
+    <div class="row" style="margin-top:14px"><button class="primary" onclick="submitSpawnWorkers()">Spawn</button>
+      <button onclick="refreshFleet()">Cancel</button>
+      <span id="sw-result" class="hint"></span></div>
+  </div>`;
+  // prefill from the operator's RESOLVED config (.env/env/config), like New run —
+  // so fields show real values (e.g. your CTFVM_DO_SIZE_SLUG), not generic hints.
+  const set=(id,k)=>{ const el=$(id), d=DEFAULTS[k]; if(el && d && d.value) el.value=d.value; };
+  set('#sw-provider','provider');
+  set('#sw-region','do_region'); set('#sw-size','do_size_slug');
+  set('#sw-zone','gcp_zone'); set('#sw-project','gcp_project'); set('#sw-machine','gcp_machine_type');
+  swProviderFields();
+}
+function swProviderFields(){
+  const p=($('#sw-provider')||{}).value||'';
+  const g=$('#sw-gcp-fields'), d=$('#sw-do-fields');
+  if(g) g.style.display=(p==='gcp')?'grid':'none';
+  if(d) d.style.display=(p==='digitalocean')?'grid':'none';
+}
+async function submitSpawnWorkers(){
+  const r=$('#sw-result');
+  const count=parseInt(($('#sw-count').value||'').trim(),10);
+  if(!count || count<1){ r.innerHTML='<span class="err">count must be ≥ 1</span>'; return; }
+  const body={count}; const put=(k,v)=>{ v=(v||'').trim(); if(v) body[k]=v; };
+  const prov=$('#sw-provider').value; put('provider',prov);
+  if(prov==='digitalocean'){ put('zone',$('#sw-region').value); put('size_slug',$('#sw-size').value); }
+  else if(prov==='gcp'){ put('zone',$('#sw-zone').value); put('project',$('#sw-project').value); put('machine_type',$('#sw-machine').value); }
+  r.textContent='submitting…';
+  try{
+    const d=await api('/workers',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    r.innerHTML='spawning '+(d.job_ids||[]).length+' worker(s)…';
+    setTimeout(()=>refreshFleet(true),1500);
+  }catch(e){ r.innerHTML='<span class="err">'+esc(e.message)+'</span>'; }
+}
+function addChallenge(workerId, ev){
+  if(ev){ ev.stopPropagation(); ev.preventDefault(); }
+  showAddChallenge(workerId);   // render the in-panel form (consistent with New run)
+}
+// Add-challenge form — rendered into #focus like showSpawn(), not a chain of prompts.
+function showAddChallenge(workerId){
+  STATE.current=null;
+  document.querySelectorAll('.run').forEach(el=>el.classList.remove('sel'));
+  const w = (STATE.runs||[]).find(r=>r.run_id===workerId) || {name:workerId};
+  const opts = (AGENTS.length?AGENTS:[{name:'codex',display_name:'Codex',authenticated:true}])
+    .map(a=>`<option value="${a.name}">${esc(a.display_name)}${a.authenticated?'':' — needs auth'}</option>`).join('');
+  const propts = PROFILES.map(p=>`<option value="${esc(p.name)}">${esc(p.name)}${p.backend?' · '+esc(p.backend):''}</option>`).join('');
+  $('#focus').innerHTML = `<div class="spawn">
+    <h2>Add challenge → ${esc(w.name)||esc(workerId)}</h2>
+    <div class="hint">Uploads a challenge folder to this worker and launches an agent for it in its own session. The folder is tarred in your browser; its contents land in the challenge workspace. Credentials are injected per challenge at launch.</div>
+    <input type="hidden" id="ac-worker" value="${esc(workerId)}">
+    <label>Challenge folder</label>
+    <div class="row"><input type="file" id="ac-folder" webkitdirectory onchange="acFolderPicked()">
+      <span id="ac-folderinfo" class="hint"></span></div>
+    <label>Name</label>
+    <input type="text" id="ac-name" placeholder="(defaults to the folder name)">
+    <div class="cols">
+      <div><label>Agent</label><select id="ac-agent"><option value="">(worker default)</option>${opts}</select></div>
+      <div><label>Account / profile</label><select id="ac-account"><option value="">(default credentials)</option>${propts}</select></div>
+    </div>
+    <div class="cols">
+      <div><label>Model</label><input type="text" id="ac-model" placeholder="(backend default)"></div>
+      <div><label>Reasoning effort</label><input type="text" id="ac-effort" placeholder="xhigh (codex only)"></div>
+    </div>
+    <label>Flag format <span class="hint">(optional — folded into the prompt)</span></label>
+    <input type="text" id="ac-flagfmt" placeholder="e.g. flag{...}">
+    <label>Description</label>
+    <textarea id="ac-desc" rows="2" placeholder="what the challenge is (auto-filled from description.txt in the folder)"></textarea>
+    <label>Ideas / hints</label>
+    <textarea id="ac-ideas" rows="2" placeholder="optional starting ideas (auto-filled from ideas.txt)"></textarea>
+    <div class="row" style="margin-top:14px"><button class="primary" onclick="submitAddChallenge()">Add challenge</button>
+      <button onclick="refreshFleet()">Cancel</button>
+      <span id="ac-result" class="hint"></span></div>
+  </div>`;
+  const set=(id,k)=>{ const el=$(id), d=DEFAULTS[k]; if(el && d && d.value) el.value=d.value; };
+  set('#ac-agent','agent_backend'); set('#ac-effort','reasoning_effort');
+}
+async function acFolderPicked(){
+  const inp=$('#ac-folder'), info=$('#ac-folderinfo'), nm=$('#ac-name');
+  if(!inp || !inp.files.length){ if(info) info.textContent=''; return; }
+  const top=(inp.files[0].webkitRelativePath||'').split('/')[0]||'challenge';
+  if(info) info.textContent=inp.files.length+' files · '+top;
+  if(nm && !nm.value.trim()) nm.value=top;
+  // mirror a normal run: pull description.txt / ideas.txt out of the folder
+  const find = base => [...inp.files].find(f=>(f.webkitRelativePath||f.name).endsWith('/'+base) || f.name===base);
+  const fill = async (base, el) => { const f=find(base); if(f && el && !el.value.trim()) el.value=(await f.text()).trim(); };
+  await fill('description.txt', $('#ac-desc'));
+  await fill('ideas.txt', $('#ac-ideas'));
+}
+async function submitAddChallenge(){
+  const inp=$('#ac-folder'), r=$('#ac-result');
+  if(!inp || !inp.files.length){ r.innerHTML='<span class="err">choose a challenge folder</span>'; return; }
+  const workerId=$('#ac-worker').value;
+  const top=(inp.files[0].webkitRelativePath||'').split('/')[0]||'challenge';
+  const name=$('#ac-name').value.trim()||top;
+  const q=new URLSearchParams({name, agent_backend:$('#ac-agent').value, description:$('#ac-desc').value,
+    ideas:$('#ac-ideas').value, flag_format:$('#ac-flagfmt').value,
+    model:$('#ac-model').value, reasoning_effort:$('#ac-effort').value, account:$('#ac-account').value}).toString();
+  r.textContent='packing + uploading…';
+  try{
+    const entries=await _tarFromInput(inp, true);   // strip top folder -> files land in challenge/
+    const tar=buildTar(entries);
+    const d=await api('/workers/'+encodeURIComponent(workerId)+'/challenges?'+q,{method:'POST',body:tar});
+    r.innerHTML='added <b>'+esc(d.slug)+'</b> ('+esc(d.tmux_session)+') — '+entries.length+' files';
+    await refreshFleet(true);
+    selectRun(d.run_id);                            // focus the new challenge
+  }catch(e){ r.innerHTML='<span class="err">'+esc(e.message)+'</span>'; }
+}
+// Fleet status poller: each cycle refreshes all non-focused runs in PARALLEL
+// (not one-at-a-time), each with a hard timeout, so a slow/unreachable run
+// can't stall the others. Pills render instantly from /runs' cached state; this
+// just keeps them fresh + stamps "updated Ns ago". The focused run is skipped —
+// its own refresh keeps it fresher.
+const FLEET_POLL_MS = 10000, POLL_TIMEOUT_MS = 8000;
+const _TERMINAL_STATES = new Set(['solved','failed','stopped']);
+let _pollTimer = null;
+async function pollFleetTick(){
+  const runs = STATE.runs.filter(r=>{
+    if(r.run_id===STATE.current) return false;
+    const cs = STATE.statusByRun[r.run_id] || r.challenge_state;
+    if(cs && _TERMINAL_STATES.has(cs.state)) return false;
+    return true;
+  });
+  await Promise.allSettled(runs.map(async r=>{
+    try{
+      const s = await apiTimed('/runs/'+encodeURIComponent(r.run_id)+'?include_artifacts=false', POLL_TIMEOUT_MS);
+      if(s.challenge_state){ STATE.statusByRun[r.run_id]=s.challenge_state; }
+      if(s.runtime_status){ r.runtime_status=s.runtime_status; }
+    }catch(e){ /* timed out / unreachable — keep last cached pill */ }
+    STATE.updatedAt[r.run_id]=Date.now();
+  }));
+  renderFleet();
+  _pollTimer = setTimeout(pollFleetTick, FLEET_POLL_MS);
+}
+function startFleetPoll(){ if(_pollTimer===null){ _pollTimer=0; pollFleetTick(); } }
+async function selectRun(id){
+  STATE.current=id; STATE.snap=null; STATE.steerTarget='';
+  renderFleet();
+  $('#focus').innerHTML='<div class="muted">Loading run…</div>';
+  await refreshFocus();
+}
+
+let AGENTS = [];
+let PROFILES = [];
+let DEFAULTS = {};
+async function loadAgents(){ try{ const d=await api('/agents'); AGENTS=d.agents||[]; }catch(e){ AGENTS=[]; } }
+async function loadProfiles(){ try{ const d=await api('/profiles'); PROFILES=d.profiles||[]; }catch(e){ PROFILES=[]; } }
+async function loadDefaults(){ try{ const d=await api('/spawn-defaults'); DEFAULTS=d.defaults||{}; }catch(e){ DEFAULTS={}; } }
+// pre-fill the spawn form with the effective default for every field (the
+// value that would actually be used), incl. built-in schema defaults
+function prefillSpawn(){
+  const set=(id,k)=>{ const el=$(id), d=DEFAULTS[k]; if(el && d && d.value) el.value=d.value; };
+  set('#sp-agent','agent_backend'); set('#sp-model','model'); set('#sp-effort','reasoning_effort'); set('#sp-provider','provider');
+  set('#sp-zone','gcp_zone'); set('#sp-project','gcp_project'); set('#sp-machine','gcp_machine_type');
+  set('#sp-region','do_region'); set('#sp-size','do_size_slug');
+  try{ const ff=$('#sp-flagfmt'); if(ff) ff.value=localStorage.getItem('clanker.flag_format')||''; }catch(e){}
+  set('#sp-variant','toolbox_variant'); set('#sp-timeout','timeout_min');
+  providerFields();
+}
+function showSpawn(){
+  STATE.current=null;
+  document.querySelectorAll('.run').forEach(el=>el.classList.remove('sel'));
+  const opts = (AGENTS.length?AGENTS:[{name:'codex',display_name:'Codex',authenticated:true}])
+    .map(a=>`<option value="${a.name}">${esc(a.display_name)}${a.authenticated?'':' — needs auth'}</option>`).join('');
+  const propts = PROFILES.map(p=>`<option value="${esc(p.name)}">${esc(p.name)}${p.backend?' · '+esc(p.backend):''}</option>`).join('');
+  $('#focus').innerHTML = `<div class="spawn">
+    <h2>New run(s)</h2>
+    <div class="hint">Spawns a VM and starts the agent. Tick the box to deploy a whole folder of challenges (one VM per subfolder). Blank fields fall back to your <code>.env</code> defaults.</div>
+    <label>Challenge path (a folder)</label>
+    <div class="row"><input type="text" id="sp-dir" placeholder="/path/to/challenge">
+      <button onclick="browseDir()">Browse…</button></div>
+    <label class="chk"><input type="checkbox" id="sp-batch" onchange="$('#sp-dirhint').textContent=this.checked?'each immediate subfolder becomes its own run':''"> deploy folder — each immediate subfolder is its own run</label>
+    <div class="hint" id="sp-dirhint"></div>
+    <div class="cols">
+      <div><label>Provider</label><select id="sp-provider" onchange="providerFields()"><option value="">(default)</option><option value="gcp">gcp</option><option value="digitalocean">digitalocean</option></select></div>
+      <div><label>Agent</label><select id="sp-agent"><option value="">(default)</option>${opts}</select></div>
+      <div><label>Model</label><input type="text" id="sp-model" placeholder="(backend default)"></div>
+      <div><label>Reasoning effort</label><input type="text" id="sp-effort" placeholder="xhigh (codex only)"></div>
+    </div>
+    <div class="cols">
+      <div><label>Account / profile</label><select id="sp-account"><option value="">(default credentials)</option>${propts}</select></div>
+      <div style="grid-column:span 2"><div class="hint" style="margin-top:28px">Profiles are created with <code>clanker auth codex/claude --name &lt;who&gt;</code>; pick one to run as that subscription.</div></div>
+    </div>
+    <label>Flag format <span class="hint">(optional — folded into the prompt so the agent knows the shape; remembered for next time)</span></label>
+    <input type="text" id="sp-flagfmt" placeholder="e.g. flag{...}  or  CTF{[0-9a-f]+}">
+    <label>Description</label>
+    <textarea id="sp-desc" rows="2" placeholder="what the challenge is (defaults to description.txt in the folder)"></textarea>
+    <label>Ideas / hints</label>
+    <textarea id="sp-ideas" rows="2" placeholder="optional starting ideas (defaults to ideas.txt)"></textarea>
+    <!-- GCP-only fields -->
+    <div class="cols" id="sp-gcp-fields">
+      <div><label>Zone</label><input type="text" id="sp-zone" placeholder="(gcloud default, e.g. us-central1-a)"></div>
+      <div><label>Project</label><input type="text" id="sp-project" placeholder="(gcloud default)"></div>
+      <div><label>Machine type</label><input type="text" id="sp-machine" placeholder="e2-standard-4"></div>
+    </div>
+    <!-- DigitalOcean-only fields -->
+    <div class="cols" id="sp-do-fields">
+      <div><label>Region</label><input type="text" id="sp-region" placeholder="(CTFVM_DO_REGION, e.g. nyc3)"></div>
+      <div><label>Size slug</label><input type="text" id="sp-size" placeholder="s-4vcpu-8gb"></div>
+    </div>
+    <div class="cols">
+      <div><label>Toolbox variant</label><input type="text" id="sp-variant" placeholder="(default)"></div>
+      <div><label>Timeout (min)</label><input type="text" id="sp-timeout" placeholder="(default)"></div>
+    </div>
+    <label class="chk"><input type="checkbox" id="sp-novpn"> --no-vpn (skip VPN for this run; otherwise it follows <code>CTFVM_VPN</code>. The tunnel is always brought up afterward as a local step: <code>ctfvm vpn --run-id &lt;id&gt; up</code>)</label>
+    <label class="chk"><input type="checkbox" id="sp-noauthsync"> skip Codex session sync — use API key / profile creds instead (--no-auth-sync)</label>
+    <label class="chk"><input type="checkbox" id="sp-uselocal"> use local toolbox image archive (--use-local-image; tick this if you built one with <code>ctfvm image build-local</code> and haven't pushed to a registry)</label>
+    <div class="row" style="margin-top:14px"><button class="primary" onclick="submitSpawn()">Spawn</button>
+      <span id="sp-result" class="hint"></span></div>
+    <div class="hint" style="margin-top:18px">Recent spawn jobs:</div>
+    <div id="sp-jobs" class="hint">—</div>
+  </div>`;
+  prefillSpawn();
+  loadJobs();
+}
+async function loadJobs(){
+  try{ const d=await api('/jobs');
+    $('#sp-jobs').innerHTML = (d.jobs||[]).slice(0,8).map(j=>`${j.job_id} · ${j.state}${j.run_id?' · '+j.run_id:''}`).join('<br>') || '(none yet)';
+  }catch(e){}
+}
+async function browseDir(){
+  const r=$('#sp-result'); r.textContent='opening Finder…';
+  try{
+    const d=await api('/select-directory',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({batch:$('#sp-batch').checked})});
+    if(d.canceled){ r.textContent=''; return; }
+    $('#sp-dir').value=d.path||'';
+    if(d.description && !$('#sp-desc').value.trim()) $('#sp-desc').value=d.description;
+    r.textContent='';
+  }catch(e){ r.innerHTML='<span class="err">'+esc(e.message)+'</span>'; }
+}
+// show only the fields that matter for the chosen provider
+//   gcp:          zone + project + machine_type
+//   digitalocean: region (-> --zone) + size_slug
+function providerFields(){
+  const p=($('#sp-provider')||{}).value||'';
+  const g=$('#sp-gcp-fields'), d=$('#sp-do-fields');
+  if(g) g.style.display = (p==='gcp')?'grid':'none';
+  if(d) d.style.display = (p==='digitalocean')?'grid':'none';
+}
+async function submitSpawn(){
+  const dir=$('#sp-dir').value.trim(); if(!dir){ $('#sp-result').innerHTML='<span class="err">challenge path required</span>'; return; }
+  const body = $('#sp-batch').checked ? {challenge_root:dir} : {challenge_dir:dir};
+  const put=(k,v)=>{ v=(v||'').trim(); if(v) body[k]=v; };
+  const prov=$('#sp-provider').value;
+  put('provider',prov); put('agent_backend',$('#sp-agent').value);
+  put('model',$('#sp-model').value); put('reasoning_effort',$('#sp-effort').value); put('account',$('#sp-account').value);
+  put('flag_format',$('#sp-flagfmt').value);
+  try{ localStorage.setItem('clanker.flag_format', $('#sp-flagfmt').value.trim()); }catch(e){}
+  put('description',$('#sp-desc').value); put('ideas',$('#sp-ideas').value);
+  if(prov==='digitalocean'){ put('zone',$('#sp-region').value); put('size_slug',$('#sp-size').value); }
+  else if(prov==='gcp'){ put('zone',$('#sp-zone').value); put('project',$('#sp-project').value); put('machine_type',$('#sp-machine').value); }
+  put('toolbox_variant',$('#sp-variant').value); put('timeout_min',$('#sp-timeout').value);
+  if($('#sp-novpn').checked) body.no_vpn=true;
+  if($('#sp-noauthsync').checked) body.no_auth_sync=true;
+  if($('#sp-uselocal').checked) body.use_local_image=true;
+  $('#sp-result').textContent='spawning…';
+  try{
+    const d=await api('/runs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    $('#sp-result').innerHTML=`started ${d.job_ids.length} run(s): ${esc(d.job_ids.join(', '))}`;
+    setTimeout(()=>{ loadJobs(); refreshFleet(); }, 1500);
+  }catch(e){ $('#sp-result').innerHTML='<span class="err">'+esc(e.message)+'</span>'; }
+}
+function setTab(t){ STATE.tab=t; renderFocus(); }
+
+function cacheFocusStatus(){
+  if(STATE.current) STATE.updatedAt[STATE.current]=Date.now();
+  if(STATE.snap && STATE.snap.challenge_state){
+    STATE.statusByRun[STATE.current]=STATE.snap.challenge_state;
+  }
+  renderFleet();
+}
+async function refreshFocus(force){
+  if(!STATE.current){ $('#focus').innerHTML='<div class="muted">Select a run.</div>'; return; }
+  // The partial-update fast paths below are ONLY safe when the focus pane is
+  // already rendered for THIS run — otherwise switching runs would update just
+  // the panes/transcript and leave the header (name, tab, state) showing the
+  // previous run. On a run switch (or forced refresh) always do a full render.
+  const sameRun = !force && STATE.focusRenderedFor === STATE.current;
+  // on the transcript tab, refresh just the chat (keeps the shell + scroll)
+  if(sameRun && STATE.tab==='transcript' && STATE.snap){ loadTranscript(); return; }
+  try{ STATE.snap = await api('/runs/'+encodeURIComponent(STATE.current)); }
+  catch(e){ $('#focus').innerHTML='<div class="err">'+e.message+'</div>'; return; }
+  cacheFocusStatus();
+  // on the panes tab, if the steer box exists and the pane set is unchanged,
+  // update only the pane outputs — never re-render (would clobber what you're
+  // typing + steal focus + reset the mode radio).
+  if(sameRun && STATE.tab==='panes' && $('#steer') && paneSetMatches()){ updatePaneOutputs(); return; }
+  renderFocus();
+  if(STATE.tab==='transcript') loadTranscript();
+}
+// after an action (status/steer), always re-fetch + re-render the whole focus
+// (incl. the header) regardless of the active tab, so changes are visible.
+async function fullRefresh(){
+  if(!STATE.current) return;
+  try{ STATE.snap = await api('/runs/'+encodeURIComponent(STATE.current)); }
+  catch(e){ return; }
+  cacheFocusStatus();
+  renderFocus();
+  if(STATE.tab==='transcript') loadTranscript();
+}
+// like refreshFocus but used right after a steer action: on the panes tab it
+// updates pane outputs in place (keeps your cursor in the steer box)
+async function softRefresh(){
+  if(!STATE.current) return;
+  try{ STATE.snap = await api('/runs/'+encodeURIComponent(STATE.current)); }catch(e){ return; }
+  cacheFocusStatus();
+  if(STATE.tab==='panes' && $('#steer') && paneSetMatches()){ updatePaneOutputs(); }
+  else { renderFocus(); if(STATE.tab==='transcript') loadTranscript(); }
+}
+function paneSetMatches(){
+  const cur=[...document.querySelectorAll('.pane-out')].map(e=>e.getAttribute('data-target'));
+  const want=((STATE.snap||{}).panes||[]).map(p=>p.target);
+  return cur.length===want.length && cur.every((t,i)=>t===want[i]);
+}
+function updatePaneOutputs(){
+  ((STATE.snap||{}).panes||[]).forEach(p=>{
+    const el=document.querySelector('.pane-out[data-target="'+p.target+'"]');
+    if(el){ const atBottom = el.scrollHeight-el.scrollTop-el.clientHeight < 40;
+      el.textContent=p.output; if(atBottom) el.scrollTop=el.scrollHeight; }
+  });
+}
+function esc(s){ return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+
+function renderFocus(){
+  const s = STATE.snap; if(!s){ return; }
+  STATE.focusRenderedFor = STATE.current;  // the focus pane now reflects this run (gates fast paths)
+  // preserve any in-progress input across a re-render (steer text/target/mode,
+  // status note) so a periodic refresh never eats what you're typing
+  const keep={}; ['#steer','#steer-target','#status-note'].forEach(id=>{const el=$(id); if(el) keep[id]=el.value;});
+  const tabs = ['transcript','panes','findings','supervisor','artifacts','subagents'];
+  const tabBar = tabs.map(t=>`<div class="tab ${STATE.tab===t?'active':''}" onclick="setTab('${t}')">${t}</div>`).join('');
+  let body='';
+  if(STATE.tab==='transcript'){
+    body = `<div class="hint">parsed from the agent's session transcript (${esc(s.agent_backend)})</div>`
+         + `<div id="transcript" class="muted">loading transcript…</div>`;
+  } else if(STATE.tab==='panes'){
+    const panes = s.panes||[];
+    body = panes.map(p=>`<div class="muted">${p.target} — ${esc(p.window_name)}${p.active?' *':''}</div><pre class="pane-out" data-target="${esc(p.target)}">${esc(p.output)}</pre>`).join('') || '<div class="muted">no panes</div>';
+    body += steerBox(panes);
+  } else if(STATE.tab==='findings'){ body=`<pre>${esc(s.findings_tail)||'(empty)'}</pre>`; }
+  else if(STATE.tab==='supervisor'){ body=`<pre>${esc(s.supervisor_tail)||'(empty)'}</pre>`; }
+  else if(STATE.tab==='artifacts'){
+    const a=s.artifacts||[];
+    body = '<table><tr><th>path</th><th>size</th><th>mtime</th><th></th></tr>'+
+      a.map(x=>`<tr><td><a href="#" onclick="preview('${encodeURIComponent(x.relpath)}');return false">${esc(x.relpath)}</a></td>
+        <td>${x.size_bytes}</td><td class="muted">${x.mtime}</td>
+        <td><a href="/api/v1/runs/${encodeURIComponent(s.run_id)}/artifacts/${encodeURIComponent(x.relpath)}/download">⬇</a></td></tr>`).join('')+'</table>'
+      + `<div class="row"><a href="/api/v1/runs/${encodeURIComponent(s.run_id)}/bundle"><button>Download bundle (.tar.gz)</button></a></div>`
+      + `<div class="row" style="margin-top:10px"><input type="file" id="upfile">
+         <input type="text" id="updest" placeholder="remote name (default: filename)" style="width:220px">
+         <button onclick="uploadFile()">Upload file</button>
+         <button onclick="uploadFolder()">Upload folder (tar)</button></div>
+         <div id="upmsg" class="muted"></div>`
+      + `<div id="artprev" class="muted">click an artifact to preview</div>`;
+  } else if(STATE.tab==='subagents'){
+    const sub=s.subagents||[];
+    body = (sub.map(x=>`<div class="row"><span class="muted">${x.tmux_target} — ${esc(x.label)}</span> <span class="pill">${x.state}</span>
+      <button onclick="steerSubagent('${esc(x.tmux_target)}')">steer →</button></div>`).join('') || '<div class="muted">no subagents</div>')
+      + (sub.length?'<div class="hint">“steer →” opens the panes tab targeting that subagent.</div>':'');
+  }
+  const cs=s.challenge_state;
+  $('#focus').innerHTML = `
+    <div class="row"><h2 style="margin:0">${esc(s.name)||s.run_id} ${statePill(cs)}</h2>
+      <span class="muted">${s.name?esc(s.run_id)+' · ':''}${s.provider} · ${s.agent_backend} · ${s.runtime_status}</span></div>
+    ${cs?`<div class="muted">${esc(cs.summary)}${(cs.last_activity_label && cs.last_activity_label!=='unknown')?' — '+esc(cs.last_activity_label):''}</div>`:''}
+    ${(s.error && !(cs&&cs.state==='provisioning'))?`<div class="err">⚠ ${esc(s.error)}</div>`:''}
+    ${(s.provisioning&&s.provisioning.length)?
+      `<div class="hint" style="margin-top:8px">Provisioning (control plane not up yet):</div>`
+      +s.provisioning.map(p=>`<div class="muted">${p.job_id} · ${p.state}</div><pre class="pane-out">${esc(p.output_tail)||'(no output yet)'}</pre>`).join('')
+      :''}
+    <div id="vpnrow"></div>
+    <div id="attachrow"></div>
+    <div class="row">
+      <button onclick="setStatus('solved')">Mark solved</button>
+      <button onclick="setStatus('blocked')">Mark blocked</button>
+      <button onclick="clearStatus()">Clear status</button>
+      <input type="text" id="status-note" placeholder="optional note (attached to the status)"></div>
+    <div class="tabs">${tabBar}</div>${body}`;
+  // restore preserved inputs
+  Object.entries(keep).forEach(([id,v])=>{const el=$(id); if(el && v!=null) el.value=v;});
+  if(STATE.tab==='transcript') loadTranscript();
+  loadVpnStatus();
+  loadAttachInfo();
+  // keep terminal panes scrolled to the latest output
+  document.querySelectorAll('.pane-out').forEach(el=>{ el.scrollTop = el.scrollHeight; });
+}
+// VPN bring-up is a LOCAL privileged step (sudo on this machine), so the UI
+// reports status + the exact command rather than doing it itself. The warning
+// is gated on run readiness so a still-provisioning run isn't flagged as if VPN
+// were the problem (it can only be brought up once the run is reachable).
+async function loadVpnStatus(){
+  const row=$('#vpnrow'); if(!row||!STATE.current) return;
+  // a run with no control plane yet (provisioning) reports an error in its snapshot
+  const ready = !(STATE.snap && STATE.snap.error);
+  try{
+    const d=await api('/runs/'+encodeURIComponent(STATE.current)+'/vpn');
+    if(d.connected){
+      row.innerHTML='<div class="banner ok">✓ VPN connected · '+esc(d.interface||'wg')
+        +' → '+esc((d.cidrs||[]).join(', ')||'(no routed CIDRs)')+'</div>';
+      return;
+    }
+    // run started with --no-vpn: don't nag, it's intentional
+    if(d.requested===false){
+      row.innerHTML='<div class="hint">VPN disabled for this run (--no-vpn). Fine for local-only challenges.</div>';
+      return;
+    }
+    if(!ready){
+      row.innerHTML='<div class="hint">VPN will be needed for networked challenges — bring it up once the run is reachable (it can\'t come up until then).</div>';
+      return;
+    }
+    const cmdJs=(d.up_command||'').replace(/'/g,"\\'");
+    row.innerHTML='<div class="banner warn">⚠ <b>VPN required but not connected.</b> This run was started with the '
+      +'VPN on, so the agent can\'t reach the challenge\'s networked services until you bring the tunnel up '
+      +'(local-only challenges will still solve without it). On <i>this machine</i> (needs sudo):'
+      +'<br><code>'+esc(d.up_command)+'</code>'
+      +'<button onclick="navigator.clipboard.writeText(\''+cmdJs+'\')">copy</button>'
+      +'<br><span class="muted">Or bring up every active run in one go: </span><code>./scripts/ctfvm vpn up</code>'
+      +'</div>';
+  }catch(e){ row.innerHTML=''; }
+}
+async function loadAttachInfo(){
+  const row=$('#attachrow'); if(!row||!STATE.current) return;
+  try{
+    const d=await api('/runs/'+encodeURIComponent(STATE.current)+'/attach');
+    if(!d.ip){ row.innerHTML=''; return; }
+    const copyBtn=(cmd)=>{
+      const js=cmd.replace(/'/g,"\\'");
+      return `<button onclick="navigator.clipboard.writeText('${js}')">copy</button>`;
+    };
+    let html='<div class="banner" style="border-color:var(--muted);background:rgba(154,163,178,.05)">';
+    html+='<b>Terminal</b> — use the <a href="#" onclick="setTab(\'panes\');return false">panes tab</a> to view output and steer (no SSH needed). ';
+    html+='Break-glass SSH:';
+    html+=' <code>'+esc(d.attach_cmd)+'</code> '+copyBtn(d.attach_cmd);
+    html+=' · <code>'+esc(d.shell_cmd)+'</code> '+copyBtn(d.shell_cmd);
+    html+='</div>';
+    row.innerHTML=html;
+  }catch(e){ row.innerHTML=''; }
+}
+
+async function loadTranscript(){
+  const el=$('#transcript'); if(!el) return;
+  try{
+    const d=await api('/runs/'+encodeURIComponent(STATE.current)+'/transcript');
+    if(!d.events.length){ el.className='muted'; el.textContent='(no transcript yet — the agent has not produced session output)'; return; }
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
+    el.className='';
+    el.innerHTML = d.events.map(renderEvent).join('');
+    if(atBottom) el.scrollTop = el.scrollHeight;
+  }catch(e){ el.className='err'; el.textContent=e.message; }
+}
+function renderEvent(e){
+  if(e.kind==='message')
+    return `<div class="ev ${e.role==='user'?'user':'assistant'}"><div class="who">${esc(e.role)}</div><div class="body">${esc(e.text)}</div></div>`;
+  if(e.kind==='reasoning')
+    return `<div class="ev reasoning"><div class="who">thinking</div><div class="body">${esc(e.text)}</div></div>`;
+  if(e.kind==='tool_call')
+    return `<div class="ev tool"><div class="who">tool · <span class="name">${esc(e.tool)}</span></div><pre class="body">${esc(e.tool_input)}</pre></div>`;
+  if(e.kind==='tool_result')
+    return `<div class="ev result ${e.is_error?'error':''}"><div class="who">result${e.is_error?' · error':''}</div><pre class="body">${esc(e.text)}</pre></div>`;
+  return '';
+}
+// the steer box: a target picker (supervisor + any subagent pane) + key buttons; sends to the agent pane
+function steerBox(panes){
+  // Default to THIS run's supervisor session (ctf:supervisor for normal runs,
+  // <slug>:supervisor for a challenge on a worker) — not a hardcoded ctf:.
+  const sup = (STATE.snap && STATE.snap.tmux_session) || 'ctf:supervisor';
+  const tgt = STATE.steerTarget || sup;
+  const seen = new Set();
+  let opts = '';
+  (panes||[]).forEach(p=>{ if(seen.has(p.target)) return; seen.add(p.target);
+    const sub = (p.session||'').startsWith('subagent-');
+    opts += `<option value="${esc(p.target)}"${p.target===tgt?' selected':''}>${esc(p.target)}${sub?' · subagent':''}</option>`; });
+  if(!seen.has(sup)) opts = `<option value="${esc(sup)}"${tgt===sup?' selected':''}>${esc(sup)}</option>`+opts;
+  opts += `<option value="__custom__">custom…</option>`;
+  return `
+    <textarea id="steer" rows="2" onkeydown="steerKey(event)" placeholder="message to the agent — Enter to send · Shift+Enter for newline"></textarea>
+    <div class="row">
+      <label class="mode">send to&nbsp;<select id="steer-target" onchange="onSteerTargetChange()">${opts}</select></label>
+      <input type="text" id="steer-target-custom" placeholder="session:window (e.g. ctf:1)" style="display:none;max-width:220px">
+      <span class="hint">typed into the agent pane. If the agent is mid-turn, its own CLI queues your message and runs it after the current turn.</span>
+    </div>
+    <div class="row">
+      <button class="primary" onclick="submitSteer()">Send</button>
+      <button onclick="key('C-c')">Ctrl-C</button>
+      <button onclick="keys(['1','Enter'])">Trust (1↵)</button>
+      <button onclick="keys(['y','Enter'])">Approve (y)</button>
+      <button onclick="keys(['n','Enter'])">Deny (n)</button>
+      <button onclick="key('Escape')">Esc</button>
+    </div>`;
+}
+function onSteerTargetChange(){ const c=$('#steer-target-custom'); if(c) c.style.display=($('#steer-target').value==='__custom__')?'inline-block':'none'; }
+function steerTarget(){
+  const el=$('#steer-target');
+  if(el && el.value==='__custom__'){ return ($('#steer-target-custom')||{}).value || 'ctf:supervisor'; }
+  return (el&&el.value) || STATE.steerTarget || (STATE.snap && STATE.snap.tmux_session) || 'ctf:supervisor';
+}
+function steerSubagent(t){ STATE.steerTarget=t; STATE.tab='panes'; renderFocus(); }
+// Build a ustar tar archive in the browser (no deps) from [{name, bytes:Uint8Array}].
+// The control plane extracts it with Python tarfile (traversal-guarded).
+function _tarHeader(name, size, type){
+  const buf=new Uint8Array(512), enc=new TextEncoder();
+  const put=(s,off,len)=>{ const b=enc.encode(s); for(let i=0;i<Math.min(b.length,len);i++) buf[off+i]=b[i]; };
+  let prefix='';
+  if(name.length>100){                       // ustar: split long paths into prefix + name
+    const slash=name.indexOf('/', name.length-100);
+    if(slash>-1 && slash<=155){ prefix=name.slice(0,slash); name=name.slice(slash+1); }
+    else name=name.slice(name.length-100);
+  }
+  put(name,0,100);
+  put('0000644\0',100,8); put('0000000\0',108,8); put('0000000\0',116,8);   // mode/uid/gid
+  put(size.toString(8).padStart(11,'0')+'\0',124,12);                        // size
+  put(Math.floor(Date.now()/1000).toString(8).padStart(11,'0')+'\0',136,12); // mtime
+  for(let i=148;i<156;i++) buf[i]=0x20;       // chksum field = spaces while summing
+  buf[156]=enc.encode(type)[0];               // typeflag ('0' file)
+  put('ustar\0',257,6); put('00',263,2); put(prefix,345,155);
+  let sum=0; for(let i=0;i<512;i++) sum+=buf[i];
+  put(sum.toString(8).padStart(6,'0')+'\0 ',148,8);
+  return buf;
+}
+function buildTar(entries){
+  const blocks=[];
+  for(const e of entries){
+    blocks.push(_tarHeader(e.name, e.bytes.length, '0'));
+    blocks.push(e.bytes);
+    const pad=(512-(e.bytes.length%512))%512; if(pad) blocks.push(new Uint8Array(pad));
+  }
+  blocks.push(new Uint8Array(1024));          // two zero blocks = EOF
+  return new Blob(blocks, {type:'application/x-tar'});
+}
+async function _tarFromInput(input, stripTop){
+  const entries=[];
+  for(const f of input.files){
+    let rel=f.webkitRelativePath||f.name;
+    if(stripTop && rel.includes('/')) rel=rel.split('/').slice(1).join('/');
+    if(rel) entries.push({name:rel, bytes:new Uint8Array(await f.arrayBuffer())});
+  }
+  return entries;
+}
+async function uploadFolder(){
+  const inp=document.createElement('input'); inp.type='file'; inp.webkitdirectory=true;
+  inp.onchange=async()=>{
+    if(!inp.files.length) return;
+    const msg=$('#upmsg'); if(msg){ msg.className='muted'; msg.textContent='packing '+inp.files.length+' files…'; }
+    try{
+      const entries=await _tarFromInput(inp, false);   // keep the top folder under the workspace
+      const tar=buildTar(entries);
+      const d=await api('/runs/'+encodeURIComponent(STATE.current)+'/upload-tar?dest=.', {method:'POST', body:tar});
+      if(msg) msg.textContent='uploaded folder → '+d.path+' ('+entries.length+' files, '+tar.size+' bytes)';
+      softRefresh();
+    }catch(e){ if(msg){ msg.className='err'; msg.textContent=e.message; } }
+  };
+  inp.click();
+}
+async function uploadFile(){
+  const f=$('#upfile'), msg=$('#upmsg');
+  if(!f || !f.files || !f.files.length){ if(msg){msg.className='muted'; msg.textContent='choose a file first';} return; }
+  const file=f.files[0];
+  const dest=(($('#updest')&&$('#updest').value.trim())||file.name);
+  if(msg){ msg.className='muted'; msg.textContent='uploading '+file.name+'…'; }
+  try{
+    const d=await api('/runs/'+encodeURIComponent(STATE.current)+'/upload?path='+encodeURIComponent(dest),
+                      {method:'POST', body:file});
+    if(msg) msg.textContent='uploaded → '+d.path+' ('+d.size_bytes+' bytes)';
+    softRefresh();
+  }catch(e){ if(msg){ msg.className='err'; msg.textContent=e.message; } }
+}
+function post(path, payload){ return api('/runs/'+encodeURIComponent(STATE.current)+path,
+  {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload||{})}); }
+
+function steerKey(ev){ if(ev.key==='Enter' && !ev.shiftKey){ ev.preventDefault(); submitSteer(); } }
+async function submitSteer(){
+  const ta=$('#steer'); const t=ta.value; if(!t.trim()) return;
+  STATE.steerTarget = steerTarget();
+  try{
+    await post('/panes/send', {target:steerTarget(), text:t, press_enter:true});
+    ta.value=''; ta.focus(); setTimeout(softRefresh, 500);
+  }catch(e){ alert(e.message); }
+}
+async function keys(ks){ const target=steerTarget(); STATE.steerTarget=target; try{ await post('/panes/keys', {target, keys:ks}); setTimeout(softRefresh,500);}catch(e){alert(e.message);} }
+async function key(k){ keys([k]); }
+async function setStatus(st){ const note=($('#status-note')||{}).value||''; try{ await post('/status', {state:st, note}); fullRefresh();}catch(e){alert(e.message);} }
+async function clearStatus(){ try{ await api('/runs/'+encodeURIComponent(STATE.current)+'/status',{method:'DELETE'}); fullRefresh();}catch(e){alert(e.message);} }
+
+function hexDump(b64){
+  let bin; try{ bin=atob(b64); }catch(e){ return '(unprintable)'; }
+  const n=Math.min(bin.length, 4096); let out='';
+  for(let i=0;i<n;i+=16){
+    const row=bin.slice(i,i+16);
+    let hex='',asc='';
+    for(let j=0;j<16;j++){ if(j<row.length){ const c=row.charCodeAt(j); hex+=c.toString(16).padStart(2,'0')+' '; asc+=(c>=32&&c<127)?row[j]:'.'; } else hex+='   '; }
+    out+=i.toString(16).padStart(8,'0')+'  '+hex+' '+asc+'\n';
+  }
+  if(bin.length>n) out+='… (truncated)\n';
+  return out;
+}
+async function preview(rel){
+  const el=$('#artprev'); el.className=''; el.textContent='…';
+  try{
+    const d=await api('/runs/'+encodeURIComponent(STATE.current)+'/artifacts/'+rel);
+    if(d.is_image && d.image_data_url){ el.innerHTML=`<img class="art" src="${d.image_data_url}">`; }
+    else if(d.is_text){ el.innerHTML=`<div class="row"><span class="hint">${esc(d.mime)} · ${d.size}B${d.truncated?' · truncated':''}</span><button onclick="navigator.clipboard.writeText(this.parentNode.nextSibling.textContent)">copy</button></div><pre>${esc(d.content)}</pre>`; }
+    else { el.innerHTML=`<div class="hint">${esc(d.mime)} · ${d.size}B · hex</div><pre>${esc(hexDump(d.b64||''))}</pre>`; }
+  }catch(e){ el.textContent=e.message; }
+}
+
+const _params = new URLSearchParams(location.search);
+const _initialRun = _params.get('run');
+refreshHealth();
+Promise.all([loadAgents(), loadProfiles(), loadDefaults()]).then(()=>{ if(_params.get('new')) showSpawn(); });
+refreshFleet().then(()=>{ if(_initialRun) selectRun(_initialRun); });
+setInterval(refreshHealth, 30000);
+setInterval(refreshFleet, 60000);
+let _focusBusy=false;
+setInterval(async()=>{ if(!STATE.current||_focusBusy) return; _focusBusy=true; try{ await refreshFocus(); }finally{ _focusBusy=false; } }, 8000);
+</script>
+</body>
+</html>

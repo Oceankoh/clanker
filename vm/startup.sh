@@ -7,6 +7,10 @@ export DEBIAN_FRONTEND=noninteractive
 CTFVM_PROVIDER="__CTFVM_PROVIDER__"
 TIMEOUT_MIN="__CTFVM_TIMEOUT_MIN__"
 
+# Disable unattended-upgrades: a systemd/openssh/libpam upgrade mid-run kills
+# tmux sessions (and the agents inside them) via service restarts.
+systemctl disable --now unattended-upgrades apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+
 if ! command -v python3 >/dev/null 2>&1; then
   apt-get update
   apt-get install -y python3
@@ -68,9 +72,11 @@ install_codex_prefix() {
 
   if npm install -g --prefix "${prefix}" @openai/codex; then
     echo "Installed Codex into ${prefix} from @openai/codex."
+  elif npm install -g --prefix "${prefix}" codex-cli; then
+    echo "Installed Codex into ${prefix} from codex-cli (fallback)."
   else
-    echo "Falling back to codex-cli package install."
-    npm install -g --prefix "${prefix}" codex-cli
+    echo "Both @openai/codex and codex-cli installs failed." >&2
+    exit 1
   fi
 
   if [[ ! -x "${prefix}/bin/codex" ]]; then
@@ -79,7 +85,20 @@ install_codex_prefix() {
   fi
 }
 
+# Claude Code CLI is installed best-effort alongside Codex so a run can select
+# either agent backend. Absence is non-fatal: a Codex run does not need it, and
+# supervisor.sh reports clearly if the selected agent's CLI is missing.
+install_claude_prefix() {
+  local prefix="/opt/ctfvm/npm-global"
+  if npm install -g --prefix "${prefix}" @anthropic-ai/claude-code; then
+    echo "Installed Claude Code into ${prefix}."
+  else
+    echo "Claude Code CLI install failed (non-fatal; Codex runs unaffected)." >&2
+  fi
+}
+
 install_codex_prefix
+install_claude_prefix
 
 systemctl enable --now docker
 usermod -aG docker ctf

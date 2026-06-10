@@ -1,0 +1,6 @@
+total 20
+drwxr-xr-x 2 ctf ctf 4096 Jun  4 05:33 .
+drwxrwxr-x 9 ctf ctf 4096 Jun  7 12:43 ..
+-rw-r--r-- 1 ctf ctf   31 Jun  4 05:33 .flag
+-rw-r--r-- 1 ctf ctf  176 Jun  4 05:33 description.txt
+-rw-r--r-- 1 ctf ctf   73 Jun  4 05:33 ideas.txt

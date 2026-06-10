@@ -1,0 +1,10 @@
+- Read the VPN details first: `cat /workspace/vpn/*.json /workspace/vpn/*.env`.
+  Look for the peer/gateway address and the routed CIDR(s).
+- The service runs on the operator's host (the VPN peer), port 8000. Try it
+  directly:  `curl -s http://<peer-ip>:8000/flag`
+- If you don't know the exact host, sweep the routed CIDR for an open :8000,
+  e.g.  `for h in $(seq 1 254); do curl -s -m1 http://10.x.y.$h:8000/flag & done; wait`
+  (use the actual CIDR from the VPN config).
+- Confirm basic reachability first: `ping` the peer, or `nc -vz <peer-ip> 8000`.
+- If nothing is reachable at all, the tunnel is probably down — note that in
+  findings.md and stop (the operator must run `ctfvm vpn ... up`).

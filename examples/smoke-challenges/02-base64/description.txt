@@ -1,0 +1,1 @@
+`message.txt` holds a base64-encoded secret. Decode it to reveal the flag (format flag{...}).

